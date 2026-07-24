@@ -14,6 +14,20 @@ export function SkuPage({ state, actions }: { state: AppState; actions: AppActio
         <button className="btn btn-primary" style={{ marginLeft: 'auto' }} onClick={v.openAddSku}><i className="ph ph-plus" />เพิ่มสินค้าใหม่</button>
       </div>
 
+      {v.skusLoading && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: 13, marginBottom: 14, borderRadius: 10, background: 'var(--color-surface)', fontSize: 13, color: 'var(--color-neutral-400)' }}>
+          <i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังโหลดข้อมูลสินค้าจาก Google Sheet...
+        </div>
+      )}
+      {v.skusError && (
+        <div style={{ display: 'flex', gap: 9, padding: 13, marginBottom: 14, borderRadius: 10, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 13 }}>
+          <i className="ph ph-warning-fill" style={{ flex: 'none' }} />โหลดข้อมูลสินค้าไม่สำเร็จ: {v.skusError}
+        </div>
+      )}
+      {!v.skusLoading && !v.skusError && (
+        <div style={{ fontSize: 12, color: 'var(--color-neutral-500)', marginBottom: 10 }}>โหลดจาก Google Sheet แล้ว {v.skuCount} รายการ</div>
+      )}
+
       <div className="card elev-sm" style={{ padding: '4px 14px 8px' }}>
         <table className="table">
           <thead>
@@ -21,7 +35,7 @@ export function SkuPage({ state, actions }: { state: AppState; actions: AppActio
           </thead>
           <tbody>
             {v.skuRows.map((s) => (
-              <tr key={s.id}>
+              <tr key={s.key}>
                 <td style={{ fontWeight: 500, fontVariantNumeric: 'tabular-nums' }}>{s.id}</td>
                 <td style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--color-neutral-400)', fontSize: 13 }}>{s.barcode}</td>
                 <td>{s.name}</td>
@@ -54,8 +68,8 @@ export function SkuPage({ state, actions }: { state: AppState; actions: AppActio
                 <div className="field"><label>สต็อก</label><input className="input" inputMode="numeric" value={v.skuF.stock} onChange={(e) => v.onFormStock(e.target.value)} /></div>
                 <div className="field"><label>สถานะ</label>
                   <select className="input" value={v.skuF.status} onChange={(e) => v.onFormStatus(e.target.value as 'active' | 'inactive')}>
-                    <option value="active">ใช้งาน</option>
-                    <option value="inactive">ปิดการขาย</option>
+                    <option value="active">มีสินค้า</option>
+                    <option value="inactive">หมด</option>
                   </select>
                 </div>
               </div>

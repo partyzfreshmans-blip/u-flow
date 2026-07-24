@@ -61,7 +61,11 @@ export interface GrnLine {
 export type SkuStatus = 'active' | 'inactive';
 
 export interface Sku {
+  /** Unique key for this row — may not match displayId when the source data
+   * repeats the same catalog SKU ID across packaging-variant rows. */
   id: string;
+  /** The catalog SKU ID as shown to users; can repeat across rows. */
+  displayId: string;
   barcode: string;
   name: string;
   unit: string;
@@ -83,6 +87,15 @@ export interface Customer {
   term: number;
   status: CustomerStatus;
   conds: string[];
+  /** Coordinates as reported by the Unii API — can be wrong; see customerOverrides. */
+  lat: number | null;
+  lng: number | null;
+}
+
+export interface LatLngOverride {
+  lat: number;
+  lng: number;
+  updatedAt: string;
 }
 
 export type RouteKey = 'dashboard' | 'route' | 'pick' | 'cod' | 'promo' | 'grn' | 'sku' | 'customer' | 'settings';

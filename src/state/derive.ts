@@ -280,7 +280,7 @@ export function computeGrn(state: AppState, actions: AppActions) {
   const lk = state.grnLookup;
   const lookupFound = !!(lk && !('notFound' in lk));
   const lookupMissing = !!(lk && 'notFound' in lk);
-  const found = lk && !('notFound' in lk) ? lk : { name: '', id: '', unit: '', barcode: '', stock: 0, status: 'active' as const };
+  const found = lk && !('notFound' in lk) ? { name: lk.name, id: lk.displayId, unit: lk.unit } : { name: '', id: '', unit: '' };
 
   const grnLines = state.grnLines.map((l, i) => ({
     ...l,
@@ -337,16 +337,17 @@ export function computeGrn(state: AppState, actions: AppActions) {
 
 // ---------- SKU MASTER ----------
 const skuStatusMeta: Record<string, [string, Parameters<typeof badgeStyle>[0]]> = {
-  active: ['ใช้งาน', 'ok'],
-  inactive: ['ปิดการขาย', 'neutral'],
+  active: ['มีสินค้า', 'ok'],
+  inactive: ['หมด', 'neutral'],
 };
 
 export function computeSku(state: AppState, actions: AppActions) {
   const sq = state.skuQ.trim().toLowerCase();
   const skuRows = state.skus
-    .filter((s) => !sq || s.id.toLowerCase().includes(sq) || s.barcode.includes(sq) || s.name.toLowerCase().includes(sq))
+    .filter((s) => !sq || s.displayId.toLowerCase().includes(sq) || s.barcode.includes(sq) || s.name.toLowerCase().includes(sq))
     .map((s) => ({
-      id: s.id,
+      key: s.id,
+      id: s.displayId,
       barcode: s.barcode,
       name: s.name,
       unit: s.unit,
@@ -358,6 +359,9 @@ export function computeSku(state: AppState, actions: AppActions) {
     }));
 
   return {
+    skusLoading: state.skusLoading,
+    skusError: state.skusError,
+    skuCount: state.skus.length,
     skuQ: state.skuQ,
     onSkuSearch: (v: string) => actions.patch({ skuQ: v }),
     skuRows,
@@ -365,7 +369,7 @@ export function computeSku(state: AppState, actions: AppActions) {
     skuIsEdit: state.skuModal === 'edit',
     skuModalTitle: state.skuModal === 'edit' ? 'แก้ไขสินค้า' : 'เพิ่มสินค้าใหม่',
     skuF: state.skuF,
-    openAddSku: () => actions.patch({ skuModal: 'add', skuF: { id: nextSkuIdLocal(state), barcode: '', name: '', unit: 'ชิ้น', stock: '', status: 'active' } }),
+    openAddSku: () => actions.patch({ skuModal: 'add', skuF: { key: '', id: nextSkuIdLocal(state), barcode: '', name: '', unit: 'ชิ้น', stock: '', status: 'active' } }),
     closeSku: () => actions.patch({ skuModal: null }),
     onFormId: (v: string) => actions.patch({ skuF: { ...state.skuF, id: v } }),
     onFormBarcode: (v: string) => actions.patch({ skuF: { ...state.skuF, barcode: v.replace(/[^0-9]/g, '') } }),
@@ -406,6 +410,9 @@ export function computeCustomer(state: AppState, actions: AppActions) {
       const over = isCredit && c.balance > c.limit;
       const near = isCredit && pct >= 90;
       const bar = over ? 'var(--st-bad-fg)' : near ? 'var(--st-warn-fg)' : 'var(--color-accent)';
+      const override = state.customerOverrides[c.id];
+      const lat = override?.lat ?? c.lat;
+      const lng = override?.lng ?? c.lng;
       return {
         id: c.id,
         name: c.name,
@@ -425,11 +432,26 @@ export function computeCustomer(state: AppState, actions: AppActions) {
         noConds: (c.conds || []).length === 0,
         stLabel: custStatusMeta[c.status][0],
         stStyle: badgeStyle(custStatusMeta[c.status][1]),
+        locText: lat != null && lng != null ? `${lat.toFixed(5)}, ${lng.toFixed(5)}` : 'ไม่มีพิกัด',
+        hasOverride: !!override,
         edit: () => actions.openEditCust(c),
       };
     });
 
+  const saveCust = () => {
+    actions.saveCust();
+    const lat = Number(state.custF.lat);
+    const lng = Number(state.custF.lng);
+    if (state.custF.lat.trim() !== '' && state.custF.lng.trim() !== '' && !Number.isNaN(lat) && !Number.isNaN(lng)) {
+      actions.setCustomerOverride(state.custF.id, lat, lng);
+    }
+  };
+
+  const editingCustomer = state.customers.find((c) => c.id === state.custF.id) ?? null;
+
   return {
+    customersLoading: state.customersLoading,
+    customersError: state.customersError,
     custQ: state.custQ,
     onCustSearch: (v: string) => actions.patch({ custQ: v }),
     custRows,
@@ -439,10 +461,16 @@ export function computeCustomer(state: AppState, actions: AppActions) {
     custF: state.custF,
     custPayCod: state.custF.pay === 'cod',
     custPayCredit: state.custF.pay === 'credit',
+    custOriginalLatLngText:
+      state.custModal === 'edit' && editingCustomer && editingCustomer.lat != null && editingCustomer.lng != null
+        ? `พิกัดจาก Unii: ${editingCustomer.lat.toFixed(5)}, ${editingCustomer.lng.toFixed(5)}`
+        : state.custModal === 'edit'
+          ? 'พิกัดจาก Unii: ไม่มีข้อมูล'
+          : '',
     openAddCust: () =>
       actions.patch({
         custModal: 'add',
-        custF: { id: nextCustIdLocal(state), name: '', addr: '', route: 'A', pay: 'cod', limit: '', balance: '', term: '', status: 'active', conds: '' },
+        custF: { id: nextCustIdLocal(state), name: '', addr: '', route: 'A', pay: 'cod', limit: '', balance: '', term: '', status: 'active', conds: '', lat: '', lng: '' },
       }),
     closeCust: () => actions.patch({ custModal: null }),
     onCFId: (v: string) => actions.patch({ custF: { ...state.custF, id: v } }),
@@ -454,9 +482,11 @@ export function computeCustomer(state: AppState, actions: AppActions) {
     onCFLimit: (v: string) => actions.patch({ custF: { ...state.custF, limit: v.replace(/[^0-9]/g, '') } }),
     onCFBalance: (v: string) => actions.patch({ custF: { ...state.custF, balance: v.replace(/[^0-9]/g, '') } }),
     onCFTerm: (v: string) => actions.patch({ custF: { ...state.custF, term: v.replace(/[^0-9]/g, '') } }),
+    onCFLat: (v: string) => actions.patch({ custF: { ...state.custF, lat: v.replace(/[^0-9.\-]/g, '') } }),
+    onCFLng: (v: string) => actions.patch({ custF: { ...state.custF, lng: v.replace(/[^0-9.\-]/g, '') } }),
     setPayCod: () => actions.patch({ custF: { ...state.custF, pay: 'cod' } }),
     setPayCredit: () => actions.patch({ custF: { ...state.custF, pay: 'credit' } }),
-    saveCust: () => actions.saveCust(),
+    saveCust,
   };
 }
 

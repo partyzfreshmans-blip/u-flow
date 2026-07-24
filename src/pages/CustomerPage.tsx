@@ -14,12 +14,23 @@ export function CustomerPage({ state, actions }: { state: AppState; actions: App
         <button className="btn btn-primary" style={{ marginLeft: 'auto' }} onClick={v.openAddCust}><i className="ph ph-plus" />เพิ่มลูกค้าใหม่</button>
       </div>
 
+      {v.customersLoading && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: 13, marginBottom: 14, borderRadius: 10, background: 'var(--color-surface)', fontSize: 13, color: 'var(--color-neutral-400)' }}>
+          <i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังโหลดรายชื่อลูกค้าจาก Unii...
+        </div>
+      )}
+      {v.customersError && (
+        <div style={{ display: 'flex', gap: 9, padding: 13, marginBottom: 14, borderRadius: 10, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 13 }}>
+          <i className="ph ph-warning-fill" style={{ flex: 'none' }} />โหลดรายชื่อลูกค้าจาก Unii ไม่สำเร็จ: {v.customersError} — กำลังแสดงข้อมูลตัวอย่างแทน
+        </div>
+      )}
+
       <div className="card elev-sm" style={{ padding: '4px 14px 8px' }}>
         <table className="table">
           <thead>
             <tr>
               <th>รหัส</th><th>ร้านค้า</th><th>เส้นทาง</th><th>การชำระ</th><th style={{ textAlign: 'right' }}>วงเงิน / ยอดค้าง</th>
-              <th style={{ textAlign: 'center' }}>เทอม</th><th>เงื่อนไขพิเศษ</th><th>สถานะ</th><th></th>
+              <th style={{ textAlign: 'center' }}>เทอม</th><th>เงื่อนไขพิเศษ</th><th>พิกัด</th><th>สถานะ</th><th></th>
             </tr>
           </thead>
           <tbody>
@@ -46,6 +57,10 @@ export function CustomerPage({ state, actions }: { state: AppState; actions: App
                     {c.conds.map((cd, i) => <span key={i} style={cd.style}>{cd.text}</span>)}
                     {c.noConds && <span style={{ fontSize: 11.5, color: 'var(--color-neutral-600)' }}>ไม่มีเงื่อนไขพิเศษ</span>}
                   </div>
+                </td>
+                <td style={{ fontSize: 11.5, fontVariantNumeric: 'tabular-nums', color: 'var(--color-neutral-400)' }}>
+                  {c.locText}
+                  {c.hasOverride && <div style={{ fontSize: 10, color: 'var(--st-warn-fg)' }}><i className="ph ph-map-pin" style={{ marginRight: 3 }} />แก้ไขแล้ว</div>}
                 </td>
                 <td><span style={c.stStyle}>{c.stLabel}</span></td>
                 <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={c.edit}>แก้ไข</button></td>
@@ -87,6 +102,16 @@ export function CustomerPage({ state, actions }: { state: AppState; actions: App
               )}
               <div className="field"><label>เงื่อนไข / ข้อจำกัดพิเศษ (บรรทัดละ 1 ข้อ)</label>
                 <textarea className="input" style={{ minHeight: 74 }} value={v.custF.conds} onChange={(e) => v.onCFConds(e.target.value)} placeholder={'เช่น ส่งก่อน 12:00\nเก็บเงินสดเท่านั้น'} />
+              </div>
+              <div className="field">
+                <label>พิกัด (lat, lng) {v.custIsEdit && <span style={{ fontWeight: 400, color: 'var(--color-neutral-500)' }}>— {v.custOriginalLatLngText}</span>}</label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 11 }}>
+                  <input className="input" placeholder="Latitude" value={v.custF.lat} onChange={(e) => v.onCFLat(e.target.value)} />
+                  <input className="input" placeholder="Longitude" value={v.custF.lng} onChange={(e) => v.onCFLng(e.target.value)} />
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--color-neutral-500)', marginTop: 4 }}>
+                  <i className="ph ph-info" style={{ marginRight: 4 }} />ถ้าพิกัดจาก Unii ผิด แก้ที่นี่ได้ — ค่าที่แก้จะถูกเก็บแยกไว้ในเครื่องนี้ และใช้แทนค่าเดิมจาก API
+                </div>
               </div>
               <div className="field"><label>สถานะบัญชี</label>
                 <select className="input" value={v.custF.status} onChange={(e) => v.onCFStatus(e.target.value as 'active' | 'hold')}>

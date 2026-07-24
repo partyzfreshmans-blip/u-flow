@@ -1,14 +1,19 @@
-import { useMemo, useReducer } from 'react';
+import { useEffect, useMemo, useReducer } from 'react';
 import {
   initialCustomers,
   initialGrnLog,
   initialLanes,
-  initialSkus,
   promos as initialPromos,
 } from '../data/mockData';
-import type { Customer, GrnLine, Promo, RouteKey, Sku } from '../data/types';
+import { loadAllOverrides, saveOverride } from '../data/sources/customerOverrides';
+import { fetchSkusFromSheet } from '../data/sources/skuSheet';
+import { fetchCustomersFromUnii } from '../data/sources/uniiCustomers';
+import type { Customer, GrnLine, LatLngOverride, Promo, RouteKey, Sku } from '../data/types';
 
 export interface SkuForm {
+  /** Hidden unique key of the row being edited; empty when adding a new SKU. */
+  key: string;
+  /** User-facing SKU ID shown/edited in the form. */
   id: string;
   barcode: string;
   name: string;
@@ -28,6 +33,8 @@ export interface CustForm {
   term: string;
   status: 'active' | 'hold';
   conds: string;
+  lat: string;
+  lng: string;
 }
 
 export interface AppState {
@@ -77,14 +84,20 @@ export interface AppState {
   grnLines: GrnLine[];
   grnLog: typeof initialGrnLog;
 
-  // SKU master
+  // SKU master (loaded from the Google Sheet at runtime)
   skus: Sku[];
+  skusLoading: boolean;
+  skusError: string | null;
   skuQ: string;
   skuModal: 'add' | 'edit' | null;
   skuF: SkuForm;
 
-  // customer master
+  // customer master (loaded from the Unii API; lat/lng corrections layer on
+  // top from a local IndexedDB override store — see customerOverrides.ts)
   customers: Customer[];
+  customersLoading: boolean;
+  customersError: string | null;
+  customerOverrides: Record<string, LatLngOverride>;
   custQ: string;
   custModal: 'add' | 'edit' | null;
   custF: CustForm;
@@ -130,14 +143,19 @@ export const initialState: AppState = {
   grnNewUnit: 'ชิ้น',
   grnLines: [],
   grnLog: initialGrnLog,
-  skus: initialSkus,
+  skus: [],
+  skusLoading: true,
+  skusError: null,
   skuQ: '',
   skuModal: null,
-  skuF: { id: '', barcode: '', name: '', unit: 'ชิ้น', stock: '', status: 'active' },
+  skuF: { key: '', id: '', barcode: '', name: '', unit: 'ชิ้น', stock: '', status: 'active' },
   customers: initialCustomers,
+  customersLoading: true,
+  customersError: null,
+  customerOverrides: {},
   custQ: '',
   custModal: null,
-  custF: { id: '', name: '', addr: '', route: 'A', pay: 'cod', limit: '', balance: '', term: '', status: 'active', conds: '' },
+  custF: { id: '', name: '', addr: '', route: 'A', pay: 'cod', limit: '', balance: '', term: '', status: 'active', conds: '', lat: '', lng: '' },
   apiKey: '',
   apiTesting: false,
   apiOk: false,
@@ -156,7 +174,8 @@ export type Action =
   | { type: 'saveSku' }
   | { type: 'openEditCust'; cust: Customer }
   | { type: 'saveCust' }
-  | { type: 'addPromo' };
+  | { type: 'addPromo' }
+  | { type: 'setCustomerOverride'; id: string; lat: number; lng: number };
 
 function nextSkuId(skus: Sku[]): string {
   const nums = skus.map((s) => parseInt(s.id.replace('SKU', ''), 10)).filter((n) => !isNaN(n));
@@ -210,8 +229,10 @@ function reducer(state: AppState, action: Action): AppState {
 
     case 'createSkuFromGrn': {
       if (!state.grnNewName.trim()) return state;
+      const newSkuId = nextSkuId(state.skus);
       const ns: Sku = {
-        id: nextSkuId(state.skus),
+        id: newSkuId,
+        displayId: newSkuId,
         barcode: state.grnBarcode.trim(),
         name: state.grnNewName.trim(),
         unit: state.grnNewUnit,
@@ -273,20 +294,36 @@ function reducer(state: AppState, action: Action): AppState {
     }
 
     case 'openEditSku':
-      return { ...state, skuModal: 'edit', skuF: { ...action.sku, stock: String(action.sku.stock) } };
+      return {
+        ...state,
+        skuModal: 'edit',
+        skuF: {
+          key: action.sku.id,
+          id: action.sku.displayId,
+          barcode: action.sku.barcode,
+          name: action.sku.name,
+          unit: action.sku.unit,
+          stock: String(action.sku.stock),
+          status: action.sku.status,
+        },
+      };
 
     case 'saveSku': {
       const f = state.skuF;
       if (!f.id || !f.name) return state;
-      const rec: Sku = { id: f.id, barcode: f.barcode, name: f.name, unit: f.unit, stock: Number(f.stock || 0), status: f.status };
+      const key = f.key || f.id;
+      const rec: Sku = { id: key, displayId: f.id, barcode: f.barcode, name: f.name, unit: f.unit, stock: Number(f.stock || 0), status: f.status };
       const arr = [...state.skus];
-      const idx = arr.findIndex((x) => x.id === f.id);
+      const idx = arr.findIndex((x) => x.id === key);
       if (idx >= 0) arr[idx] = rec;
       else arr.push(rec);
       return { ...state, skus: arr, skuModal: null };
     }
 
-    case 'openEditCust':
+    case 'openEditCust': {
+      const ov = state.customerOverrides[action.cust.id];
+      const lat = ov?.lat ?? action.cust.lat;
+      const lng = ov?.lng ?? action.cust.lng;
       return {
         ...state,
         custModal: 'edit',
@@ -301,12 +338,16 @@ function reducer(state: AppState, action: Action): AppState {
           term: String(action.cust.term || ''),
           status: action.cust.status,
           conds: (action.cust.conds || []).join('\n'),
+          lat: lat != null ? String(lat) : '',
+          lng: lng != null ? String(lng) : '',
         },
       };
+    }
 
     case 'saveCust': {
       const f = state.custF;
       if (!f.id || !f.name) return state;
+      const existing = state.customers.find((x) => x.id === f.id);
       const rec: Customer = {
         id: f.id,
         name: f.name,
@@ -318,6 +359,10 @@ function reducer(state: AppState, action: Action): AppState {
         term: f.pay === 'credit' ? Number(f.term || 0) : 0,
         status: f.status,
         conds: f.conds.split('\n').map((s) => s.trim()).filter(Boolean),
+        // lat/lng always come from the API (or null for a manually-added
+        // customer) — corrections live only in customerOverrides, never here.
+        lat: existing?.lat ?? null,
+        lng: existing?.lng ?? null,
       };
       const arr = [...state.customers];
       const idx = arr.findIndex((x) => x.id === rec.id);
@@ -325,6 +370,15 @@ function reducer(state: AppState, action: Action): AppState {
       else arr.push(rec);
       return { ...state, customers: arr, custModal: null };
     }
+
+    case 'setCustomerOverride':
+      return {
+        ...state,
+        customerOverrides: {
+          ...state.customerOverrides,
+          [action.id]: { lat: action.lat, lng: action.lng, updatedAt: new Date().toISOString() },
+        },
+      };
 
     case 'addPromo': {
       const f = state.promoForm;
@@ -355,6 +409,54 @@ function reducer(state: AppState, action: Action): AppState {
 export function useAppStore() {
   const [state, dispatch] = useReducer(reducer, initialState);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetchSkusFromSheet()
+      .then((skus) => {
+        if (!cancelled) dispatch({ type: 'patch', patch: { skus, skusLoading: false, skusError: null } });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          const message = err instanceof Error ? err.message : 'โหลดข้อมูลสินค้าไม่สำเร็จ';
+          dispatch({ type: 'patch', patch: { skusLoading: false, skusError: message } });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchCustomersFromUnii()
+      .then((customers) => {
+        if (!cancelled) dispatch({ type: 'patch', patch: { customers, customersLoading: false, customersError: null } });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          const message = err instanceof Error ? err.message : 'โหลดรายชื่อลูกค้าไม่สำเร็จ';
+          dispatch({ type: 'patch', patch: { customersLoading: false, customersError: message } });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadAllOverrides()
+      .then((overrides) => {
+        if (!cancelled) dispatch({ type: 'patch', patch: { customerOverrides: overrides } });
+      })
+      .catch(() => {
+        /* no saved overrides yet, or IndexedDB unavailable — safe to ignore */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const actions = useMemo(
     () => ({
       patch: (patch: Partial<AppState>) => dispatch({ type: 'patch', patch }),
@@ -369,6 +471,10 @@ export function useAppStore() {
       openEditCust: (cust: Customer) => dispatch({ type: 'openEditCust', cust }),
       saveCust: () => dispatch({ type: 'saveCust' }),
       addPromo: () => dispatch({ type: 'addPromo' }),
+      setCustomerOverride: (id: string, lat: number, lng: number) => {
+        dispatch({ type: 'setCustomerOverride', id, lat, lng });
+        void saveOverride(id, lat, lng);
+      },
     }),
     [],
   );
