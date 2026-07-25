@@ -106,6 +106,11 @@ export interface ApiImportOrder {
 export interface RouteOrder {
   /** Effective route: the manual "Route" column if set, else the "AutoR" column. */
   route: string;
+  /** Route suggested by the delivery-zone rules, or null when the address
+   * falls outside the covered provinces. See src/data/routeZones.ts. */
+  zoneRoute: 'A' | 'B' | null;
+  /** Human-readable justification for zoneRoute, shown in the UI. */
+  zoneReason: string;
   plannedDeliveryDate: string;
   orderedAtText: string;
   customer: string;

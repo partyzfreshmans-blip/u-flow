@@ -132,6 +132,12 @@ export function computeRoute(state: AppState, actions: AppActions) {
 
   const rows = filtered.map((o) => ({
     route: o.route,
+    zoneRoute: o.zoneRoute ?? '—',
+    zoneReason: o.zoneReason,
+    zoneStyle: badgeStyle(o.zoneRoute === null ? 'neutral' : o.zoneRoute === 'A' ? 'info' : 'accent'),
+    // Flag only when the sheet has a concrete letter route that contradicts
+    // the zone rules; numeric trip codes aren't comparable.
+    zoneMismatch: o.zoneRoute !== null && /^[AB]$/i.test(o.route) && o.route.toUpperCase() !== o.zoneRoute,
     orderNo: o.orderNo,
     customer: o.customer,
     stLabel: o.status || '—',
@@ -151,6 +157,13 @@ export function computeRoute(state: AppState, actions: AppActions) {
 
   const wh = state.routeOrders.find((o) => o.whLat != null && o.whLng != null);
   const warehouse = wh && wh.whLat != null && wh.whLng != null ? { lat: wh.whLat, lng: wh.whLng } : null;
+
+  const zoneSummary = {
+    a: filtered.filter((o) => o.zoneRoute === 'A').length,
+    b: filtered.filter((o) => o.zoneRoute === 'B').length,
+    unassigned: filtered.filter((o) => o.zoneRoute === null).length,
+  };
+  const mismatchCount = rows.filter((r) => r.zoneMismatch).length;
 
   const geocoded = filtered
     .filter((o) => o.lat != null && o.lng != null)
@@ -175,6 +188,8 @@ export function computeRoute(state: AppState, actions: AppActions) {
     rows,
     resultCount: filtered.length,
     isEmpty: filtered.length === 0,
+    zoneSummary,
+    mismatchCount,
     mapStops,
     excludedStopCount,
     warehouse,
@@ -274,18 +289,35 @@ export function computePick(state: AppState, actions: AppActions) {
 export function computeCod(state: AppState, actions: AppActions) {
   const codClosed = !!state.codClosed[state.codDriver];
   const codList = orders.filter((o) => o.cod && o.status === 'delivered' && o.driver === state.codDriver);
-  let expSum = 0;
-  let retSum = 0;
+
+  let expSum = 0; // everything the driver had to collect, cash + transfer
+  let cashExpected = 0; // the cash portion — the only part handed back
+  let transferSum = 0;
+  let cashReturned = 0;
 
   const codRows = codList.map((o) => {
+    const method = state.codMethod[o.id] ?? 'cash';
+    const isTransfer = method === 'transfer';
     const ret = state.cod[o.id] ?? '';
     const retN = ret === '' ? null : Number(ret);
-    const diff = retN == null ? null : retN - o.amt;
+
     expSum += o.amt;
-    retSum += retN || 0;
+    if (isTransfer) {
+      transferSum += o.amt;
+    } else {
+      cashExpected += o.amt;
+      cashReturned += retN || 0;
+    }
+
+    // A transfer is already in the company account, so there is no cash to
+    // reconcile — only cash rows can be short or over.
     let diffText = '—';
     let diffStyle = badgeStyle('neutral');
-    if (diff != null) {
+    if (isTransfer) {
+      diffText = 'โอนแล้ว';
+      diffStyle = badgeStyle('info');
+    } else if (retN != null) {
+      const diff = retN - o.amt;
       if (diff === 0) {
         diffText = 'ตรง';
         diffStyle = badgeStyle('ok');
@@ -294,21 +326,29 @@ export function computeCod(state: AppState, actions: AppActions) {
         diffStyle = badgeStyle('bad');
       }
     }
+
     return {
       id: o.id,
       cust: o.cust,
       expectedText: fmt(o.amt),
       returned: ret,
+      isTransfer,
+      isCash: !isTransfer,
+      methodLabel: isTransfer ? 'โอน' : 'เงินสด',
+      setCash: () => actions.patch({ codMethod: { ...state.codMethod, [o.id]: 'cash' } }),
+      setTransfer: () => actions.patch({ codMethod: { ...state.codMethod, [o.id]: 'transfer' } }),
       diffText,
       diffStyle,
       onInput: (v: string) => actions.patch({ cod: { ...state.cod, [o.id]: v.replace(/[^0-9]/g, '') } }),
     };
   });
 
-  const totalDiff = retSum - expSum;
+  // Reconciliation is cash-only; transfers are settled by definition.
+  const totalDiff = cashReturned - cashExpected;
   const codMismatch = totalDiff !== 0 && !codClosed;
   const codDiffText = totalDiff === 0 ? 'ยอดตรง' : (totalDiff > 0 ? 'เกิน +' : 'ขาด −') + fmt(Math.abs(totalDiff));
   const codDiffStyle = totalDiff === 0 ? badgeStyle('ok') : badgeStyle('bad');
+  const transferCount = codRows.filter((r) => r.isTransfer).length;
 
   return {
     codMobile: state.codMobile,
@@ -320,7 +360,11 @@ export function computeCod(state: AppState, actions: AppActions) {
     codClosed,
     codRows,
     codExpectedText: fmt(expSum),
-    codReturnedText: fmt(retSum),
+    cashExpectedText: fmt(cashExpected),
+    transferText: fmt(transferSum),
+    transferCount,
+    hasTransfer: transferCount > 0,
+    codReturnedText: fmt(cashReturned),
     codMismatch,
     codDiffText,
     codDiffStyle,

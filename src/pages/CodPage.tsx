@@ -27,6 +27,7 @@ export function CodPage({ state, actions }: { state: AppState; actions: AppActio
               <thead>
                 <tr>
                   <th>ออเดอร์</th><th>ลูกค้า</th><th style={{ textAlign: 'right' }}>ยอดที่ต้องเก็บ</th>
+                  <th style={{ textAlign: 'center', width: 168 }}>รับเงินแบบ</th>
                   <th style={{ textAlign: 'right', width: 150 }}>ยอดคืนจริง</th><th style={{ textAlign: 'right' }}>ส่วนต่าง</th>
                 </tr>
               </thead>
@@ -36,15 +37,31 @@ export function CodPage({ state, actions }: { state: AppState; actions: AppActio
                     <td style={{ fontWeight: 500, fontVariantNumeric: 'tabular-nums' }}>{r.id}</td>
                     <td>{r.cust}</td>
                     <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{r.expectedText}</td>
+                    <td style={{ textAlign: 'center' }}>
+                      <div className="seg" style={{ width: '100%' }}>
+                        <label className="seg-opt" style={{ flex: 1, justifyContent: 'center', padding: '5px 8px', fontSize: 12 }}>
+                          <input type="radio" name={`m-${r.id}`} checked={r.isCash} onChange={r.setCash} disabled={v.codClosed} />
+                          <i className="ph ph-money" />สด
+                        </label>
+                        <label className="seg-opt" style={{ flex: 1, justifyContent: 'center', padding: '5px 8px', fontSize: 12 }}>
+                          <input type="radio" name={`m-${r.id}`} checked={r.isTransfer} onChange={r.setTransfer} disabled={v.codClosed} />
+                          <i className="ph ph-bank" />โอน
+                        </label>
+                      </div>
+                    </td>
                     <td style={{ textAlign: 'right' }}>
-                      <input
-                        className="input"
-                        style={{ textAlign: 'right', minHeight: 32, fontVariantNumeric: 'tabular-nums' }}
-                        inputMode="numeric"
-                        value={r.returned}
-                        onChange={(e) => r.onInput(e.target.value)}
-                        disabled={v.codClosed}
-                      />
+                      {r.isTransfer ? (
+                        <span style={{ fontSize: 12, color: 'var(--color-neutral-600)' }}>ไม่ต้องคืนเงินสด</span>
+                      ) : (
+                        <input
+                          className="input"
+                          style={{ textAlign: 'right', minHeight: 32, fontVariantNumeric: 'tabular-nums' }}
+                          inputMode="numeric"
+                          value={r.returned}
+                          onChange={(e) => r.onInput(e.target.value)}
+                          disabled={v.codClosed}
+                        />
+                      )}
                     </td>
                     <td style={{ textAlign: 'right' }}><span style={r.diffStyle}>{r.diffText}</span></td>
                   </tr>
@@ -56,14 +73,27 @@ export function CodPage({ state, actions }: { state: AppState; actions: AppActio
           <div className="card elev-md" style={{ gap: 14, position: 'sticky', top: 96 }}>
             <div className="card-kicker">สรุปรอบเก็บเงิน · {v.codDriver} · 23 ก.ค.</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 9, fontSize: 13.5 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: 'var(--color-neutral-400)' }}>ยอดที่ต้องเก็บ</span><b style={{ fontVariantNumeric: 'tabular-nums' }}>{v.codExpectedText}</b></div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: 'var(--color-neutral-400)' }}>ยอดคืนจริง</span><b style={{ fontVariantNumeric: 'tabular-nums' }}>{v.codReturnedText}</b></div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: 'var(--color-neutral-400)' }}>ยอดที่ต้องเก็บทั้งหมด</span><b style={{ fontVariantNumeric: 'tabular-nums' }}>{v.codExpectedText}</b></div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5 }}>
+                <span style={{ color: 'var(--color-neutral-500)' }}><i className="ph ph-money" style={{ marginRight: 5 }} />เงินสด (ต้องคืน)</span>
+                <span style={{ fontVariantNumeric: 'tabular-nums' }}>{v.cashExpectedText}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5 }}>
+                <span style={{ color: 'var(--color-neutral-500)' }}><i className="ph ph-bank" style={{ marginRight: 5 }} />โอน ({v.transferCount} ออเดอร์)</span>
+                <span style={{ fontVariantNumeric: 'tabular-nums' }}>{v.transferText}</span>
+              </div>
               <div className="hr" style={{ margin: '2px 0' }} />
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><span style={{ color: 'var(--color-neutral-400)' }}>ส่วนต่างรวม</span><span style={v.codDiffStyle}>{v.codDiffText}</span></div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: 'var(--color-neutral-400)' }}>เงินสดที่คืนจริง</span><b style={{ fontVariantNumeric: 'tabular-nums' }}>{v.codReturnedText}</b></div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><span style={{ color: 'var(--color-neutral-400)' }}>ส่วนต่างเงินสด</span><span style={v.codDiffStyle}>{v.codDiffText}</span></div>
             </div>
+            {v.hasTransfer && (
+              <div style={{ fontSize: 11, color: 'var(--color-neutral-500)', lineHeight: 1.5 }}>
+                <i className="ph ph-info" style={{ marginRight: 4 }} />ยอดโอนเข้าบัญชีบริษัทแล้ว ไม่ถูกนับรวมในส่วนต่างเงินสด
+              </div>
+            )}
             {v.codMismatch && (
               <div style={{ display: 'flex', gap: 9, padding: 11, borderRadius: 9, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 12.5, lineHeight: 1.45 }}>
-                <i className="ph ph-warning-fill" style={{ fontSize: 16, flex: 'none' }} /><span>ยอดไม่ตรง — โปรดตรวจสอบกับ driver ก่อนปิดยอด</span>
+                <i className="ph ph-warning-fill" style={{ fontSize: 16, flex: 'none' }} /><span>ยอดเงินสดไม่ตรง — โปรดตรวจสอบกับ driver ก่อนปิดยอด</span>
               </div>
             )}
             {v.codClosed && (
@@ -91,16 +121,35 @@ export function CodPage({ state, actions }: { state: AppState; actions: AppActio
                 <div key={r.id} style={{ padding: 13, borderRadius: 12, background: 'var(--color-surface)', boxShadow: 'var(--shadow-sm)' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5, fontWeight: 600 }}><span>{r.cust}</span><span style={{ fontVariantNumeric: 'tabular-nums' }}>{r.expectedText}</span></div>
                   <div style={{ fontSize: 11, color: 'var(--color-neutral-500)', marginBottom: 9 }}>{r.id}</div>
-                  <div className="field">
-                    <label style={{ fontSize: 11 }}>ยอดคืนจริง (฿)</label>
-                    <input className="input" inputMode="numeric" value={r.returned} onChange={(e) => r.onInput(e.target.value)} disabled={v.codClosed} />
+                  <div className="field" style={{ marginBottom: 9 }}>
+                    <label style={{ fontSize: 11 }}>ลูกค้าจ่ายแบบ</label>
+                    <div className="seg" style={{ width: '100%' }}>
+                      <label className="seg-opt" style={{ flex: 1, justifyContent: 'center' }}>
+                        <input type="radio" name={`mm-${r.id}`} checked={r.isCash} onChange={r.setCash} disabled={v.codClosed} />
+                        <i className="ph ph-money" />เงินสด
+                      </label>
+                      <label className="seg-opt" style={{ flex: 1, justifyContent: 'center' }}>
+                        <input type="radio" name={`mm-${r.id}`} checked={r.isTransfer} onChange={r.setTransfer} disabled={v.codClosed} />
+                        <i className="ph ph-bank" />โอน
+                      </label>
+                    </div>
                   </div>
+                  {r.isCash ? (
+                    <div className="field">
+                      <label style={{ fontSize: 11 }}>ยอดคืนจริง (฿)</label>
+                      <input className="input" inputMode="numeric" value={r.returned} onChange={(e) => r.onInput(e.target.value)} disabled={v.codClosed} />
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', gap: 7, padding: '9px 11px', borderRadius: 9, background: 'var(--st-info-bg)', color: 'var(--st-info-fg)', fontSize: 12 }}>
+                      <i className="ph ph-check-circle-fill" style={{ flex: 'none' }} />โอนเข้าบัญชีแล้ว ไม่ต้องคืนเงินสด
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
             <div style={{ marginTop: 14, padding: 13, borderRadius: 12, background: 'var(--color-accent-900)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
-                <div style={{ fontSize: 11, color: 'var(--color-accent-200)' }}>ยอดคืนรวม</div>
+                <div style={{ fontSize: 11, color: 'var(--color-accent-200)' }}>เงินสดที่ต้องคืน {v.cashExpectedText}</div>
                 <div style={{ fontSize: 19, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{v.codReturnedText}</div>
               </div>
               <span style={v.codDiffStyle}>{v.codDiffText}</span>

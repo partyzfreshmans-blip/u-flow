@@ -56,6 +56,10 @@ export interface AppState {
   codDriver: string;
   codMobile: boolean;
   cod: Record<string, string>;
+  /** How each order's COD was actually settled. Cash has to be physically
+   * handed back at clearing; a transfer is already in the company account,
+   * so it is reconciled but never counted as cash owed. Defaults to cash. */
+  codMethod: Record<string, 'cash' | 'transfer'>;
   codClosed: Record<string, boolean>;
 
   // promo ("โปรโมชั่น" tab, Active rows only; "create promotion" flow is local)
@@ -138,6 +142,7 @@ export const initialState: AppState = {
   codDriver: 'สมชาย ป.',
   codMobile: false,
   cod: { 'OD-6004': '3380', 'OD-6009': '3900', 'OD-6006': '1980', 'OD-6007': '7450' },
+  codMethod: {},
   codClosed: {},
 
   promos: [],

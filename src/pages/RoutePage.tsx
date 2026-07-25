@@ -33,9 +33,25 @@ export function RoutePage({ state, actions }: { state: AppState; actions: AppAct
         <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-neutral-500)' }}>{v.resultCount} รายการ</div>
       </div>
 
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16, alignItems: 'center' }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12, alignItems: 'center' }}>
         <span style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginRight: 2 }}>สถานะ</span>
         {v.statusTabs.map((t) => <button key={t.key} style={t.style} onClick={t.go}>{t.label}</button>)}
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', padding: '10px 14px', marginBottom: 16, borderRadius: 10, background: 'var(--color-surface)', boxShadow: 'var(--shadow-sm)', fontSize: 12 }}>
+        <span style={{ fontWeight: 600 }}><i className="ph ph-path" style={{ marginRight: 6, color: 'var(--color-accent-300)' }} />แบ่งโซนอัตโนมัติ</span>
+        <span style={{ color: 'var(--st-info-fg)' }}>Route A · {v.zoneSummary.a}</span>
+        <span style={{ color: 'var(--color-accent-300)' }}>Route B · {v.zoneSummary.b}</span>
+        {v.zoneSummary.unassigned > 0 && (
+          <span style={{ color: 'var(--color-neutral-500)' }} title="ที่อยู่อยู่นอกลำพูน/เชียงใหม่ — กฎที่ให้มายังไม่ครอบคลุม">
+            นอกพื้นที่ · {v.zoneSummary.unassigned}
+          </span>
+        )}
+        {v.mismatchCount > 0 && (
+          <span style={{ marginLeft: 'auto', color: 'var(--st-warn-fg)' }}>
+            <i className="ph ph-warning" style={{ marginRight: 4 }} />ชีทระบุไม่ตรงกับโซน {v.mismatchCount} รายการ
+          </span>
+        )}
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 460px', gap: 18, alignItems: 'start' }}>
@@ -43,7 +59,7 @@ export function RoutePage({ state, actions }: { state: AppState; actions: AppAct
           <table className="table">
             <thead>
               <tr>
-                <th>Route</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th style={{ textAlign: 'right' }}>ยอดขาย</th>
+                <th>Route</th><th style={{ textAlign: 'center' }}>โซนที่ควรเป็น</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th style={{ textAlign: 'right' }}>ยอดขาย</th>
                 <th style={{ textAlign: 'center' }}>รายการ</th><th>วันที่จะจัดส่ง</th><th style={{ textAlign: 'right' }}>ระยะทาง</th><th>สถานะ</th><th></th>
               </tr>
             </thead>
@@ -51,6 +67,14 @@ export function RoutePage({ state, actions }: { state: AppState; actions: AppAct
               {v.rows.map((r) => (
                 <tr key={r.orderNo}>
                   <td><span style={{ display: 'inline-flex', fontSize: 11, padding: '2px 8px', borderRadius: 5, background: 'var(--color-neutral-800)', color: 'var(--color-neutral-200)' }}>{r.route}</span></td>
+                  <td style={{ textAlign: 'center' }} title={r.zoneReason}>
+                    <span style={r.zoneStyle}>{r.zoneRoute}</span>
+                    {r.zoneMismatch && (
+                      <div style={{ fontSize: 10, color: 'var(--st-warn-fg)', marginTop: 2, whiteSpace: 'nowrap' }}>
+                        <i className="ph ph-warning" style={{ marginRight: 3 }} />ไม่ตรงกับชีท
+                      </div>
+                    )}
+                  </td>
                   <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 500 }}>{r.orderNo}</td>
                   <td>
                     {r.customer}

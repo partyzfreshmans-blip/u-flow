@@ -1,4 +1,5 @@
 import { SHEET_TABS, csvExportUrl } from '../../config/sheets';
+import { resolveZoneRoute } from '../routeZones';
 import type { RouteOrder } from '../types';
 import { fetchSheetRows } from './sheetCsv';
 
@@ -23,8 +24,13 @@ function rowToRouteOrder(row: Record<string, string>): RouteOrder | null {
   // "Route" is a manual override; when blank, the system-assigned "AutoR" applies.
   const manualRoute = (row['Route'] ?? '').trim();
   const autoRoute = (row['AutoR'] ?? '').trim();
+  const districtProvince = (row['อำเภอ, จังหวัด'] ?? '').trim();
+  const addressFromUnii = (row['ที่อยู่จาก Unii'] ?? '').trim();
+  const zone = resolveZoneRoute(districtProvince, addressFromUnii);
   return {
     route: manualRoute || autoRoute || '—',
+    zoneRoute: zone.route,
+    zoneReason: zone.reason,
     plannedDeliveryDate: (row['วันที่จะจัดส่ง'] ?? '').trim(),
     orderedAtText: (row['วันเวลาที่สั่ง'] ?? '').trim(),
     customer: (row['ชื่อลูกค้า'] ?? '').trim(),
@@ -39,8 +45,8 @@ function rowToRouteOrder(row: Record<string, string>): RouteOrder | null {
     deliveredDate: (row['วันที่จัดส่ง'] ?? '').trim(),
     completedDate: (row['วันที่ส่งสำเร็จ'] ?? '').trim(),
     updatedDate: (row['วันที่อัปเดต'] ?? '').trim(),
-    districtProvince: (row['อำเภอ, จังหวัด'] ?? '').trim(),
-    addressFromUnii: (row['ที่อยู่จาก Unii'] ?? '').trim(),
+    districtProvince,
+    addressFromUnii,
     mapLink: (row['Link'] ?? '').trim(),
     lat: toFloatOrNull(row['CS_Lat']),
     lng: toFloatOrNull(row['CS_Long']),
