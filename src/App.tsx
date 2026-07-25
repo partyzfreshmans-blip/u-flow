@@ -7,7 +7,7 @@ import { RoutePage } from './pages/RoutePage';
 import { PickPage } from './pages/PickPage';
 import { CodPage } from './pages/CodPage';
 import { PromoPage } from './pages/PromoPage';
-import { GrnPage } from './pages/GrnPage';
+import { ReceivingPage } from './pages/ReceivingPage';
 import { SkuPage } from './pages/SkuPage';
 import { CustomerPage } from './pages/CustomerPage';
 import { SettingsPage } from './pages/SettingsPage';
@@ -50,7 +50,7 @@ function App() {
           {state.route === 'pick' && <PickPage state={state} actions={actions} />}
           {state.route === 'cod' && <CodPage state={state} actions={actions} />}
           {state.route === 'promo' && <PromoPage state={state} actions={actions} />}
-          {state.route === 'grn' && <GrnPage state={state} actions={actions} />}
+          {state.route === 'grn' && <ReceivingPage state={state} actions={actions} />}
           {state.route === 'sku' && <SkuPage state={state} actions={actions} />}
           {state.route === 'customer' && <CustomerPage state={state} actions={actions} />}
           {state.route === 'settings' && <SettingsPage state={state} actions={actions} />}

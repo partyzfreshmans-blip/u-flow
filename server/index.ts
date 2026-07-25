@@ -2,9 +2,20 @@ import cors from 'cors';
 import 'dotenv/config';
 import express from 'express';
 import { google } from 'googleapis';
+import multer from 'multer';
+import { Readable } from 'node:stream';
+import {
+  DRIVE_ROOT_FOLDER_ENV,
+  MAX_UPLOAD_BYTES,
+  driveFolderPath,
+  isAllowedFile,
+  type AttachmentScope,
+} from '../src/config/drive';
 import { MAIN_SHEET_ID, SHEET_TABS } from '../src/config/sheets';
 
-// Write-back backend for the CS Master lat/lng correction feature.
+// Backend for everything that needs Google credentials: the CS Master
+// lat/lng write-back, and Drive uploads for order documents and supplier
+// bills.
 //
 // The Google Service Account private key lives ONLY here, in the
 // GOOGLE_SERVICE_ACCOUNT_KEY env var — never in the browser bundle. The
@@ -42,15 +53,55 @@ function getServiceAccountCredentials(): { client_email: string; private_key: st
   return { client_email: creds.client_email, private_key: creds.private_key.replace(/\\n/g, '\n') };
 }
 
-async function getSheetsClient() {
+async function getAuth(scopes: string[]) {
   const { client_email, private_key } = getServiceAccountCredentials();
-  const auth = new google.auth.JWT({
-    email: client_email,
-    key: private_key,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-  });
+  const auth = new google.auth.JWT({ email: client_email, key: private_key, scopes });
   await auth.authorize();
+  return auth;
+}
+
+async function getSheetsClient() {
+  const auth = await getAuth(['https://www.googleapis.com/auth/spreadsheets']);
   return google.sheets({ version: 'v4', auth });
+}
+
+async function getDriveClient() {
+  const auth = await getAuth(['https://www.googleapis.com/auth/drive']);
+  return google.drive({ version: 'v3', auth });
+}
+
+type DriveClient = ReturnType<typeof google.drive>;
+
+/**
+ * Resolve (creating if needed) a chain of folders under `parentId`.
+ * A Service Account has no My Drive quota of its own, so the root folder must
+ * be one the user created and shared with the account as an Editor.
+ */
+async function ensureFolderPath(drive: DriveClient, parentId: string, segments: string[]): Promise<string> {
+  let current = parentId;
+  for (const name of segments) {
+    const escaped = name.replace(/'/g, "\\'");
+    const existing = await drive.files.list({
+      q: `name='${escaped}' and '${current}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id)',
+      pageSize: 1,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    });
+    const found = existing.data.files?.[0]?.id;
+    if (found) {
+      current = found;
+      continue;
+    }
+    const created = await drive.files.create({
+      requestBody: { name, mimeType: 'application/vnd.google-apps.folder', parents: [current] },
+      fields: 'id',
+      supportsAllDrives: true,
+    });
+    if (!created.data.id) throw new Error(`สร้างโฟลเดอร์ "${name}" ใน Drive ไม่สำเร็จ`);
+    current = created.data.id;
+  }
+  return current;
 }
 
 /** gid identifies a tab stably; the Sheets values API needs its title. */
@@ -71,7 +122,87 @@ function phoneKey(v: string): string {
 
 app.get('/health', (_req, res) => {
   const configured = !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY?.trim();
-  res.json({ ok: true, serviceAccountConfigured: configured });
+  res.json({
+    ok: true,
+    serviceAccountConfigured: configured,
+    driveFolderConfigured: !!process.env[DRIVE_ROOT_FOLDER_ENV]?.trim(),
+    // With no credentials the upload endpoint answers with a stand-in file so
+    // the UI can be exercised end to end before Drive is wired up.
+    driveMockMode: !configured || !process.env[DRIVE_ROOT_FOLDER_ENV]?.trim(),
+  });
+});
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_UPLOAD_BYTES, files: 10 } });
+
+app.post('/api/drive/upload', (req, res) => {
+  upload.array('files', 10)(req, res, async (uploadErr: unknown) => {
+    if (uploadErr) {
+      const isTooLarge = (uploadErr as { code?: string }).code === 'LIMIT_FILE_SIZE';
+      return res.status(isTooLarge ? 413 : 400).json({
+        error: isTooLarge ? `ไฟล์ใหญ่เกิน ${Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)}MB` : 'อ่านไฟล์ที่อัปโหลดไม่สำเร็จ',
+      });
+    }
+
+    const files = (req.files ?? []) as Express.Multer.File[];
+    const scope = String((req.body as Record<string, unknown>)?.scope ?? '') as AttachmentScope;
+    const key = String((req.body as Record<string, unknown>)?.key ?? '').trim();
+
+    if (files.length === 0) return res.status(400).json({ error: 'ไม่พบไฟล์ที่จะอัปโหลด' });
+    if (scope !== 'order' && scope !== 'receiving') return res.status(400).json({ error: 'scope ต้องเป็น order หรือ receiving' });
+    if (!key) return res.status(400).json({ error: 'ต้องระบุ key (เลขออเดอร์ หรือ วันที่-ซัพพลายเออร์)' });
+
+    const rejected = files.find((f) => !isAllowedFile(f.mimetype, f.originalname));
+    if (rejected) {
+      return res.status(415).json({ error: `"${rejected.originalname}" ไม่ใช่ไฟล์ PDF/JPG/PNG` });
+    }
+
+    const rootFolderId = process.env[DRIVE_ROOT_FOLDER_ENV]?.trim();
+    const hasCredentials = !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY?.trim();
+
+    // Mock mode: keeps the whole attach → list → open flow testable before the
+    // Service Account and Drive folder exist. Never used once both are set.
+    if (!hasCredentials || !rootFolderId) {
+      return res.json({
+        ok: true,
+        mock: true,
+        files: files.map((f) => ({
+          fileId: `mock-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          name: f.originalname,
+          mimeType: f.mimetype,
+          size: f.size,
+          webViewLink: '',
+        })),
+      });
+    }
+
+    try {
+      const drive = await getDriveClient();
+      const folderId = await ensureFolderPath(drive, rootFolderId, driveFolderPath(scope, key));
+
+      const uploaded = [];
+      for (const f of files) {
+        const created = await drive.files.create({
+          requestBody: { name: f.originalname, parents: [folderId] },
+          media: { mimeType: f.mimetype, body: Readable.from(f.buffer) },
+          fields: 'id, name, mimeType, size, webViewLink',
+          supportsAllDrives: true,
+        });
+        uploaded.push({
+          fileId: created.data.id ?? '',
+          name: created.data.name ?? f.originalname,
+          mimeType: created.data.mimeType ?? f.mimetype,
+          size: Number(created.data.size ?? f.size),
+          webViewLink: created.data.webViewLink ?? '',
+        });
+      }
+
+      return res.json({ ok: true, mock: false, files: uploaded });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'อัปโหลดไฟล์ไม่สำเร็จ';
+      console.error('[drive/upload]', message);
+      return res.status(502).json({ error: `อัปโหลดขึ้น Google Drive ไม่สำเร็จ: ${message}` });
+    }
+  });
 });
 
 app.post('/api/cs-master/update-location', async (req, res) => {
@@ -136,8 +267,11 @@ app.post('/api/cs-master/update-location', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`CS Master write-back API listening on http://localhost:${PORT}`);
+  console.log(`Warehouse Ops API listening on http://localhost:${PORT}`);
   if (!process.env.GOOGLE_SERVICE_ACCOUNT_KEY?.trim()) {
-    console.warn('⚠  GOOGLE_SERVICE_ACCOUNT_KEY is not set — write-back will fail until it is configured in .env');
+    console.warn('⚠  GOOGLE_SERVICE_ACCOUNT_KEY is not set — sheet write-back will fail; Drive uploads run in mock mode');
+  }
+  if (!process.env[DRIVE_ROOT_FOLDER_ENV]?.trim()) {
+    console.warn(`⚠  ${DRIVE_ROOT_FOLDER_ENV} is not set — Drive uploads run in mock mode`);
   }
 });

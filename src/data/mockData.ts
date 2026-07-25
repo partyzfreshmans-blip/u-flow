@@ -1,17 +1,10 @@
-import type { GrnLogEntry, Order, PickBatch } from './types';
+import type { Order, PickBatch } from './types';
 
 // Everything below is still local/mock — COD clearing, batch picking, and
 // GRN supplier list were out of scope for the Google Sheets migration and
 // keep their illustrative data. SKU master, dashboard orders, route/delivery
 // history, promotions, and customers now load from Google Sheets at runtime
 // (see src/data/sources/*.ts and src/state/store.ts).
-
-export const suppliers = [
-  'บ.สหพัฒนพิบูล จำกัด',
-  'บ.ทิพรสอุตสาหกรรม จำกัด',
-  'บ.ไทยเพรซิเดนท์ฟูดส์',
-  'บ.ยูนิลีเวอร์ไทย เทรดดิ้ง',
-];
 
 export const orders: Order[] = [
   { id: 'OD-6001', cust: 'ร้านเจ๊แดง มินิมาร์ท', addr: 'ซ.ลาดพร้าว 71', route: 'A', driver: 'สมชาย ป.', status: 'delivering', cod: true, amt: 4820, items: 12, date: '23 ก.ค.', sync: 'synced' },
@@ -39,7 +32,3 @@ export const pickBatch: PickBatch = {
   ],
 };
 
-export const initialGrnLog: GrnLogEntry[] = [
-  { supplier: 'บ.สหพัฒนพิบูล จำกัด', doc: 'SP-2207', count: 3, when: '22 ก.ค. 2026 09:14', by: 'admin.warehouse' },
-  { supplier: 'บ.ทิพรสอุตสาหกรรม จำกัด', doc: 'TP-1180', count: 5, when: '21 ก.ค. 2026 16:40', by: 'somchai.k' },
-];

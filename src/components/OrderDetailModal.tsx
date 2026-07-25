@@ -1,5 +1,6 @@
 import { computeOrderDetail } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
+import { AttachmentPanel } from './AttachmentPanel';
 
 export function OrderDetailModal({ state, actions }: { state: AppState; actions: AppActions }) {
   const v = computeOrderDetail(state);
@@ -46,6 +47,17 @@ export function OrderDetailModal({ state, actions }: { state: AppState; actions:
               <span style={{ color: 'var(--color-neutral-400)', fontWeight: 400 }}>รวมทั้งหมด</span>{v.totalText}
             </div>
           )}
+
+          <div className="hr" style={{ margin: '4px 0' }} />
+
+          <AttachmentPanel
+            state={state}
+            actions={actions}
+            scope="order"
+            storageKey={v.orderNo}
+            label="ใบส่งสินค้า / ใบเสร็จ / ใบกำกับภาษี"
+            hint="แนบไฟล์ที่ปริ้นจากระบบ Unii · รับ PDF, JPG, PNG ไม่เกิน 10MB ต่อไฟล์ · แนบได้หลายไฟล์"
+          />
         </div>
         <div className="dialog-actions">
           <button className="btn btn-secondary" onClick={actions.closeOrderDetail}>ปิด</button>

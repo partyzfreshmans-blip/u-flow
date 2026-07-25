@@ -1,6 +1,7 @@
 import type { CSSProperties } from 'react';
-import { orders, pickBatch, suppliers } from '../data/mockData';
+import { orders, pickBatch } from '../data/mockData';
 import { PROMO_UNITS, type Order, type PromoStatus, type PromoUnit } from '../data/types';
+import { lineDiff, lineNetTotal, receivingFolderKey, recordHasDiscrepancy, recordTotal, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { loadCode } from '../data/vehicles';
 import { matchZone, UNASSIGNED_COLOR } from '../data/zoneConfig';
 import { badgeStyle, fmt, sheetStatusStyle } from './helpers';
@@ -17,7 +18,7 @@ export const pageTitles: Record<AppState['route'], [string, string]> = {
   pick: ['Batch picking / จัดล็อตหยิบสินค้า', 'รวมหลายออเดอร์เป็นล็อตเดียว หยิบสินค้าตามตำแหน่งเก็บ'],
   cod: ['เคลียร์เงินปลายทาง (COD)', 'เทียบยอดที่ควรเก็บกับยอดคืนจริงต่อ driver'],
   promo: ['โปรโมชั่น / ส่วนลด', 'โปรโมชั่นที่ Active จาก Google Sheet · สร้างโปรโมชั่นใหม่ได้ในเครื่องนี้'],
-  grn: ['บันทึกรับของเข้าคลัง (GRN)', 'บันทึกสินค้าเข้าใหม่จากซัพพลายเออร์'],
+  grn: ['รับสินค้าเข้าคลัง (Goods Receiving)', 'บันทึกของเข้าจากซัพพลายเออร์ · เทียบจำนวนกับบิล · แนบไฟล์บิลขึ้น Drive'],
   sku: ['ฐานข้อมูลสินค้า (SKU master)', 'ทะเบียนสินค้าทั้งหมดในระบบ'],
   customer: ['ฐานข้อมูลลูกค้า (CS Master)', 'แก้ไขพิกัด lat/long แล้วบันทึกกลับเข้า Google Sheet จริง'],
   settings: ['ตั้งค่า / API Key', 'จัดการการเชื่อมต่อระบบออเดอร์ภายนอก'],
@@ -639,66 +640,6 @@ export function computePromo(state: AppState, actions: AppActions) {
   };
 }
 
-// ---------- GRN ----------
-export function computeGrn(state: AppState, actions: AppActions) {
-  const lk = state.grnLookup;
-  const lookupFound = !!(lk && !('notFound' in lk));
-  const lookupMissing = !!(lk && 'notFound' in lk);
-  const found = lk && !('notFound' in lk) ? { name: lk.name, id: lk.displayId, unit: lk.unit } : { name: '', id: '', unit: '' };
-
-  const grnLines = state.grnLines.map((l, i) => ({
-    ...l,
-    priceText: fmt(l.price),
-    qtyText: [l.piece ? l.piece + ' ชิ้น' : null, l.pack ? l.pack + ' แพค' : null, l.cs ? l.cs + ' ลัง' : null].filter(Boolean).join(' · ') || '—',
-    remove: () => {
-      const a = [...state.grnLines];
-      a.splice(i, 1);
-      actions.patch({ grnLines: a });
-    },
-  }));
-
-  return {
-    grnSupplier: state.grnSupplier,
-    grnDoc: state.grnDoc,
-    grnDate: state.grnDate,
-    grnBarcode: state.grnBarcode,
-    suppliers,
-    grnLog: state.grnLog,
-    onSupplier: (v: string) => actions.patch({ grnSupplier: v }),
-    onGrnDoc: (v: string) => actions.patch({ grnDoc: v }),
-    onGrnDate: (v: string) => actions.patch({ grnDate: v }),
-    onBarcode: (v: string) => actions.patch({ grnBarcode: v, grnLookup: null, grnNewOpen: false }),
-    onBarcodeKey: (key: string) => {
-      if (key === 'Enter') actions.doLookup();
-    },
-    lookup: () => actions.doLookup(),
-    lookupFound,
-    lookupMissing,
-    found,
-    grnPrice: state.grnPrice,
-    grnQtyPiece: state.grnQtyPiece,
-    grnQtyPack: state.grnQtyPack,
-    grnQtyCase: state.grnQtyCase,
-    onPrice: (v: string) => actions.patch({ grnPrice: v.replace(/[^0-9.]/g, '') }),
-    onQtyPiece: (v: string) => actions.patch({ grnQtyPiece: v.replace(/[^0-9]/g, '') }),
-    onQtyPack: (v: string) => actions.patch({ grnQtyPack: v.replace(/[^0-9]/g, '') }),
-    onQtyCase: (v: string) => actions.patch({ grnQtyCase: v.replace(/[^0-9]/g, '') }),
-    newSkuOpen: state.grnNewOpen,
-    newSkuClosed: !state.grnNewOpen,
-    grnNewName: state.grnNewName,
-    grnNewUnit: state.grnNewUnit,
-    openNewSku: () => actions.patch({ grnNewOpen: true }),
-    onNewName: (v: string) => actions.patch({ grnNewName: v }),
-    onNewUnit: (v: string) => actions.patch({ grnNewUnit: v }),
-    createSku: () => actions.createSkuFromGrn(),
-    addLine: () => actions.addGrnLine(),
-    grnLines,
-    grnLineCount: state.grnLines.length,
-    grnEmpty: state.grnLines.length === 0,
-    saveGrn: () => actions.saveGrn(),
-  };
-}
-
 // ---------- SKU MASTER ----------
 const skuStatusMeta: Record<string, [string, Parameters<typeof badgeStyle>[0]]> = {
   active: ['มีสินค้า', 'ok'],
@@ -819,5 +760,131 @@ export function computeSettings(state: AppState, actions: AppActions) {
     saveKey: () => actions.patch({ keySaved: true }),
     expiryLabel: 'เหลือ 2 วัน · ใกล้หมดอายุ',
     expiryStyle: badgeStyle('bad'),
+  };
+}
+
+// ---------- GOODS RECEIVING (supplier bills) ----------
+export function computeReceiving(state: AppState, actions: AppActions) {
+  const skuOptions = state.skus.map((s) => ({ value: s.id, label: `${s.displayId} · ${s.name}`, name: s.name, unit: s.unit, barcode: s.barcode }));
+
+  const updateLine = (id: string, patch: Partial<ReceivingLine>) =>
+    actions.setReceivingLines(state.recvLines.map((l) => (l.id === id ? { ...l, ...patch } : l)));
+
+  const lines = state.recvLines.map((l) => {
+    const diff = lineDiff(l);
+    return {
+      ...l,
+      diff,
+      diffText: diff === 0 ? 'ตรง' : diff > 0 ? `เกิน +${diff}` : `ขาด ${diff}`,
+      diffStyle: badgeStyle(diff === 0 ? 'ok' : diff > 0 ? 'warn' : 'bad'),
+      hasDiff: diff !== 0,
+      netTotal: lineNetTotal(l),
+      netTotalText: fmt(lineNetTotal(l)),
+      onSku: (skuId: string) => {
+        const sku = state.skus.find((s) => s.id === skuId);
+        // Prefill from the catalogue but leave the bill-side fields alone —
+        // the supplier's own naming is what the operator is transcribing.
+        updateLine(l.id, sku ? { skuId, uniiName: sku.name, unit: sku.unit || l.unit } : { skuId: '', uniiName: '' });
+      },
+      set: (patch: Partial<ReceivingLine>) => updateLine(l.id, patch),
+      remove: () => actions.setReceivingLines(state.recvLines.filter((x) => x.id !== l.id)),
+    };
+  });
+
+  const discrepancyCount = lines.filter((l) => l.hasDiff).length;
+  const grandTotal = lines.reduce((a, l) => a + l.netTotal, 0);
+  const canSave = state.recvSupplier.trim() !== '' && state.recvBillNo.trim() !== '' && lines.length > 0 && lines.every((l) => l.uniiName.trim() !== '' || l.billName.trim() !== '');
+
+  const folderKey = receivingFolderKey(state.recvDate, state.recvSupplier);
+
+  // history + filters
+  const suppliers = Array.from(new Set(state.receivingLog.map((r) => r.supplier).filter(Boolean))).sort();
+  const skuFilter = state.recvFilterSku.trim().toLowerCase();
+  const history = state.receivingLog
+    .filter((r) => {
+      if (state.recvFilterSupplier !== 'all' && r.supplier !== state.recvFilterSupplier) return false;
+      if (state.recvFilterDate && r.receivedDate !== state.recvFilterDate) return false;
+      if (skuFilter) {
+        const hit = r.lines.some((l) =>
+          l.skuId.toLowerCase().includes(skuFilter) ||
+          l.uniiName.toLowerCase().includes(skuFilter) ||
+          l.billName.toLowerCase().includes(skuFilter) ||
+          l.billBarcode.includes(skuFilter));
+        if (!hit) return false;
+      }
+      return true;
+    })
+    .map((r) => ({
+      id: r.id,
+      supplier: r.supplier,
+      billNo: r.billNo,
+      receivedDate: r.receivedDate,
+      note: r.note,
+      lineCount: r.lines.length,
+      totalText: fmt(recordTotal(r)),
+      hasDiscrepancy: recordHasDiscrepancy(r),
+      discrepancyCount: r.lines.filter((l) => lineDiff(l) !== 0).length,
+      folderKey: receivingFolderKey(r.receivedDate, r.supplier),
+      lines: r.lines.map((l) => {
+        const d = lineDiff(l);
+        return {
+          ...l,
+          diff: d,
+          diffText: d === 0 ? 'ตรง' : d > 0 ? `เกิน +${d}` : `ขาด ${d}`,
+          diffStyle: badgeStyle(d === 0 ? 'ok' : d > 0 ? 'warn' : 'bad'),
+          netTotalText: fmt(lineNetTotal(l)),
+        };
+      }),
+      remove: () => actions.deleteReceiving(r.id, state.receivingLog),
+    }));
+
+  return {
+    supplier: state.recvSupplier,
+    billNo: state.recvBillNo,
+    date: state.recvDate,
+    note: state.recvNote,
+    onSupplier: (v: string) => actions.patch({ recvSupplier: v, recvSaved: null }),
+    onBillNo: (v: string) => actions.patch({ recvBillNo: v }),
+    onDate: (v: string) => actions.patch({ recvDate: v, recvSaved: null }),
+    onNote: (v: string) => actions.patch({ recvNote: v }),
+    knownSuppliers: Array.from(new Set([...suppliers, ...suppliers])),
+    skuOptions,
+    skusLoading: state.skusLoading,
+    lines,
+    lineCount: lines.length,
+    isEmpty: lines.length === 0,
+    addLine: () => actions.addReceivingLine(state.recvLines),
+    discrepancyCount,
+    hasDiscrepancy: discrepancyCount > 0,
+    grandTotalText: fmt(grandTotal),
+    canSave,
+    folderKey,
+    savedKey: state.recvSaved,
+    save: () => {
+      if (!canSave) return;
+      const record: ReceivingRecord = {
+        id: `recv-${Date.now()}`,
+        supplier: state.recvSupplier.trim(),
+        billNo: state.recvBillNo.trim(),
+        receivedDate: state.recvDate,
+        recordedBy: 'admin.warehouse',
+        note: state.recvNote.trim(),
+        lines: state.recvLines,
+        createdAt: new Date().toISOString(),
+      };
+      actions.saveReceiving(record, state.receivingLog);
+    },
+    // history
+    historySuppliers: suppliers,
+    filterSupplier: state.recvFilterSupplier,
+    filterDate: state.recvFilterDate,
+    filterSku: state.recvFilterSku,
+    onFilterSupplier: (v: string) => actions.patch({ recvFilterSupplier: v }),
+    onFilterDate: (v: string) => actions.patch({ recvFilterDate: v }),
+    onFilterSku: (v: string) => actions.patch({ recvFilterSku: v }),
+    clearFilters: () => actions.patch({ recvFilterSupplier: 'all', recvFilterDate: '', recvFilterSku: '' }),
+    history,
+    historyCount: history.length,
+    totalRecords: state.receivingLog.length,
   };
 }

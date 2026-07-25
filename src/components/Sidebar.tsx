@@ -9,7 +9,7 @@ const navDef: [RouteKey, string, string][] = [
   ['pick', 'จัดล็อตหยิบสินค้า', 'ph ph-list-checks'],
   ['cod', 'เคลียร์เงิน COD', 'ph ph-wallet'],
   ['promo', 'โปรโมชั่น', 'ph ph-tag'],
-  ['grn', 'รับของเข้าคลัง', 'ph ph-tray-arrow-down'],
+  ['grn', 'รับสินค้าเข้าคลัง', 'ph ph-tray-arrow-down'],
   ['sku', 'ฐานข้อมูลสินค้า', 'ph ph-package'],
   ['customer', 'ฐานข้อมูลลูกค้า', 'ph ph-users'],
   ['settings', 'ตั้งค่า / API Key', 'ph ph-gear'],

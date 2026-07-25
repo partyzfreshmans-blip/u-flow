@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useReducer } from 'react';
-import { initialGrnLog } from '../data/mockData';
 import { fetchApiImportOrders } from '../data/sources/apiImportOrders';
 import { CS_MASTER_CSV_URL, fetchCsMasterCustomers } from '../data/sources/csMaster';
 import { updateCsMasterLatLng } from '../data/sources/csMasterWrite';
@@ -8,9 +7,12 @@ import { fetchRouteOrders } from '../data/sources/routeOrders';
 import { invalidateSheetCache } from '../data/sources/sheetCsv';
 import { fetchOrderLineItems } from '../data/sources/skuDetail';
 import { fetchSkusFromSheet } from '../data/sources/skuSheet';
+import { attachmentKey, loadAttachments, saveAttachments, uploadToDrive, type AttachmentIndex } from '../data/sources/attachments';
+import { emptyLine, loadReceivingLog, receivingFolderKey, saveReceivingLog, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { DEFAULT_VEHICLES, loadRoutePlan, loadVehicles, saveRoutePlan, saveVehicles, type RoutePlan, type Vehicle } from '../data/vehicles';
 import { DEFAULT_ZONE_RULES, loadZoneRules, saveZoneRules, type ZoneRule } from '../data/zoneConfig';
-import type { ApiImportOrder, CsMasterCustomer, GrnLine, Promo, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
+import type { AttachmentScope } from '../config/drive';
+import type { ApiImportOrder, CsMasterCustomer, Promo, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
 
 export interface SkuForm {
   /** Hidden unique key of the row being edited; empty when adding a new SKU. */
@@ -78,21 +80,23 @@ export interface AppState {
   promoModal: boolean;
   promoForm: { name: string; sku: string; type: string; start: string; end: string; unit: PromoUnit; tiers: PromoTier[] };
 
-  // GRN
-  grnSupplier: string;
-  grnDoc: string;
-  grnDate: string;
-  grnBarcode: string;
-  grnLookup: (Sku & { notFound?: false }) | { notFound: true } | null;
-  grnPrice: string;
-  grnQtyPiece: string;
-  grnQtyPack: string;
-  grnQtyCase: string;
-  grnNewOpen: boolean;
-  grnNewName: string;
-  grnNewUnit: string;
-  grnLines: GrnLine[];
-  grnLog: typeof initialGrnLog;
+  // attachments (Drive-backed, metadata kept locally)
+  attachments: AttachmentIndex;
+  uploadingKey: string | null;
+  uploadError: string | null;
+
+  // goods receiving from suppliers
+  receivingLog: ReceivingRecord[];
+  recvSupplier: string;
+  recvBillNo: string;
+  recvDate: string;
+  recvNote: string;
+  recvLines: ReceivingLine[];
+  recvSaved: string | null;
+  recvFilterSupplier: string;
+  recvFilterDate: string;
+  recvFilterSku: string;
+
 
   // SKU master (Google Sheet)
   skus: Sku[];
@@ -165,20 +169,21 @@ export const initialState: AppState = {
   promoModal: false,
   promoForm: { name: '', sku: '', type: 'ลดราคา', start: '2026-07-24', end: '2026-08-24', unit: 'ลัง', tiers: [{ minQty: 1, price: 0 }] },
 
-  grnSupplier: '',
-  grnDoc: '',
-  grnDate: '2026-07-23',
-  grnBarcode: '',
-  grnLookup: null,
-  grnPrice: '',
-  grnQtyPiece: '',
-  grnQtyPack: '',
-  grnQtyCase: '',
-  grnNewOpen: false,
-  grnNewName: '',
-  grnNewUnit: 'ชิ้น',
-  grnLines: [],
-  grnLog: initialGrnLog,
+  attachments: {},
+  uploadingKey: null,
+  uploadError: null,
+
+  receivingLog: [],
+  recvSupplier: '',
+  recvBillNo: '',
+  recvDate: new Date().toISOString().slice(0, 10),
+  recvNote: '',
+  recvLines: [],
+  recvSaved: null,
+  recvFilterSupplier: 'all',
+  recvFilterDate: '',
+  recvFilterSku: '',
+
 
   skus: [],
   skusLoading: true,
@@ -205,106 +210,15 @@ export const initialState: AppState = {
 
 export type Action =
   | { type: 'patch'; patch: Partial<AppState> }
-  | { type: 'doLookup' }
-  | { type: 'createSkuFromGrn' }
-  | { type: 'addGrnLine' }
-  | { type: 'saveGrn' }
   | { type: 'openEditSku'; sku: Sku }
   | { type: 'saveSku' }
   | { type: 'addPromo' }
   | { type: 'updateCustomerLatLng'; rowIndex: number; lat: number; lng: number };
 
-function nextSkuId(skus: Sku[]): string {
-  const nums = skus.map((s) => parseInt(s.id.replace('SKU', ''), 10)).filter((n) => !isNaN(n));
-  return 'SKU' + String(Math.max(0, ...nums) + 1).padStart(5, '0');
-}
-
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case 'patch':
       return { ...state, ...action.patch };
-
-    case 'doLookup': {
-      const bc = state.grnBarcode.trim();
-      if (!bc) return { ...state, grnLookup: null };
-      const s = state.skus.find((x) => x.barcode === bc);
-      return {
-        ...state,
-        grnLookup: s ? { ...s } : { notFound: true },
-        grnNewOpen: false,
-        grnNewName: '',
-        grnPrice: '',
-        grnQtyPiece: '',
-        grnQtyPack: '',
-        grnQtyCase: '',
-      };
-    }
-
-    case 'createSkuFromGrn': {
-      if (!state.grnNewName.trim()) return state;
-      const newSkuId = nextSkuId(state.skus);
-      const ns: Sku = {
-        id: newSkuId,
-        displayId: newSkuId,
-        barcode: state.grnBarcode.trim(),
-        name: state.grnNewName.trim(),
-        unit: state.grnNewUnit,
-        stock: 0,
-        status: 'active',
-      };
-      return {
-        ...state,
-        skus: [...state.skus, ns],
-        grnLookup: { ...ns },
-        grnNewOpen: false,
-        grnNewName: '',
-      };
-    }
-
-    case 'addGrnLine': {
-      const lk = state.grnLookup;
-      if (!lk || 'notFound' in lk) return state;
-      const { grnPrice, grnQtyPiece, grnQtyPack, grnQtyCase } = state;
-      if (!grnQtyPiece && !grnQtyPack && !grnQtyCase) return state;
-      const line: GrnLine = {
-        name: lk.name,
-        barcode: lk.barcode,
-        price: Number(grnPrice || 0),
-        piece: Number(grnQtyPiece || 0),
-        pack: Number(grnQtyPack || 0),
-        cs: Number(grnQtyCase || 0),
-      };
-      return {
-        ...state,
-        grnLines: [...state.grnLines, line],
-        grnBarcode: '',
-        grnLookup: null,
-        grnPrice: '',
-        grnQtyPiece: '',
-        grnQtyPack: '',
-        grnQtyCase: '',
-      };
-    }
-
-    case 'saveGrn': {
-      if (state.grnLines.length === 0) return state;
-      const now = new Date();
-      const entry = {
-        supplier: state.grnSupplier || '(ไม่ระบุซัพพลายเออร์)',
-        doc: state.grnDoc || '—',
-        count: state.grnLines.length,
-        when: '23 ก.ค. 2026 ' + String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0'),
-        by: 'admin.warehouse',
-      };
-      return {
-        ...state,
-        grnLog: [entry, ...state.grnLog],
-        grnLines: [],
-        grnDoc: '',
-        grnBarcode: '',
-        grnLookup: null,
-      };
-    }
 
     case 'openEditSku':
       return {
@@ -460,7 +374,16 @@ export function useAppStore() {
   // Zones, vehicles and the current plan live in localStorage, so they survive
   // a reload without needing the sheet or a backend.
   useEffect(() => {
-    dispatch({ type: 'patch', patch: { zoneRules: loadZoneRules(), vehicles: loadVehicles(), routePlan: loadRoutePlan() } });
+    dispatch({
+      type: 'patch',
+      patch: {
+        zoneRules: loadZoneRules(),
+        vehicles: loadVehicles(),
+        routePlan: loadRoutePlan(),
+        attachments: loadAttachments(),
+        receivingLog: loadReceivingLog(),
+      },
+    });
   }, []);
 
   const actions = useMemo(
@@ -478,10 +401,51 @@ export function useAppStore() {
         dispatch({ type: 'patch', patch: { routePlan: plan } });
         saveRoutePlan(plan);
       },
-      doLookup: () => dispatch({ type: 'doLookup' }),
-      createSkuFromGrn: () => dispatch({ type: 'createSkuFromGrn' }),
-      addGrnLine: () => dispatch({ type: 'addGrnLine' }),
-      saveGrn: () => dispatch({ type: 'saveGrn' }),
+
+      /** Upload to Drive via the backend, then record the returned metadata.
+       * A failure never throws into render — it surfaces as uploadError. */
+      uploadAttachments: async (scope: AttachmentScope, key: string, files: File[], index: AttachmentIndex) => {
+        const storeKey = attachmentKey(scope, key);
+        dispatch({ type: 'patch', patch: { uploadingKey: storeKey, uploadError: null } });
+        try {
+          const uploaded = await uploadToDrive(scope, key, files);
+          const next: AttachmentIndex = { ...index, [storeKey]: [...(index[storeKey] ?? []), ...uploaded] };
+          saveAttachments(next);
+          dispatch({ type: 'patch', patch: { attachments: next, uploadingKey: null } });
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : 'อัปโหลดไฟล์ไม่สำเร็จ';
+          dispatch({ type: 'patch', patch: { uploadingKey: null, uploadError: message } });
+        }
+      },
+      removeAttachment: (scope: AttachmentScope, key: string, fileId: string, index: AttachmentIndex) => {
+        const storeKey = attachmentKey(scope, key);
+        const next: AttachmentIndex = { ...index, [storeKey]: (index[storeKey] ?? []).filter((a) => a.fileId !== fileId) };
+        saveAttachments(next);
+        dispatch({ type: 'patch', patch: { attachments: next } });
+      },
+      clearUploadError: () => dispatch({ type: 'patch', patch: { uploadError: null } }),
+
+      setReceivingLines: (lines: ReceivingLine[]) => dispatch({ type: 'patch', patch: { recvLines: lines } }),
+      addReceivingLine: (lines: ReceivingLine[]) => dispatch({ type: 'patch', patch: { recvLines: [...lines, emptyLine()] } }),
+      saveReceiving: (record: ReceivingRecord, log: ReceivingRecord[]) => {
+        const next = [record, ...log];
+        saveReceivingLog(next);
+        dispatch({
+          type: 'patch',
+          patch: {
+            receivingLog: next,
+            recvLines: [],
+            recvBillNo: '',
+            recvNote: '',
+            recvSaved: receivingFolderKey(record.receivedDate, record.supplier),
+          },
+        });
+      },
+      deleteReceiving: (id: string, log: ReceivingRecord[]) => {
+        const next = log.filter((r) => r.id !== id);
+        saveReceivingLog(next);
+        dispatch({ type: 'patch', patch: { receivingLog: next } });
+      },
       openEditSku: (sku: Sku) => dispatch({ type: 'openEditSku', sku }),
       saveSku: () => dispatch({ type: 'saveSku' }),
       addPromo: () => dispatch({ type: 'addPromo' }),
