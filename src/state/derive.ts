@@ -122,6 +122,14 @@ export function computeRoute(state: AppState, actions: AppActions) {
       go: () => onSelect(v),
     }));
 
+  // The Route column is high-cardinality real-world data (trip numbers,
+  // letter lanes, and ad-hoc values like "รับเอง/1020"), so it gets a
+  // dropdown; status is a small fixed set and stays as chips.
+  const routeOptions = [
+    { value: 'all', label: `ทุกเส้นทาง (${state.routeOrders.length})` },
+    ...routeValues.map((v) => ({ value: v, label: `${v} (${state.routeOrders.filter((o) => o.route === v).length})` })),
+  ];
+
   const rows = filtered.map((o) => ({
     route: o.route,
     orderNo: o.orderNo,
@@ -142,21 +150,81 @@ export function computeRoute(state: AppState, actions: AppActions) {
   }));
 
   const wh = state.routeOrders.find((o) => o.whLat != null && o.whLng != null);
-  const mapStops = filtered.filter((o) => o.lat != null && o.lng != null).map((o) => ({ id: o.orderNo, lat: o.lat as number, lng: o.lng as number, label: o.customer, status: o.status }));
+  const warehouse = wh && wh.whLat != null && wh.whLng != null ? { lat: wh.whLat, lng: wh.whLng } : null;
+
+  const geocoded = filtered
+    .filter((o) => o.lat != null && o.lng != null)
+    .map((o) => ({ id: o.orderNo, lat: o.lat as number, lng: o.lng as number, label: o.customer, status: o.status }));
+
+  // Coordinates coming out of Unii are unreliable (0,0 placeholders, points in
+  // the wrong province or country). Left in, a single bad point stretches the
+  // map bounds until every real stop collapses into one dot — so drop the
+  // implausible ones and tell the user how many were dropped rather than
+  // silently hiding data.
+  const { kept: mapStops, excluded: excludedStopCount } = rejectOutlierStops(geocoded, warehouse);
 
   return {
     routeOrdersLoading: state.routeOrdersLoading,
     routeOrdersError: state.routeOrdersError,
     routeQ: state.routeQ,
     onRouteSearch: (v: string) => actions.patch({ routeQ: v }),
-    routeTabs: makeTabs(routeValues, state.routeFilterValue, (v) => actions.patch({ routeFilterValue: v })),
+    routeOptions,
+    routeFilterValue: state.routeFilterValue,
+    onRouteFilter: (v: string) => actions.patch({ routeFilterValue: v }),
     statusTabs: makeTabs(statusValues, state.routeStatusFilter, (v) => actions.patch({ routeStatusFilter: v })),
     rows,
     resultCount: filtered.length,
     isEmpty: filtered.length === 0,
     mapStops,
-    warehouse: wh && wh.whLat != null && wh.whLng != null ? { lat: wh.whLat, lng: wh.whLng } : null,
+    excludedStopCount,
+    warehouse,
   };
+}
+
+export interface MapStop {
+  id: string;
+  lat: number;
+  lng: number;
+  label: string;
+  status: string;
+}
+
+/** Radius (km) around the bulk of the delivery area beyond which a coordinate
+ * is treated as bad data rather than a genuinely distant customer. Generous
+ * enough to keep real cross-province drops, tight enough to exclude
+ * wrong-country and (0,0) values. */
+const MAX_PLAUSIBLE_RADIUS_KM = 200;
+
+export function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const R = 6371;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(bLat - aLat);
+  const dLng = toRad(bLng - aLng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+function median(values: number[]): number {
+  const s = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+export function rejectOutlierStops(stops: MapStop[], warehouse: { lat: number; lng: number } | null): { kept: MapStop[]; excluded: number } {
+  if (stops.length === 0) return { kept: [], excluded: 0 };
+
+  // Anchor on the warehouse when known, else on the median point — either way
+  // a minority of bad coordinates can't drag the reference off the real area.
+  const anchor = warehouse ?? { lat: median(stops.map((s) => s.lat)), lng: median(stops.map((s) => s.lng)) };
+
+  const kept = stops.filter((s) => {
+    if (!Number.isFinite(s.lat) || !Number.isFinite(s.lng)) return false;
+    if (s.lat === 0 && s.lng === 0) return false; // classic "no coordinate" placeholder
+    if (s.lat < -90 || s.lat > 90 || s.lng < -180 || s.lng > 180) return false;
+    return haversineKm(anchor.lat, anchor.lng, s.lat, s.lng) <= MAX_PLAUSIBLE_RADIUS_KM;
+  });
+
+  return { kept, excluded: stops.length - kept.length };
 }
 
 // ---------- BATCH PICKING ----------

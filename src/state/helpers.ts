@@ -70,3 +70,18 @@ const sheetStatusKind: Record<string, BadgeKind> = {
 export function sheetStatusStyle(status: string): CSSProperties {
   return badgeStyle(sheetStatusKind[status] ?? 'neutral');
 }
+
+// Map markers need a concrete colour, not a CSS var — Leaflet paints onto
+// canvas/SVG outside the token-inheriting DOM.
+const badgeKindHex: Record<BadgeKind, string> = {
+  ok: '#78e3ac',
+  warn: '#edc866',
+  bad: '#f19a9a',
+  info: '#8fb2ef',
+  accent: '#be4696',
+  neutral: '#9397ab',
+};
+
+export function sheetStatusColor(status: string): string {
+  return badgeKindHex[sheetStatusKind[status] ?? 'neutral'];
+}

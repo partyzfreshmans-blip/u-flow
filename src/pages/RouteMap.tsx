@@ -1,3 +1,8 @@
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+import { useEffect, useRef } from 'react';
+import { sheetStatusColor } from '../state/helpers';
+
 interface Stop {
   id: string;
   lat: number;
@@ -11,85 +16,70 @@ interface Props {
   warehouse: { lat: number; lng: number } | null;
 }
 
-/** Plots real lat/lng onto a simple equirectangular projection, scaled to
- * fit whatever points are present (plus the warehouse). No tile layer —
- * this is a relative-position sketch, not a street map. */
 export function RouteMap({ stops, warehouse }: Props) {
-  const points = [...stops, ...(warehouse ? [{ id: '__wh', lat: warehouse.lat, lng: warehouse.lng, label: 'คลังสินค้า', status: '__wh' }] : [])];
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<L.Map | null>(null);
+  const layerRef = useRef<L.LayerGroup | null>(null);
 
-  if (points.length === 0) {
-    return (
-      <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', color: 'var(--color-neutral-500)', fontSize: 13 }}>
-        ไม่มีพิกัดสำหรับแสดงบนแผนที่
-      </div>
-    );
-  }
+  // Create the map once; markers are re-drawn separately as filters change.
+  useEffect(() => {
+    if (!containerRef.current || mapRef.current) return;
+    const map = L.map(containerRef.current, { zoomControl: true, attributionControl: true });
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap',
+    }).addTo(map);
+    map.setView([18.56, 99.04], 10); // Lamphun / Chiang Mai, until data arrives
+    layerRef.current = L.layerGroup().addTo(map);
+    mapRef.current = map;
 
-  const lats = points.map((p) => p.lat);
-  const lngs = points.map((p) => p.lng);
-  const minLat = Math.min(...lats);
-  const maxLat = Math.max(...lats);
-  const minLng = Math.min(...lngs);
-  const maxLng = Math.max(...lngs);
-  const spanLat = Math.max(maxLat - minLat, 0.01);
-  const spanLng = Math.max(maxLng - minLng, 0.01);
+    return () => {
+      map.remove();
+      mapRef.current = null;
+      layerRef.current = null;
+    };
+  }, []);
 
-  const pad = 8;
-  const project = (lat: number, lng: number) => ({
-    x: pad + ((lng - minLng) / spanLng) * (100 - pad * 2),
-    // latitude grows northward, screen y grows downward
-    y: pad + ((maxLat - lat) / spanLat) * (100 - pad * 2),
-  });
+  useEffect(() => {
+    const map = mapRef.current;
+    const layer = layerRef.current;
+    if (!map || !layer) return;
 
-  return (
-    <div
-      style={{
-        position: 'absolute', inset: 0, overflow: 'hidden',
-        background:
-          'repeating-linear-gradient(0deg, var(--color-neutral-900) 0, var(--color-neutral-900) 1px, transparent 1px, transparent 42px), repeating-linear-gradient(90deg, var(--color-neutral-900) 0, var(--color-neutral-900) 1px, transparent 1px, transparent 42px), var(--color-bg)',
-      }}
-    >
-      {warehouse && (
-        <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}>
-          {stops.map((s) => {
-            const a = project(warehouse.lat, warehouse.lng);
-            const b = project(s.lat, s.lng);
-            return <line key={s.id} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="var(--color-accent-800)" strokeWidth={0.25} />;
-          })}
-        </svg>
-      )}
+    layer.clearLayers();
 
-      {stops.map((s) => {
-        const { x, y } = project(s.lat, s.lng);
-        return (
-          <div
-            key={s.id}
-            title={`${s.label} · ${s.status}`}
-            style={{
-              position: 'absolute', left: `${x}%`, top: `${y}%`, transform: 'translate(-50%, -50%)',
-              width: 11, height: 11, borderRadius: '50%', background: 'var(--color-accent)',
-              border: '2px solid var(--color-bg)', boxShadow: '0 2px 6px rgba(0,0,0,.5)',
-            }}
-          />
-        );
-      })}
+    if (warehouse) {
+      L.marker([warehouse.lat, warehouse.lng], {
+        icon: L.divIcon({
+          className: '',
+          html: '<div style="width:26px;height:26px;border-radius:7px;background:#78e3ac;color:#0b0c14;display:grid;place-items:center;font-weight:700;font-size:13px;border:2px solid #161826;box-shadow:0 2px 8px rgba(0,0,0,.6)">คล</div>',
+          iconSize: [26, 26],
+          iconAnchor: [13, 13],
+        }),
+      })
+        .bindTooltip('คลังสินค้า')
+        .addTo(layer);
+    }
 
-      {warehouse && (() => {
-        const { x, y } = project(warehouse.lat, warehouse.lng);
-        return (
-          <div
-            title="คลังสินค้า"
-            style={{
-              position: 'absolute', left: `${x}%`, top: `${y}%`, transform: 'translate(-50%, -50%)',
-              width: 28, height: 28, borderRadius: 8, background: 'var(--st-ok-fg)', color: '#0b0c14',
-              display: 'grid', placeItems: 'center', fontSize: 15, border: '2px solid var(--color-bg)',
-              boxShadow: '0 3px 10px rgba(0,0,0,.55)',
-            }}
-          >
-            <i className="ph ph-warehouse" />
-          </div>
-        );
-      })()}
-    </div>
-  );
+    for (const s of stops) {
+      L.circleMarker([s.lat, s.lng], {
+        radius: 6,
+        color: '#161826',
+        weight: 2,
+        fillColor: sheetStatusColor(s.status),
+        fillOpacity: 0.95,
+      })
+        .bindTooltip(`${s.label} · ${s.status || '—'}`)
+        .addTo(layer);
+    }
+
+    const points: L.LatLngExpression[] = stops.map((s) => [s.lat, s.lng]);
+    if (warehouse) points.push([warehouse.lat, warehouse.lng]);
+    if (points.length > 1) {
+      map.fitBounds(L.latLngBounds(points).pad(0.15));
+    } else if (points.length === 1) {
+      map.setView(points[0], 13);
+    }
+  }, [stops, warehouse]);
+
+  return <div ref={containerRef} style={{ position: 'absolute', inset: 0, background: 'var(--color-bg)' }} />;
 }

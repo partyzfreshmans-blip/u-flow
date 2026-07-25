@@ -24,19 +24,21 @@ export function RoutePage({ state, actions }: { state: AppState; actions: AppAct
           <i className="ph ph-magnifying-glass" style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', fontSize: 15, color: 'var(--color-neutral-500)' }} />
           <input className="input" style={{ paddingLeft: 32 }} placeholder="ค้นหาลูกค้า / เลขคำสั่งซื้อ" value={v.routeQ} onChange={(e) => v.onRouteSearch(e.target.value)} />
         </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11.5, color: 'var(--color-neutral-500)' }}>
+          เส้นทาง
+          <select className="input" style={{ width: 'auto', minWidth: 160 }} value={v.routeFilterValue} onChange={(e) => v.onRouteFilter(e.target.value)}>
+            {v.routeOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </label>
         <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-neutral-500)' }}>{v.resultCount} รายการ</div>
       </div>
 
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8, alignItems: 'center' }}>
-        <span style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginRight: 2 }}>เส้นทาง</span>
-        {v.routeTabs.map((t) => <button key={t.key} style={t.style} onClick={t.go}>{t.label}</button>)}
-      </div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16, alignItems: 'center' }}>
         <span style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginRight: 2 }}>สถานะ</span>
         {v.statusTabs.map((t) => <button key={t.key} style={t.style} onClick={t.go}>{t.label}</button>)}
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 380px', gap: 18, alignItems: 'start' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 460px', gap: 18, alignItems: 'start' }}>
         <div className="card elev-sm" style={{ padding: '4px 14px 8px' }}>
           <table className="table">
             <thead>
@@ -76,8 +78,18 @@ export function RoutePage({ state, actions }: { state: AppState; actions: AppAct
           )}
         </div>
 
-        <div className="card elev-sm" style={{ padding: 0, overflow: 'hidden', height: 560, position: 'relative', top: 0 }}>
-          <RouteMap stops={v.mapStops} warehouse={v.warehouse} />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, position: 'sticky', top: 96 }}>
+          <div className="card elev-sm" style={{ padding: 0, overflow: 'hidden', height: 620, position: 'relative' }}>
+            <RouteMap stops={v.mapStops} warehouse={v.warehouse} />
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 11, color: 'var(--color-neutral-500)' }}>
+            <span><i className="ph ph-map-pin" style={{ marginRight: 3 }} />แสดง {v.mapStops.length} จุด</span>
+            {v.excludedStopCount > 0 && (
+              <span style={{ color: 'var(--st-warn-fg)' }} title="พิกัดผิดปกติ เช่น 0,0 หรืออยู่ไกลเกินจริง — ถูกซ่อนไว้เพื่อไม่ให้แผนที่ซูมออกจนดูไม่รู้เรื่อง">
+                <i className="ph ph-warning" style={{ marginRight: 3 }} />ซ่อนพิกัดผิดปกติ {v.excludedStopCount} จุด
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
