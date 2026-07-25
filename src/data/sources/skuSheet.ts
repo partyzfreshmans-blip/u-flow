@@ -1,23 +1,8 @@
-import Papa from 'papaparse';
+import { SHEET_TABS, csvExportUrl } from '../../config/sheets';
 import type { Sku } from '../types';
+import { fetchSheetRows } from './sheetCsv';
 
-const SHEET_ID = '1gfbuVcH88ugwXgar393voAfcdOsS_qoi9galIFbWNXM';
-const GID = '0';
-
-// Public "anyone with the link can view" sheet — CSV export needs no API key.
-const CSV_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${GID}`;
-
-interface SheetRow {
-  'SKU ID': string;
-  'บาร์โค้ด (Barcode)': string;
-  'ชื่อสินค้า (Product Name)': string;
-  'หน่วยสินค้า (Unit)': string;
-  Barcode: string;
-  Comment: string;
-  'สต็อกปัจจุบัน (Stock)': string;
-  'สถานะในสต็อก (In Stock)': string;
-  'แหล่งข้อมูล (Branch/Hub)': string;
-}
+const CSV_URL = csvExportUrl(SHEET_TABS.skuMaster);
 
 function cleanBarcode(...candidates: (string | undefined)[]): string {
   for (const c of candidates) {
@@ -27,7 +12,7 @@ function cleanBarcode(...candidates: (string | undefined)[]): string {
   return '';
 }
 
-function rowToSku(row: SheetRow, index: number): Sku | null {
+function rowToSku(row: Record<string, string>, index: number): Sku | null {
   const skuId = (row['SKU ID'] ?? '').trim();
   const name = (row['ชื่อสินค้า (Product Name)'] ?? '').trim();
   if (!skuId && !name) return null; // skip fully blank rows
@@ -52,13 +37,8 @@ function rowToSku(row: SheetRow, index: number): Sku | null {
 }
 
 export async function fetchSkusFromSheet(): Promise<Sku[]> {
-  const res = await fetch(CSV_URL);
-  if (!res.ok) {
-    throw new Error(`Failed to load SKU sheet (HTTP ${res.status})`);
-  }
-  const csvText = await res.text();
-  const parsed = Papa.parse<SheetRow>(csvText, { header: true, skipEmptyLines: true });
-  return parsed.data.map(rowToSku).filter((s): s is Sku => s !== null);
+  const rows = await fetchSheetRows(CSV_URL);
+  return rows.map(rowToSku).filter((s): s is Sku => s !== null);
 }
 
 export { CSV_URL as SKU_SHEET_CSV_URL };

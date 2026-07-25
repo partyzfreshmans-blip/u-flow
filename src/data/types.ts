@@ -1,3 +1,4 @@
+// ---------- COD / batch picking (unchanged — still local/mock, out of scope) ----------
 export type OrderStatus = 'pending' | 'delivering' | 'delivered' | 'cleared';
 export type SyncStatus = 'synced' | 'pending' | 'error';
 
@@ -29,6 +30,7 @@ export interface PickBatch {
   items: PickItem[];
 }
 
+// ---------- Promotions (sheet-sourced list; local "create promo" form unchanged) ----------
 export type PromoStatus = 'active' | 'upcoming' | 'expired';
 
 export interface Promo {
@@ -41,6 +43,7 @@ export interface Promo {
   st: PromoStatus;
 }
 
+// ---------- GRN (unchanged) ----------
 export interface GrnLogEntry {
   supplier: string;
   doc: string;
@@ -58,6 +61,7 @@ export interface GrnLine {
   cs: number;
 }
 
+// ---------- SKU master (Google Sheet) ----------
 export type SkuStatus = 'active' | 'inactive';
 
 export interface Sku {
@@ -73,29 +77,87 @@ export interface Sku {
   status: SkuStatus;
 }
 
-export type PayType = 'cod' | 'credit';
-export type CustomerStatus = 'active' | 'hold';
-
-export interface Customer {
-  id: string;
-  name: string;
-  addr: string;
-  route: 'A' | 'B';
-  pay: PayType;
-  limit: number;
-  balance: number;
-  term: number;
-  status: CustomerStatus;
-  conds: string[];
-  /** Coordinates as reported by the Unii API — can be wrong; see customerOverrides. */
+// ---------- Dashboard / "API Import" tab: newest, not-yet-routed orders ----------
+export interface ApiImportOrder {
+  no: string;
+  orderUid: string;
+  /** Real Thai status text from the sheet, e.g. รอยืนยันออเดอร์ / กำลังดำเนินการ /
+   * รอชำระเงิน / ได้รับแล้ว / ยกเลิก — shown verbatim, not translated into an enum. */
+  status: string;
+  paymentType: string;
+  paid: string;
+  itemCount: number;
+  totalAmount: number;
+  customer: string;
+  phone: string;
+  address: string;
+  district: string;
+  province: string;
+  orderedAt: string;
+  deliveredAt: string;
+  completedAt: string;
+  wantsTaxInvoice: string;
+  updatedAt: string;
   lat: number | null;
   lng: number | null;
 }
 
-export interface LatLngOverride {
-  lat: number;
-  lng: number;
-  updatedAt: string;
+// ---------- Route planning / delivery history: "คำสั่งซื้อ" tab ----------
+export interface RouteOrder {
+  /** Effective route: the manual "Route" column if set, else the "AutoR" column. */
+  route: string;
+  plannedDeliveryDate: string;
+  orderedAtText: string;
+  customer: string;
+  orderNo: string;
+  itemCount: number;
+  totalAmount: number;
+  paymentType: string;
+  status: string;
+  note: string;
+  isNewCustomer: string;
+  orderedDate: string;
+  deliveredDate: string;
+  completedDate: string;
+  updatedDate: string;
+  districtProvince: string;
+  addressFromUnii: string;
+  mapLink: string;
+  lat: number | null;
+  lng: number | null;
+  phone: string;
+  distanceFromWhKm: number | null;
+  whLat: number | null;
+  whLng: number | null;
+}
+
+// ---------- Order line items: "SKU Detail" tab ----------
+export interface OrderLineItem {
+  no: string;
+  orderNo: string;
+  orderedAt: string;
+  customer: string;
+  sku: string;
+  productName: string;
+  unit: string;
+  qty: number;
+  unitPrice: number;
+  discount: number;
+  lineTotal: number;
+}
+
+// ---------- Customers: "CS Master" tab (read + lat/lng write-back) ----------
+export interface CsMasterCustomer {
+  /** 1-based row number in the sheet (header row = 1); used to target writes. */
+  rowIndex: number;
+  name: string;
+  phone: string;
+  address: string;
+  lat: number | null;
+  lng: number | null;
+  mapLink: string;
+  wantsTaxInvoice: string;
+  note: string;
 }
 
 export type RouteKey = 'dashboard' | 'route' | 'pick' | 'cod' | 'promo' | 'grn' | 'sku' | 'customer' | 'settings';

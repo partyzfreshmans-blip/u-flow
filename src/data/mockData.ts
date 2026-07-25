@@ -1,4 +1,10 @@
-import type { Customer, GrnLogEntry, Order, PickBatch, Promo } from './types';
+import type { GrnLogEntry, Order, PickBatch } from './types';
+
+// Everything below is still local/mock — COD clearing, batch picking, and
+// GRN supplier list were out of scope for the Google Sheets migration and
+// keep their illustrative data. SKU master, dashboard orders, route/delivery
+// history, promotions, and customers now load from Google Sheets at runtime
+// (see src/data/sources/*.ts and src/state/store.ts).
 
 export const suppliers = [
   'บ.สหพัฒนพิบูล จำกัด',
@@ -20,13 +26,6 @@ export const orders: Order[] = [
   { id: 'OD-6010', cust: 'ครัวคุณแม่ (เครดิต)', addr: 'ถ.รัชดา 32', route: 'B', driver: 'วิรัช ต.', status: 'delivering', cod: false, amt: 0, items: 5, date: '23 ก.ค.', sync: 'synced' },
 ];
 
-export const laneDriver: Record<'A' | 'B', string> = { A: 'สมชาย ป.', B: 'วิรัช ต.' };
-
-export const initialLanes: Record<'A' | 'B', string[]> = {
-  A: ['OD-6001', 'OD-6003', 'OD-6004', 'OD-6009'],
-  B: ['OD-6005', 'OD-6008', 'OD-6006', 'OD-6007', 'OD-6010'],
-};
-
 export const pickBatch: PickBatch = {
   id: 'PICK-2207',
   meta: 'รอบเช้า · Route A · รวม 3 ออเดอร์ (OD-6001, OD-6003, OD-6004)',
@@ -40,33 +39,7 @@ export const pickBatch: PickBatch = {
   ],
 };
 
-export const promos: Promo[] = [
-  { name: 'น้ำปลาทิพรส ลด 10%', value: 'ลด 10%', sku: 'SKU00123', skuName: 'น้ำปลาทิพรส 700ml', type: 'ลดราคา', period: '01–31 ก.ค. 2026', st: 'active' },
-  { name: 'ปลากระป๋อง ซื้อ 12 แถม 1', value: 'ของแถม 1 กระป๋อง', sku: 'SKU00125', skuName: 'ปลากระป๋องสามแม่ครัว', type: 'ของแถม', period: '15 ก.ค.–15 ส.ค. 2026', st: 'active' },
-  { name: 'มาม่าต้มยำ ล้างสต็อก', value: 'ลด 2฿/ซอง', sku: 'SKU00128', skuName: 'บะหมี่มาม่าต้มยำกุ้ง', type: 'ลดราคา', period: '20–28 ก.ค. 2026', st: 'active' },
-  { name: 'น้ำมันพืช + ผงซักฟอก จับคู่', value: 'ซื้อคู่ ลด 25฿', sku: 'SKU00124', skuName: 'น้ำมันพืชองุ่น 1L', type: 'ซื้อพ่วง', period: '25 ก.ค.–10 ส.ค. 2026', st: 'upcoming' },
-  { name: 'บรีสโปรเปิดเทอม', value: 'ของแถม กล่องสบู่', sku: 'SKU00126', skuName: 'ผงซักฟอกบรีส 800g', type: 'ของแถม', period: '01–10 ส.ค. 2026', st: 'upcoming' },
-  { name: 'นมข้นตรามะลิ ลดพิเศษ', value: 'ลด 8฿/กระป๋อง', sku: 'SKU00127', skuName: 'นมข้นหวานตรามะลิ', type: 'ลดราคา', period: '01–20 ก.ค. 2026', st: 'expired' },
-];
-
 export const initialGrnLog: GrnLogEntry[] = [
   { supplier: 'บ.สหพัฒนพิบูล จำกัด', doc: 'SP-2207', count: 3, when: '22 ก.ค. 2026 09:14', by: 'admin.warehouse' },
   { supplier: 'บ.ทิพรสอุตสาหกรรม จำกัด', doc: 'TP-1180', count: 5, when: '21 ก.ค. 2026 16:40', by: 'somchai.k' },
-];
-
-// SKU master is no longer mocked here — it's loaded at runtime from the
-// Google Sheet (see src/data/sources/skuSheet.ts) and kept in AppState.
-
-// Placeholder shown until the Unii customer-list endpoint is wired in
-// (src/data/sources/uniiCustomers.ts) — replaced automatically once that
-// fetch succeeds. lat/lng here are illustrative only.
-export const initialCustomers: Customer[] = [
-  { id: 'CUST-101', name: 'ร้านเจ๊แดง มินิมาร์ท', addr: 'ซ.ลาดพร้าว 71', route: 'A', pay: 'cod', limit: 0, balance: 0, term: 0, status: 'active', conds: ['ส่งก่อน 12:00', 'เก็บเงินสดเท่านั้น'], lat: 18.7912, lng: 98.9814 },
-  { id: 'CUST-102', name: 'ร้านลุงสมชาย โชห่วย', addr: 'ถ.รามอินทรา กม.4', route: 'A', pay: 'credit', limit: 30000, balance: 12500, term: 15, status: 'active', conds: ['ราคาส่งระดับ B'], lat: 18.7975, lng: 98.9901 },
-  { id: 'CUST-103', name: 'คุณนิด มินิมาร์ท', addr: 'ซ.นวมินทร์ 42', route: 'A', pay: 'credit', limit: 50000, balance: 47800, term: 30, status: 'active', conds: ['ใกล้เต็มวงเงิน — เฝ้าระวัง'], lat: 18.7841, lng: 98.9779 },
-  { id: 'CUST-104', name: 'เซเว่นเดย์ บางกะปิ', addr: 'ถ.ลาดพร้าว 122', route: 'A', pay: 'credit', limit: 80000, balance: 21000, term: 30, status: 'active', conds: ['ออกใบกำกับภาษีเต็มรูป'], lat: 18.8033, lng: 98.9852 },
-  { id: 'CUST-105', name: 'ร้านป้ามาลี ของชำ', addr: 'ถ.สุขาภิบาล 5', route: 'B', pay: 'cod', limit: 0, balance: 0, term: 0, status: 'active', conds: [], lat: 18.7699, lng: 99.0021 },
-  { id: 'CUST-106', name: 'ร้านเฮียตง ค้าส่ง', addr: 'ตลาดไท คลอง 1', route: 'B', pay: 'credit', limit: 150000, balance: 152300, term: 45, status: 'hold', conds: ['เกินวงเงิน — ระงับออเดอร์ใหม่', 'ยอดค้างเกินกำหนดชำระ'], lat: 18.7756, lng: 98.9688 },
-  { id: 'CUST-107', name: 'มินิบิ๊กโฮม', addr: 'ถ.เสรีไทย 57', route: 'B', pay: 'cod', limit: 0, balance: 0, term: 0, status: 'active', conds: ['ห้ามรับคืนสินค้าแช่เย็น'], lat: 18.8102, lng: 98.9945 },
-  { id: 'CUST-108', name: 'ครัวคุณแม่', addr: 'ถ.รัชดา 32', route: 'B', pay: 'credit', limit: 20000, balance: 8000, term: 15, status: 'active', conds: ['ส่งเฉพาะวันจันทร์/พฤหัส'], lat: 18.7884, lng: 99.0102 },
 ];

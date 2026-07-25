@@ -9,120 +9,86 @@ export function CustomerPage({ state, actions }: { state: AppState; actions: App
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
         <div style={{ position: 'relative', flex: 1, minWidth: 220, maxWidth: 360 }}>
           <i className="ph ph-magnifying-glass" style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', fontSize: 15, color: 'var(--color-neutral-500)' }} />
-          <input className="input" style={{ paddingLeft: 32 }} placeholder="ค้นหารหัส / ชื่อร้าน" value={v.custQ} onChange={(e) => v.onCustSearch(e.target.value)} />
+          <input className="input" style={{ paddingLeft: 32 }} placeholder="ค้นหาชื่อ / เบอร์โทร" value={v.custQ} onChange={(e) => v.onCustSearch(e.target.value)} />
         </div>
-        <button className="btn btn-primary" style={{ marginLeft: 'auto' }} onClick={v.openAddCust}><i className="ph ph-plus" />เพิ่มลูกค้าใหม่</button>
+        {!v.customersLoading && !v.customersError && (
+          <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-neutral-500)' }}>โหลดจาก CS Master แล้ว {v.customerCount} รายการ</div>
+        )}
       </div>
 
       {v.customersLoading && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: 13, marginBottom: 14, borderRadius: 10, background: 'var(--color-surface)', fontSize: 13, color: 'var(--color-neutral-400)' }}>
-          <i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังโหลดรายชื่อลูกค้าจาก Unii...
+          <i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังโหลดรายชื่อลูกค้าจาก Google Sheet...
         </div>
       )}
       {v.customersError && (
         <div style={{ display: 'flex', gap: 9, padding: 13, marginBottom: 14, borderRadius: 10, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 13 }}>
-          <i className="ph ph-warning-fill" style={{ flex: 'none' }} />โหลดรายชื่อลูกค้าจาก Unii ไม่สำเร็จ: {v.customersError} — กำลังแสดงข้อมูลตัวอย่างแทน
+          <i className="ph ph-warning-fill" style={{ flex: 'none' }} />โหลดรายชื่อลูกค้าไม่สำเร็จ: {v.customersError}
         </div>
       )}
 
       <div className="card elev-sm" style={{ padding: '4px 14px 8px' }}>
         <table className="table">
           <thead>
-            <tr>
-              <th>รหัส</th><th>ร้านค้า</th><th>เส้นทาง</th><th>การชำระ</th><th style={{ textAlign: 'right' }}>วงเงิน / ยอดค้าง</th>
-              <th style={{ textAlign: 'center' }}>เทอม</th><th>เงื่อนไขพิเศษ</th><th>พิกัด</th><th>สถานะ</th><th></th>
-            </tr>
+            <tr><th>ชื่อ</th><th>เบอร์โทร</th><th>ที่อยู่</th><th>พิกัด (lat, lng)</th><th>ใบกำกับภาษี</th><th>หมายเหตุ</th><th></th></tr>
           </thead>
           <tbody>
             {v.custRows.map((c) => (
-              <tr key={c.id}>
-                <td style={{ fontWeight: 500, fontVariantNumeric: 'tabular-nums' }}>{c.id}</td>
-                <td>{c.name}<div style={{ fontSize: 11, color: 'var(--color-neutral-500)' }}>{c.addr}</div></td>
-                <td><span style={{ display: 'inline-flex', fontSize: 11, padding: '2px 8px', borderRadius: 5, background: 'var(--color-neutral-800)', color: 'var(--color-neutral-200)' }}>Route {c.route}</span></td>
-                <td><span style={c.payStyle}>{c.payLabel}</span></td>
-                <td style={{ textAlign: 'right' }}>
-                  {c.hasCredit && (
-                    <>
-                      <div style={{ fontSize: 12.5, fontVariantNumeric: 'tabular-nums', ...c.balanceStyle }}>{c.balanceText} / {c.limitText}</div>
-                      <div style={{ height: 4, borderRadius: 3, background: 'var(--color-neutral-800)', marginTop: 3, overflow: 'hidden' }}>
-                        <div style={{ height: '100%', borderRadius: 3, background: c.barFill, width: `${c.usagePct}%` }} />
-                      </div>
-                    </>
-                  )}
-                  {c.noCredit && <span style={{ fontSize: 12, color: 'var(--color-neutral-600)' }}>—</span>}
-                </td>
-                <td style={{ textAlign: 'center', fontSize: 12.5, color: 'var(--color-neutral-400)' }}>{c.termText}</td>
-                <td>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, maxWidth: 230 }}>
-                    {c.conds.map((cd, i) => <span key={i} style={cd.style}>{cd.text}</span>)}
-                    {c.noConds && <span style={{ fontSize: 11.5, color: 'var(--color-neutral-600)' }}>ไม่มีเงื่อนไขพิเศษ</span>}
-                  </div>
-                </td>
-                <td style={{ fontSize: 11.5, fontVariantNumeric: 'tabular-nums', color: 'var(--color-neutral-400)' }}>
+              <tr key={c.rowIndex}>
+                <td style={{ fontWeight: 500 }}>{c.name}</td>
+                <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12.5, color: 'var(--color-neutral-400)' }}>{c.phone}</td>
+                <td style={{ fontSize: 12, maxWidth: 260 }}>{c.address}</td>
+                <td style={{ fontSize: 11.5, fontVariantNumeric: 'tabular-nums', color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>
                   {c.locText}
-                  {c.hasOverride && <div style={{ fontSize: 10, color: 'var(--st-warn-fg)' }}><i className="ph ph-map-pin" style={{ marginRight: 3 }} />แก้ไขแล้ว</div>}
+                  {c.mapLink && (
+                    <a href={c.mapLink} target="_blank" rel="noreferrer" style={{ marginLeft: 6, fontSize: 12 }} title="เปิดใน Google Maps">
+                      <i className="ph ph-map-pin" />
+                    </a>
+                  )}
                 </td>
-                <td><span style={c.stStyle}>{c.stLabel}</span></td>
-                <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={c.edit}>แก้ไข</button></td>
+                <td style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{c.wantsTaxInvoice || '—'}</td>
+                <td style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', maxWidth: 160 }}>{c.note || '—'}</td>
+                <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={c.edit}>แก้พิกัด</button></td>
               </tr>
             ))}
           </tbody>
         </table>
+        {!v.customersLoading && v.custRows.length === 0 && (
+          <div style={{ padding: 26, textAlign: 'center', color: 'var(--color-neutral-500)', fontSize: 12.5 }}>ไม่พบลูกค้าที่ตรงกับคำค้นหา</div>
+        )}
       </div>
 
-      {v.custModalOpen && (
-        <div className="dialog-backdrop" onClick={v.closeCust}>
-          <div className="dialog" onClick={(e) => e.stopPropagation()} style={{ width: 'min(520px, 100%)' }}>
-            <div className="dialog-title">{v.custModalTitle}</div>
+      {v.editModalOpen && (
+        <div className="dialog-backdrop" onClick={v.closeEdit}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-title">แก้ไขพิกัดลูกค้า</div>
             <div className="dialog-body" style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 11 }}>
-                <div className="field"><label>รหัสลูกค้า</label><input className="input" value={v.custF.id} onChange={(e) => v.onCFId(e.target.value)} disabled={v.custIsEdit} /></div>
-                <div className="field"><label>ชื่อร้าน</label><input className="input" value={v.custF.name} onChange={(e) => v.onCFName(e.target.value)} /></div>
+              <div style={{ fontSize: 13.5 }}>
+                <b>{v.editingName}</b>
+                <div style={{ fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums' }}>{v.editingPhone}</div>
+                <div style={{ fontSize: 12, color: 'var(--color-neutral-500)', marginTop: 4 }}>{v.editingAddress}</div>
               </div>
-              <div className="field"><label>ที่อยู่</label><input className="input" value={v.custF.addr} onChange={(e) => v.onCFAddr(e.target.value)} /></div>
+              <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)' }}>
+                พิกัดปัจจุบันในชีท: <span style={{ fontVariantNumeric: 'tabular-nums' }}>{v.editingOriginalLatLngText}</span>
+              </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 11 }}>
-                <div className="field"><label>เส้นทาง</label>
-                  <select className="input" value={v.custF.route} onChange={(e) => v.onCFRoute(e.target.value as 'A' | 'B')}>
-                    <option>A</option><option>B</option>
-                  </select>
-                </div>
-                <div className="field"><label>ประเภทการชำระ</label>
-                  <div className="seg" style={{ width: '100%' }}>
-                    <label className="seg-opt" style={{ flex: 1, justifyContent: 'center' }}><input type="radio" name="cpay" checked={v.custPayCod} onChange={v.setPayCod} />เงินสดปลายทาง</label>
-                    <label className="seg-opt" style={{ flex: 1, justifyContent: 'center' }}><input type="radio" name="cpay" checked={v.custPayCredit} onChange={v.setPayCredit} />เครดิต</label>
-                  </div>
-                </div>
+                <div className="field"><label>Latitude (ละ)</label><input className="input" value={v.custEditLat} onChange={(e) => v.onEditLat(e.target.value)} disabled={v.custEditSaving} /></div>
+                <div className="field"><label>Longitude (ลอง)</label><input className="input" value={v.custEditLng} onChange={(e) => v.onEditLng(e.target.value)} disabled={v.custEditSaving} /></div>
               </div>
-              {v.custPayCredit && (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 11 }}>
-                  <div className="field"><label>วงเงินเครดิต (฿)</label><input className="input" inputMode="numeric" value={v.custF.limit} onChange={(e) => v.onCFLimit(e.target.value)} /></div>
-                  <div className="field"><label>ยอดค้าง (฿)</label><input className="input" inputMode="numeric" value={v.custF.balance} onChange={(e) => v.onCFBalance(e.target.value)} /></div>
-                  <div className="field"><label>เทอม (วัน)</label><input className="input" inputMode="numeric" value={v.custF.term} onChange={(e) => v.onCFTerm(e.target.value)} /></div>
+              <div style={{ fontSize: 11, color: 'var(--color-neutral-500)' }}>
+                <i className="ph ph-info" style={{ marginRight: 4 }} />บันทึกแล้วจะเขียนทับแถวเดิมใน Google Sheet (CS Master) โดยตรง ไม่เพิ่มแถวใหม่
+              </div>
+              {v.custEditError && (
+                <div style={{ display: 'flex', gap: 9, padding: 11, borderRadius: 9, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 12.5 }}>
+                  <i className="ph ph-warning-fill" style={{ flex: 'none' }} />{v.custEditError}
                 </div>
               )}
-              <div className="field"><label>เงื่อนไข / ข้อจำกัดพิเศษ (บรรทัดละ 1 ข้อ)</label>
-                <textarea className="input" style={{ minHeight: 74 }} value={v.custF.conds} onChange={(e) => v.onCFConds(e.target.value)} placeholder={'เช่น ส่งก่อน 12:00\nเก็บเงินสดเท่านั้น'} />
-              </div>
-              <div className="field">
-                <label>พิกัด (lat, lng) {v.custIsEdit && <span style={{ fontWeight: 400, color: 'var(--color-neutral-500)' }}>— {v.custOriginalLatLngText}</span>}</label>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 11 }}>
-                  <input className="input" placeholder="Latitude" value={v.custF.lat} onChange={(e) => v.onCFLat(e.target.value)} />
-                  <input className="input" placeholder="Longitude" value={v.custF.lng} onChange={(e) => v.onCFLng(e.target.value)} />
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--color-neutral-500)', marginTop: 4 }}>
-                  <i className="ph ph-info" style={{ marginRight: 4 }} />ถ้าพิกัดจาก Unii ผิด แก้ที่นี่ได้ — ค่าที่แก้จะถูกเก็บแยกไว้ในเครื่องนี้ และใช้แทนค่าเดิมจาก API
-                </div>
-              </div>
-              <div className="field"><label>สถานะบัญชี</label>
-                <select className="input" value={v.custF.status} onChange={(e) => v.onCFStatus(e.target.value as 'active' | 'hold')}>
-                  <option value="active">ปกติ</option>
-                  <option value="hold">ระงับ / ตรวจสอบ</option>
-                </select>
-              </div>
             </div>
             <div className="dialog-actions">
-              <button className="btn btn-secondary" onClick={v.closeCust}>ยกเลิก</button>
-              <button className="btn btn-primary" onClick={v.saveCust}>บันทึก</button>
+              <button className="btn btn-secondary" onClick={v.closeEdit} disabled={v.custEditSaving}>ยกเลิก</button>
+              <button className="btn btn-primary" onClick={v.saveEdit} disabled={v.custEditSaving}>
+                {v.custEditSaving ? <><i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังบันทึก...</> : <><i className="ph ph-floppy-disk" />บันทึกลงชีท</>}
+              </button>
             </div>
           </div>
         </div>

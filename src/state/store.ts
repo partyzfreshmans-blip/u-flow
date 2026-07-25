@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useReducer } from 'react';
-import {
-  initialCustomers,
-  initialGrnLog,
-  initialLanes,
-  promos as initialPromos,
-} from '../data/mockData';
-import { loadAllOverrides, saveOverride } from '../data/sources/customerOverrides';
+import { initialGrnLog } from '../data/mockData';
+import { fetchApiImportOrders } from '../data/sources/apiImportOrders';
+import { CS_MASTER_CSV_URL, fetchCsMasterCustomers } from '../data/sources/csMaster';
+import { updateCsMasterLatLng } from '../data/sources/csMasterWrite';
+import { fetchActivePromotions } from '../data/sources/promotionsSheet';
+import { fetchRouteOrders } from '../data/sources/routeOrders';
+import { invalidateSheetCache } from '../data/sources/sheetCsv';
+import { fetchOrderLineItems } from '../data/sources/skuDetail';
 import { fetchSkusFromSheet } from '../data/sources/skuSheet';
-import { fetchCustomersFromUnii } from '../data/sources/uniiCustomers';
-import type { Customer, GrnLine, LatLngOverride, Promo, RouteKey, Sku } from '../data/types';
+import type { ApiImportOrder, CsMasterCustomer, GrnLine, Promo, RouteKey, RouteOrder, Sku } from '../data/types';
 
 export interface SkuForm {
   /** Hidden unique key of the row being edited; empty when adding a new SKU. */
@@ -22,35 +22,31 @@ export interface SkuForm {
   status: 'active' | 'inactive';
 }
 
-export interface CustForm {
-  id: string;
-  name: string;
-  addr: string;
-  route: 'A' | 'B';
-  pay: 'cod' | 'credit';
-  limit: string;
-  balance: string;
-  term: string;
-  status: 'active' | 'hold';
-  conds: string;
-  lat: string;
-  lng: string;
-}
-
 export interface AppState {
   route: RouteKey;
 
-  // dashboard
+  // dashboard ("API Import" tab — newest, not-yet-routed orders)
+  apiOrders: ApiImportOrder[];
+  apiOrdersLoading: boolean;
+  apiOrdersError: string | null;
   q: string;
   statusFilter: string;
-  routeFilter: string;
-  dateFilter: string;
 
-  // route planning
-  lanes: Record<'A' | 'B', string[]>;
-  routeMobile: boolean;
-  dragFrom: { key: 'A' | 'B'; i: number } | null;
-  routeSel: 'A' | 'B';
+  // order line-items modal (shared by dashboard's "ดู" button — "SKU Detail" tab)
+  orderDetailOpen: boolean;
+  orderDetailOrderNo: string;
+  orderDetailCustomer: string;
+  orderDetailLines: { sku: string; name: string; unit: string; qty: number; unitPrice: number; discount: number; lineTotal: number }[];
+  orderDetailLoading: boolean;
+  orderDetailError: string | null;
+
+  // route planning / delivery history ("คำสั่งซื้อ" tab)
+  routeOrders: RouteOrder[];
+  routeOrdersLoading: boolean;
+  routeOrdersError: string | null;
+  routeFilterValue: string;
+  routeStatusFilter: string;
+  routeQ: string;
 
   // batch picking
   picked: Record<string, boolean>;
@@ -62,8 +58,10 @@ export interface AppState {
   cod: Record<string, string>;
   codClosed: Record<string, boolean>;
 
-  // promo
+  // promo ("โปรโมชั่น" tab, Active rows only; "create promotion" flow is local)
   promos: Promo[];
+  promosLoading: boolean;
+  promosError: string | null;
   promoQ: string;
   promoModal: boolean;
   promoForm: { name: string; sku: string; type: string; start: string; end: string };
@@ -84,7 +82,7 @@ export interface AppState {
   grnLines: GrnLine[];
   grnLog: typeof initialGrnLog;
 
-  // SKU master (loaded from the Google Sheet at runtime)
+  // SKU master (Google Sheet)
   skus: Sku[];
   skusLoading: boolean;
   skusError: string | null;
@@ -92,15 +90,18 @@ export interface AppState {
   skuModal: 'add' | 'edit' | null;
   skuF: SkuForm;
 
-  // customer master (loaded from the Unii API; lat/lng corrections layer on
-  // top from a local IndexedDB override store — see customerOverrides.ts)
-  customers: Customer[];
+  // customer master ("CS Master" tab — read via CSV, lat/lng written back
+  // through the local backend in server/, which holds the Service Account
+  // credential; see src/data/sources/csMasterWrite.ts)
+  customers: CsMasterCustomer[];
   customersLoading: boolean;
   customersError: string | null;
-  customerOverrides: Record<string, LatLngOverride>;
   custQ: string;
-  custModal: 'add' | 'edit' | null;
-  custF: CustForm;
+  custEditRowIndex: number | null;
+  custEditLat: string;
+  custEditLng: string;
+  custEditSaving: boolean;
+  custEditError: string | null;
 
   // settings
   apiKey: string;
@@ -111,24 +112,41 @@ export interface AppState {
 
 export const initialState: AppState = {
   route: 'dashboard',
+
+  apiOrders: [],
+  apiOrdersLoading: true,
+  apiOrdersError: null,
   q: '',
   statusFilter: 'all',
-  routeFilter: 'all',
-  dateFilter: '2026-07-23',
-  lanes: { A: [...initialLanes.A], B: [...initialLanes.B] },
-  routeMobile: false,
-  dragFrom: null,
-  routeSel: 'A',
+
+  orderDetailOpen: false,
+  orderDetailOrderNo: '',
+  orderDetailCustomer: '',
+  orderDetailLines: [],
+  orderDetailLoading: false,
+  orderDetailError: null,
+
+  routeOrders: [],
+  routeOrdersLoading: true,
+  routeOrdersError: null,
+  routeFilterValue: 'all',
+  routeStatusFilter: 'all',
+  routeQ: '',
+
   picked: {},
   pickClosed: false,
   codDriver: 'สมชาย ป.',
   codMobile: false,
   cod: { 'OD-6004': '3380', 'OD-6009': '3900', 'OD-6006': '1980', 'OD-6007': '7450' },
   codClosed: {},
-  promos: initialPromos,
+
+  promos: [],
+  promosLoading: true,
+  promosError: null,
   promoQ: '',
   promoModal: false,
   promoForm: { name: '', sku: '', type: 'ลดราคา', start: '2026-07-24', end: '2026-08-24' },
+
   grnSupplier: '',
   grnDoc: '',
   grnDate: '2026-07-23',
@@ -143,19 +161,24 @@ export const initialState: AppState = {
   grnNewUnit: 'ชิ้น',
   grnLines: [],
   grnLog: initialGrnLog,
+
   skus: [],
   skusLoading: true,
   skusError: null,
   skuQ: '',
   skuModal: null,
   skuF: { key: '', id: '', barcode: '', name: '', unit: 'ชิ้น', stock: '', status: 'active' },
-  customers: initialCustomers,
+
+  customers: [],
   customersLoading: true,
   customersError: null,
-  customerOverrides: {},
   custQ: '',
-  custModal: null,
-  custF: { id: '', name: '', addr: '', route: 'A', pay: 'cod', limit: '', balance: '', term: '', status: 'active', conds: '', lat: '', lng: '' },
+  custEditRowIndex: null,
+  custEditLat: '',
+  custEditLng: '',
+  custEditSaving: false,
+  custEditError: null,
+
   apiKey: '',
   apiTesting: false,
   apiOk: false,
@@ -164,52 +187,24 @@ export const initialState: AppState = {
 
 export type Action =
   | { type: 'patch'; patch: Partial<AppState> }
-  | { type: 'moveStop'; key: 'A' | 'B'; i: number; dir: number }
-  | { type: 'dropStop'; key: 'A' | 'B'; to: number }
   | { type: 'doLookup' }
   | { type: 'createSkuFromGrn' }
   | { type: 'addGrnLine' }
   | { type: 'saveGrn' }
   | { type: 'openEditSku'; sku: Sku }
   | { type: 'saveSku' }
-  | { type: 'openEditCust'; cust: Customer }
-  | { type: 'saveCust' }
   | { type: 'addPromo' }
-  | { type: 'setCustomerOverride'; id: string; lat: number; lng: number };
+  | { type: 'updateCustomerLatLng'; rowIndex: number; lat: number; lng: number };
 
 function nextSkuId(skus: Sku[]): string {
   const nums = skus.map((s) => parseInt(s.id.replace('SKU', ''), 10)).filter((n) => !isNaN(n));
   return 'SKU' + String(Math.max(0, ...nums) + 1).padStart(5, '0');
 }
 
-function nextCustId(customers: Customer[]): string {
-  const nums = customers.map((c) => parseInt(c.id.replace('CUST-', ''), 10)).filter((n) => !isNaN(n));
-  return 'CUST-' + String(Math.max(100, ...nums) + 1);
-}
-
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case 'patch':
       return { ...state, ...action.patch };
-
-    case 'moveStop': {
-      const { key, i, dir } = action;
-      const ids = [...state.lanes[key]];
-      const j = i + dir;
-      if (j < 0 || j >= ids.length) return state;
-      [ids[i], ids[j]] = [ids[j], ids[i]];
-      return { ...state, lanes: { ...state.lanes, [key]: ids } };
-    }
-
-    case 'dropStop': {
-      const { key, to } = action;
-      const from = state.dragFrom;
-      if (!from || from.key !== key) return { ...state, dragFrom: null };
-      const ids = [...state.lanes[key]];
-      const [m] = ids.splice(from.i, 1);
-      ids.splice(to, 0, m);
-      return { ...state, lanes: { ...state.lanes, [key]: ids }, dragFrom: null };
-    }
 
     case 'doLookup': {
       const bc = state.grnBarcode.trim();
@@ -320,66 +315,6 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, skus: arr, skuModal: null };
     }
 
-    case 'openEditCust': {
-      const ov = state.customerOverrides[action.cust.id];
-      const lat = ov?.lat ?? action.cust.lat;
-      const lng = ov?.lng ?? action.cust.lng;
-      return {
-        ...state,
-        custModal: 'edit',
-        custF: {
-          id: action.cust.id,
-          name: action.cust.name,
-          addr: action.cust.addr,
-          route: action.cust.route,
-          pay: action.cust.pay,
-          limit: String(action.cust.limit || ''),
-          balance: String(action.cust.balance || ''),
-          term: String(action.cust.term || ''),
-          status: action.cust.status,
-          conds: (action.cust.conds || []).join('\n'),
-          lat: lat != null ? String(lat) : '',
-          lng: lng != null ? String(lng) : '',
-        },
-      };
-    }
-
-    case 'saveCust': {
-      const f = state.custF;
-      if (!f.id || !f.name) return state;
-      const existing = state.customers.find((x) => x.id === f.id);
-      const rec: Customer = {
-        id: f.id,
-        name: f.name,
-        addr: f.addr,
-        route: f.route,
-        pay: f.pay,
-        limit: f.pay === 'credit' ? Number(f.limit || 0) : 0,
-        balance: f.pay === 'credit' ? Number(f.balance || 0) : 0,
-        term: f.pay === 'credit' ? Number(f.term || 0) : 0,
-        status: f.status,
-        conds: f.conds.split('\n').map((s) => s.trim()).filter(Boolean),
-        // lat/lng always come from the API (or null for a manually-added
-        // customer) — corrections live only in customerOverrides, never here.
-        lat: existing?.lat ?? null,
-        lng: existing?.lng ?? null,
-      };
-      const arr = [...state.customers];
-      const idx = arr.findIndex((x) => x.id === rec.id);
-      if (idx >= 0) arr[idx] = rec;
-      else arr.push(rec);
-      return { ...state, customers: arr, custModal: null };
-    }
-
-    case 'setCustomerOverride':
-      return {
-        ...state,
-        customerOverrides: {
-          ...state.customerOverrides,
-          [action.id]: { lat: action.lat, lng: action.lng, updatedAt: new Date().toISOString() },
-        },
-      };
-
     case 'addPromo': {
       const f = state.promoForm;
       if (!f.name.trim()) return state;
@@ -399,6 +334,11 @@ function reducer(state: AppState, action: Action): AppState {
         promoModal: false,
         promoForm: { name: '', sku: '', type: 'ลดราคา', start: '2026-07-24', end: '2026-08-24' },
       };
+    }
+
+    case 'updateCustomerLatLng': {
+      const arr = state.customers.map((c) => (c.rowIndex === action.rowIndex ? { ...c, lat: action.lat, lng: action.lng } : c));
+      return { ...state, customers: arr };
     }
 
     default:
@@ -428,7 +368,58 @@ export function useAppStore() {
 
   useEffect(() => {
     let cancelled = false;
-    fetchCustomersFromUnii()
+    fetchApiImportOrders()
+      .then((apiOrders) => {
+        if (!cancelled) dispatch({ type: 'patch', patch: { apiOrders, apiOrdersLoading: false, apiOrdersError: null } });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          const message = err instanceof Error ? err.message : 'โหลดออเดอร์ใหม่ไม่สำเร็จ';
+          dispatch({ type: 'patch', patch: { apiOrdersLoading: false, apiOrdersError: message } });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchRouteOrders()
+      .then((routeOrders) => {
+        if (!cancelled) dispatch({ type: 'patch', patch: { routeOrders, routeOrdersLoading: false, routeOrdersError: null } });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          const message = err instanceof Error ? err.message : 'โหลดข้อมูลเส้นทาง/ประวัติการจัดส่งไม่สำเร็จ';
+          dispatch({ type: 'patch', patch: { routeOrdersLoading: false, routeOrdersError: message } });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchActivePromotions()
+      .then((promos) => {
+        if (!cancelled) dispatch({ type: 'patch', patch: { promos, promosLoading: false, promosError: null } });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          const message = err instanceof Error ? err.message : 'โหลดโปรโมชั่นไม่สำเร็จ';
+          dispatch({ type: 'patch', patch: { promosLoading: false, promosError: message } });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchCsMasterCustomers()
       .then((customers) => {
         if (!cancelled) dispatch({ type: 'patch', patch: { customers, customersLoading: false, customersError: null } });
       })
@@ -443,37 +434,63 @@ export function useAppStore() {
     };
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    loadAllOverrides()
-      .then((overrides) => {
-        if (!cancelled) dispatch({ type: 'patch', patch: { customerOverrides: overrides } });
-      })
-      .catch(() => {
-        /* no saved overrides yet, or IndexedDB unavailable — safe to ignore */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   const actions = useMemo(
     () => ({
       patch: (patch: Partial<AppState>) => dispatch({ type: 'patch', patch }),
-      moveStop: (key: 'A' | 'B', i: number, dir: number) => dispatch({ type: 'moveStop', key, i, dir }),
-      dropStop: (key: 'A' | 'B', to: number) => dispatch({ type: 'dropStop', key, to }),
       doLookup: () => dispatch({ type: 'doLookup' }),
       createSkuFromGrn: () => dispatch({ type: 'createSkuFromGrn' }),
       addGrnLine: () => dispatch({ type: 'addGrnLine' }),
       saveGrn: () => dispatch({ type: 'saveGrn' }),
       openEditSku: (sku: Sku) => dispatch({ type: 'openEditSku', sku }),
       saveSku: () => dispatch({ type: 'saveSku' }),
-      openEditCust: (cust: Customer) => dispatch({ type: 'openEditCust', cust }),
-      saveCust: () => dispatch({ type: 'saveCust' }),
       addPromo: () => dispatch({ type: 'addPromo' }),
-      setCustomerOverride: (id: string, lat: number, lng: number) => {
-        dispatch({ type: 'setCustomerOverride', id, lat, lng });
-        void saveOverride(id, lat, lng);
+
+      openOrderDetail: (orderNo: string, customer: string) => {
+        dispatch({
+          type: 'patch',
+          patch: { orderDetailOpen: true, orderDetailOrderNo: orderNo, orderDetailCustomer: customer, orderDetailLoading: true, orderDetailError: null, orderDetailLines: [] },
+        });
+        fetchOrderLineItems(orderNo)
+          .then((lines) => {
+            dispatch({
+              type: 'patch',
+              patch: {
+                orderDetailLoading: false,
+                orderDetailLines: lines.map((l) => ({ sku: l.sku, name: l.productName, unit: l.unit, qty: l.qty, unitPrice: l.unitPrice, discount: l.discount, lineTotal: l.lineTotal })),
+              },
+            });
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'โหลดรายการสินค้าไม่สำเร็จ';
+            dispatch({ type: 'patch', patch: { orderDetailLoading: false, orderDetailError: message } });
+          });
+      },
+      closeOrderDetail: () => dispatch({ type: 'patch', patch: { orderDetailOpen: false } }),
+
+      openEditCustomerLatLng: (c: CsMasterCustomer) => {
+        dispatch({
+          type: 'patch',
+          patch: {
+            custEditRowIndex: c.rowIndex,
+            custEditLat: c.lat != null ? String(c.lat) : '',
+            custEditLng: c.lng != null ? String(c.lng) : '',
+            custEditError: null,
+          },
+        });
+      },
+      closeEditCustomerLatLng: () => dispatch({ type: 'patch', patch: { custEditRowIndex: null, custEditError: null } }),
+      saveCustomerLatLng: (rowIndex: number, name: string, phone: string, lat: number, lng: number) => {
+        dispatch({ type: 'patch', patch: { custEditSaving: true, custEditError: null } });
+        updateCsMasterLatLng(name, phone, lat, lng)
+          .then(() => {
+            invalidateSheetCache(CS_MASTER_CSV_URL);
+            dispatch({ type: 'updateCustomerLatLng', rowIndex, lat, lng });
+            dispatch({ type: 'patch', patch: { custEditSaving: false, custEditRowIndex: null } });
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'บันทึกพิกัดไม่สำเร็จ';
+            dispatch({ type: 'patch', patch: { custEditSaving: false, custEditError: message } });
+          });
       },
     }),
     [],
@@ -483,7 +500,3 @@ export function useAppStore() {
 }
 
 export type AppActions = ReturnType<typeof useAppStore>['actions'];
-
-export function nextIds(skus: Sku[], customers: Customer[]) {
-  return { nextSkuId: nextSkuId(skus), nextCustId: nextCustId(customers) };
-}

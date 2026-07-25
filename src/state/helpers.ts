@@ -54,3 +54,19 @@ export function syncMeta(s: SyncStatus) {
   const [label, kind, icon] = syncMetaMap[s];
   return { label, style: badgeStyle(kind), icon, kind: s };
 }
+
+// Real order-status text as it appears verbatim in the Google Sheets (API
+// Import + คำสั่งซื้อ tabs use overlapping-but-not-identical status sets).
+const sheetStatusKind: Record<string, BadgeKind> = {
+  'รอยืนยันออเดอร์': 'warn',
+  'กำลังดำเนินการ': 'info',
+  'รอชำระเงิน': 'warn',
+  'ได้รับแล้ว': 'ok',
+  'ยกเลิก': 'bad',
+  'ส่งสำเร็จ': 'ok',
+  'กำลังจัดส่ง': 'info',
+};
+
+export function sheetStatusStyle(status: string): CSSProperties {
+  return badgeStyle(sheetStatusKind[status] ?? 'neutral');
+}

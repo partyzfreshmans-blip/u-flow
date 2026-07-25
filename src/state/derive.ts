@@ -1,146 +1,161 @@
 import type { CSSProperties } from 'react';
-import { laneDriver, orders, pickBatch, suppliers } from '../data/mockData';
+import { orders, pickBatch, suppliers } from '../data/mockData';
 import type { Order, PromoStatus } from '../data/types';
-import { badgeStyle, fmt, statusMeta, syncMeta } from './helpers';
+import { badgeStyle, fmt, sheetStatusStyle } from './helpers';
 import type { AppActions, AppState } from './store';
 
+// COD clearing is still local/mock (out of scope for the sheets migration).
 export const orderById: Record<string, Order> = {};
 orders.forEach((o) => (orderById[o.id] = o));
 
 export const pageTitles: Record<AppState['route'], [string, string]> = {
-  dashboard: ['แดชบอร์ด / รายการออเดอร์', 'ภาพรวมออเดอร์ทั้งหมด · ดึงข้อมูลสดจาก API'],
-  route: ['จัดเส้นทางส่งของ', 'จัดลำดับการส่งของแต่ละเส้นทางประจำวัน'],
+  dashboard: ['แดชบอร์ด / ออเดอร์ใหม่', 'ออเดอร์ล่าสุดที่ยังไม่ได้จัดเส้นทาง · จาก Google Sheet (API Import)'],
+  route: ['จัดเส้นทางส่ง / ประวัติการจัดส่ง', 'ข้อมูลจริงจาก Google Sheet (คำสั่งซื้อ) · อ่านอย่างเดียว'],
   pick: ['Batch picking / จัดล็อตหยิบสินค้า', 'รวมหลายออเดอร์เป็นล็อตเดียว หยิบสินค้าตามตำแหน่งเก็บ'],
   cod: ['เคลียร์เงินปลายทาง (COD)', 'เทียบยอดที่ควรเก็บกับยอดคืนจริงต่อ driver'],
-  promo: ['โปรโมชั่น / ส่วนลด', 'จัดการโปรโมชั่นที่ผูกกับสินค้า'],
+  promo: ['โปรโมชั่น / ส่วนลด', 'โปรโมชั่นที่ Active จาก Google Sheet · สร้างโปรโมชั่นใหม่ได้ในเครื่องนี้'],
   grn: ['บันทึกรับของเข้าคลัง (GRN)', 'บันทึกสินค้าเข้าใหม่จากซัพพลายเออร์'],
   sku: ['ฐานข้อมูลสินค้า (SKU master)', 'ทะเบียนสินค้าทั้งหมดในระบบ'],
-  customer: ['ฐานข้อมูลลูกค้า', 'ทะเบียนร้านค้าและเงื่อนไข/ข้อจำกัดการขายของแต่ละร้าน'],
+  customer: ['ฐานข้อมูลลูกค้า (CS Master)', 'แก้ไขพิกัด lat/long แล้วบันทึกกลับเข้า Google Sheet จริง'],
   settings: ['ตั้งค่า / API Key', 'จัดการการเชื่อมต่อระบบออเดอร์ภายนอก'],
 };
 
-// ---------- DASHBOARD ----------
+// ---------- DASHBOARD ("API Import" tab) ----------
+const dashboardStatusOrder = ['รอยืนยันออเดอร์', 'กำลังดำเนินการ', 'รอชำระเงิน', 'ได้รับแล้ว', 'ยกเลิก'];
+
 export function computeDashboard(state: AppState, actions: AppActions) {
   const q = state.q.trim().toLowerCase();
-  const list = orders.filter((o) => {
+  const list = state.apiOrders.filter((o) => {
     if (state.statusFilter !== 'all' && o.status !== state.statusFilter) return false;
-    if (state.routeFilter !== 'all' && o.route !== state.routeFilter) return false;
-    if (q && !(o.cust.toLowerCase().includes(q) || o.id.toLowerCase().includes(q))) return false;
+    if (q && !(o.customer.toLowerCase().includes(q) || o.orderUid.toLowerCase().includes(q) || o.phone.includes(q))) return false;
     return true;
   });
 
-  const rows = list.map((o) => {
-    const m = statusMeta(o.status);
-    const sy = syncMeta(o.sync || 'synced');
-    return {
-      id: o.id,
-      cust: o.cust,
-      addr: o.addr,
-      items: o.items,
-      date: o.date,
-      routeLabel: 'Route ' + o.route,
-      amtText: o.cod ? fmt(o.amt) : 'เครดิต',
-      amtColor: o.cod ? '' : 'var(--color-neutral-500)',
-      stLabel: m.label,
-      stStyle: m.style,
-      syncLabel: sy.label,
-      syncStyle: sy.style,
-      syncIcon: sy.icon,
-      syncSub: sy.kind === 'synced' ? '#UNII-' + o.id.replace('OD-', '') : sy.kind === 'error' ? 'เชื่อมต่อ API ไม่สำเร็จ' : 'อยู่ในคิวซิงค์',
-    };
-  });
+  const rows = list.map((o) => ({
+    orderUid: o.orderUid,
+    cust: o.customer,
+    phone: o.phone,
+    addr: [o.address, o.district, o.province].filter(Boolean).join(' · '),
+    items: o.itemCount,
+    amtText: fmt(o.totalAmount),
+    paymentType: o.paymentType,
+    paid: o.paid,
+    orderedAt: o.orderedAt,
+    stLabel: o.status || '—',
+    stStyle: sheetStatusStyle(o.status),
+    wantsTax: o.wantsTaxInvoice,
+    viewItems: () => actions.openOrderDetail(o.orderUid, o.customer),
+  }));
 
-  const scnt = (k: string) => orders.filter((o) => (o.sync || 'synced') === k).length;
-  const cnt = (s: string) => orders.filter((o) => s === 'all' || o.status === s).length;
-
+  const cnt = (s: string) => state.apiOrders.filter((o) => s === 'all' || o.status === s).length;
+  const presentStatuses = dashboardStatusOrder.filter((s) => state.apiOrders.some((o) => o.status === s));
   const chipBase: CSSProperties = { border: 0, cursor: 'pointer', fontFamily: 'var(--font-body)', fontSize: 12.5, padding: '6px 13px', borderRadius: 20, fontWeight: 500 };
-  const statusChips = ([
-    ['all', 'ทั้งหมด'],
-    ['pending', 'รอจัด'],
-    ['delivering', 'กำลังส่ง'],
-    ['delivered', 'ส่งสำเร็จ'],
-    ['cleared', 'เคลียร์แล้ว'],
-  ] as const).map(([k, label]) => ({
+  const statusChips = ['all', ...presentStatuses].map((k) => ({
     key: k,
-    label,
+    label: k === 'all' ? 'ทั้งหมด' : k,
     count: cnt(k),
-    active: k === state.statusFilter,
-    style: k === state.statusFilter
-      ? { ...chipBase, background: 'var(--color-accent)', color: '#fff' }
-      : { ...chipBase, background: 'var(--color-surface)', color: 'var(--color-neutral-300)', boxShadow: 'inset 0 0 0 1px var(--color-divider)' },
+    style:
+      k === state.statusFilter
+        ? { ...chipBase, background: 'var(--color-accent)', color: '#fff' }
+        : { ...chipBase, background: 'var(--color-surface)', color: 'var(--color-neutral-300)', boxShadow: 'inset 0 0 0 1px var(--color-divider)' },
     go: () => actions.patch({ statusFilter: k }),
   }));
 
-  const todayCount = orders.filter((o) => o.date === '23 ก.ค.').length;
-  const codOutstanding = orders.filter((o) => o.cod && o.status === 'delivered').reduce((a, o) => a + o.amt, 0);
-
+  const totalValue = state.apiOrders.reduce((a, o) => a + o.totalAmount, 0);
   const stats = [
-    { label: 'ออเดอร์วันนี้', value: String(todayCount), sub: 'ทุกเส้นทาง', icon: 'ph ph-package', iconColor: 'var(--color-accent-300)' },
-    { label: 'รอจัด', value: String(cnt('pending')), sub: 'ต้องจัดของ', icon: 'ph ph-hourglass-medium', iconColor: 'var(--st-warn-fg)' },
-    { label: 'กำลังส่ง', value: String(cnt('delivering')), sub: 'อยู่ระหว่างทาง', icon: 'ph ph-truck', iconColor: 'var(--st-info-fg)' },
-    { label: 'ยอด COD ค้างเคลียร์', value: fmt(codOutstanding), sub: 'รอ driver ส่งคืน', icon: 'ph ph-wallet', iconColor: 'var(--st-ok-fg)' },
+    { label: 'ออเดอร์ใหม่ทั้งหมด', value: String(state.apiOrders.length), sub: 'ยังไม่ได้จัดเส้นทาง', icon: 'ph ph-package', iconColor: 'var(--color-accent-300)' },
+    { label: 'รอยืนยันออเดอร์', value: String(cnt('รอยืนยันออเดอร์')), sub: 'ต้องยืนยัน', icon: 'ph ph-hourglass-medium', iconColor: 'var(--st-warn-fg)' },
+    { label: 'กำลังดำเนินการ', value: String(cnt('กำลังดำเนินการ')), sub: 'อยู่ระหว่างจัดของ', icon: 'ph ph-truck', iconColor: 'var(--st-info-fg)' },
+    { label: 'มูลค่ารวม', value: fmt(totalValue), sub: 'ออเดอร์ที่แสดงทั้งหมด', icon: 'ph ph-wallet', iconColor: 'var(--st-ok-fg)' },
   ];
 
-  const syncCountSynced = scnt('synced');
-  const syncCountPending = scnt('pending');
-  const syncCountError = scnt('error');
-  const sbBase: CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, padding: '2px 9px', borderRadius: 6, fontWeight: 500, whiteSpace: 'nowrap' };
-
   return {
+    apiOrdersLoading: state.apiOrdersLoading,
+    apiOrdersError: state.apiOrdersError,
     q: state.q,
-    routeFilter: state.routeFilter,
-    dateFilter: state.dateFilter,
     onSearch: (v: string) => actions.patch({ q: v }),
-    onRouteFilter: (v: string) => actions.patch({ routeFilter: v }),
-    onDateFilter: (v: string) => actions.patch({ dateFilter: v }),
     resultCount: list.length,
     noOrders: list.length === 0,
     orders: rows,
     stats,
     statusChips,
-    syncCountSynced,
-    syncCountPending,
-    syncCountError,
-    syncBadgeSynced: { ...sbBase, background: 'var(--st-ok-bg)', color: 'var(--st-ok-fg)' } as CSSProperties,
-    syncBadgePending: { ...sbBase, background: 'var(--st-warn-bg)', color: 'var(--st-warn-fg)' } as CSSProperties,
-    syncBadgeError: { ...sbBase, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)' } as CSSProperties,
   };
 }
 
-// ---------- ROUTE PLANNING ----------
-function buildLane(state: AppState, actions: AppActions, key: 'A' | 'B') {
-  const ids = state.lanes[key];
-  const total = ids.reduce((a, id) => a + (orderById[id].cod ? orderById[id].amt : 0), 0);
-  const stops = ids.map((id, i) => {
-    const o = orderById[id];
-    const m = statusMeta(o.status);
-    return {
-      id,
-      seq: i + 1,
-      cust: o.cust,
-      addr: o.addr,
-      amtText: o.cod ? fmt(o.amt) : 'เครดิต',
-      stLabel: m.label,
-      stStyle: m.style,
-      up: () => actions.moveStop(key, i, -1),
-      down: () => actions.moveStop(key, i, 1),
-      onDragStart: () => actions.patch({ dragFrom: { key, i } }),
-      onDrop: () => actions.dropStop(key, i),
-    };
-  });
-  return { key, driver: laneDriver[key], total: fmt(total), stops, stopsText: ids.length + ' จุดส่ง' };
+// ---------- ORDER DETAIL (line items — "SKU Detail" tab) ----------
+export function computeOrderDetail(state: AppState) {
+  const total = state.orderDetailLines.reduce((a, l) => a + l.lineTotal, 0);
+  return {
+    open: state.orderDetailOpen,
+    orderNo: state.orderDetailOrderNo,
+    customer: state.orderDetailCustomer,
+    loading: state.orderDetailLoading,
+    error: state.orderDetailError,
+    lines: state.orderDetailLines.map((l) => ({ ...l, unitPriceText: fmt(l.unitPrice), lineTotalText: fmt(l.lineTotal) })),
+    isEmpty: !state.orderDetailLoading && !state.orderDetailError && state.orderDetailLines.length === 0,
+    totalText: fmt(total),
+  };
 }
 
+// ---------- ROUTE PLANNING / DELIVERY HISTORY ("คำสั่งซื้อ" tab) ----------
 export function computeRoute(state: AppState, actions: AppActions) {
+  const rq = state.routeQ.trim().toLowerCase();
+  const routeValues = Array.from(new Set(state.routeOrders.map((o) => o.route))).sort();
+  const statusValues = Array.from(new Set(state.routeOrders.map((o) => o.status).filter(Boolean))).sort();
+
+  const filtered = state.routeOrders.filter((o) => {
+    if (state.routeFilterValue !== 'all' && o.route !== state.routeFilterValue) return false;
+    if (state.routeStatusFilter !== 'all' && o.status !== state.routeStatusFilter) return false;
+    if (rq && !(o.customer.toLowerCase().includes(rq) || o.orderNo.toLowerCase().includes(rq))) return false;
+    return true;
+  });
+
+  const chipBase: CSSProperties = { border: 0, cursor: 'pointer', fontFamily: 'var(--font-body)', fontSize: 12.5, padding: '6px 13px', borderRadius: 20, fontWeight: 500 };
+  const makeTabs = (values: string[], selected: string, onSelect: (v: string) => void) =>
+    ['all', ...values].map((v) => ({
+      key: v,
+      label: v === 'all' ? 'ทั้งหมด' : v,
+      style:
+        v === selected
+          ? { ...chipBase, background: 'var(--color-accent)', color: '#fff' }
+          : { ...chipBase, background: 'var(--color-surface)', color: 'var(--color-neutral-300)', boxShadow: 'inset 0 0 0 1px var(--color-divider)' },
+      go: () => onSelect(v),
+    }));
+
+  const rows = filtered.map((o) => ({
+    route: o.route,
+    orderNo: o.orderNo,
+    customer: o.customer,
+    stLabel: o.status || '—',
+    stStyle: sheetStatusStyle(o.status),
+    amtText: fmt(o.totalAmount),
+    itemCount: o.itemCount,
+    paymentType: o.paymentType,
+    plannedDeliveryDate: o.plannedDeliveryDate,
+    completedDate: o.completedDate || '—',
+    distanceText: o.distanceFromWhKm != null ? `${o.distanceFromWhKm.toFixed(1)} กม.` : '—',
+    address: o.addressFromUnii || o.districtProvince,
+    mapLink: o.mapLink,
+    isNewCustomer: o.isNewCustomer,
+    note: o.note,
+    viewItems: () => actions.openOrderDetail(o.orderNo, o.customer),
+  }));
+
+  const wh = state.routeOrders.find((o) => o.whLat != null && o.whLng != null);
+  const mapStops = filtered.filter((o) => o.lat != null && o.lng != null).map((o) => ({ id: o.orderNo, lat: o.lat as number, lng: o.lng as number, label: o.customer, status: o.status }));
+
   return {
-    routeMobile: state.routeMobile,
-    routeDesktop: !state.routeMobile,
-    setRouteMobile: () => actions.patch({ routeMobile: true }),
-    setRouteDesktop: () => actions.patch({ routeMobile: false }),
-    lanes: (['A', 'B'] as const).map((k) => buildLane(state, actions, k)),
-    selLane: buildLane(state, actions, state.routeSel),
-    driverLane: buildLane(state, actions, state.routeSel),
-    routeTabs: (['A', 'B'] as const).map((k) => ({ key: k, active: state.routeSel === k, go: () => actions.patch({ routeSel: k }) })),
+    routeOrdersLoading: state.routeOrdersLoading,
+    routeOrdersError: state.routeOrdersError,
+    routeQ: state.routeQ,
+    onRouteSearch: (v: string) => actions.patch({ routeQ: v }),
+    routeTabs: makeTabs(routeValues, state.routeFilterValue, (v) => actions.patch({ routeFilterValue: v })),
+    statusTabs: makeTabs(statusValues, state.routeStatusFilter, (v) => actions.patch({ routeStatusFilter: v })),
+    rows,
+    resultCount: filtered.length,
+    isEmpty: filtered.length === 0,
+    mapStops,
+    warehouse: wh && wh.whLat != null && wh.whLng != null ? { lat: wh.whLat, lng: wh.whLng } : null,
   };
 }
 
@@ -164,7 +179,7 @@ export function computePick(state: AppState, actions: AppActions) {
       rowStyle: on ? { ...rowBase, boxShadow: 'inset 0 0 0 1.5px var(--color-accent-700)' } : rowBase,
       boxStyle: on ? { ...boxBase, background: 'var(--color-accent)', color: '#fff' } : { ...boxBase, boxShadow: 'inset 0 0 0 2px var(--color-neutral-600)', color: 'transparent' },
       checkVis: on ? {} : { opacity: 0 },
-      textStyle: on ? { textDecoration: 'line-through', color: 'var(--color-neutral-500)' } as CSSProperties : {},
+      textStyle: on ? ({ textDecoration: 'line-through', color: 'var(--color-neutral-500)' } as CSSProperties) : {},
     };
   });
 
@@ -259,6 +274,8 @@ export function computePromo(state: AppState, actions: AppActions) {
     .map((p) => ({ ...p, stLabel: promoMeta[p.st][0], stStyle: badgeStyle(promoMeta[p.st][1]), typeStyle: badgeStyle('accent') }));
 
   return {
+    promosLoading: state.promosLoading,
+    promosError: state.promosError,
     promoQ: state.promoQ,
     onPromoSearch: (v: string) => actions.patch({ promoQ: v }),
     promos: rows,
@@ -386,107 +403,54 @@ function nextSkuIdLocal(state: AppState): string {
   return 'SKU' + String(Math.max(0, ...nums) + 1).padStart(5, '0');
 }
 
-function nextCustIdLocal(state: AppState): string {
-  const nums = state.customers.map((c) => parseInt(c.id.replace('CUST-', ''), 10)).filter((n) => !isNaN(n));
-  return 'CUST-' + String(Math.max(100, ...nums) + 1);
-}
-
-// ---------- CUSTOMER MASTER ----------
-const custStatusMeta: Record<string, [string, Parameters<typeof badgeStyle>[0]]> = {
-  active: ['ปกติ', 'ok'],
-  hold: ['ระงับ / ตรวจสอบ', 'bad'],
-};
-
-const condTag: CSSProperties = { display: 'inline-flex', fontSize: 10.5, padding: '2px 7px', borderRadius: 5, background: 'var(--color-neutral-800)', color: 'var(--color-neutral-200)', whiteSpace: 'nowrap' };
-const condTagWarn: CSSProperties = { display: 'inline-flex', fontSize: 10.5, padding: '2px 7px', borderRadius: 5, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', whiteSpace: 'nowrap' };
-
+// ---------- CUSTOMER MASTER ("CS Master" tab) ----------
 export function computeCustomer(state: AppState, actions: AppActions) {
   const cq = state.custQ.trim().toLowerCase();
   const custRows = state.customers
-    .filter((c) => !cq || c.id.toLowerCase().includes(cq) || c.name.toLowerCase().includes(cq))
-    .map((c) => {
-      const isCredit = c.pay === 'credit';
-      const pct = isCredit && c.limit > 0 ? Math.min(100, Math.round((c.balance / c.limit) * 100)) : 0;
-      const over = isCredit && c.balance > c.limit;
-      const near = isCredit && pct >= 90;
-      const bar = over ? 'var(--st-bad-fg)' : near ? 'var(--st-warn-fg)' : 'var(--color-accent)';
-      const override = state.customerOverrides[c.id];
-      const lat = override?.lat ?? c.lat;
-      const lng = override?.lng ?? c.lng;
-      return {
-        id: c.id,
-        name: c.name,
-        addr: c.addr,
-        route: c.route,
-        payLabel: isCredit ? 'เครดิต' : 'เงินสดปลายทาง',
-        payStyle: badgeStyle(isCredit ? 'accent' : 'info'),
-        hasCredit: isCredit,
-        noCredit: !isCredit,
-        balanceText: fmt(c.balance),
-        limitText: fmt(c.limit),
-        balanceStyle: over ? ({ color: 'var(--st-bad-fg)', fontWeight: 600 } as CSSProperties) : near ? ({ color: 'var(--st-warn-fg)', fontWeight: 600 } as CSSProperties) : ({} as CSSProperties),
-        usagePct: pct,
-        barFill: bar,
-        termText: isCredit ? c.term + ' วัน' : '—',
-        conds: (c.conds || []).map((t) => ({ text: t, style: t.includes('เกิน') || t.includes('ระงับ') || t.includes('ใกล้เต็ม') ? condTagWarn : condTag })),
-        noConds: (c.conds || []).length === 0,
-        stLabel: custStatusMeta[c.status][0],
-        stStyle: badgeStyle(custStatusMeta[c.status][1]),
-        locText: lat != null && lng != null ? `${lat.toFixed(5)}, ${lng.toFixed(5)}` : 'ไม่มีพิกัด',
-        hasOverride: !!override,
-        edit: () => actions.openEditCust(c),
-      };
-    });
+    .filter((c) => !cq || c.name.toLowerCase().includes(cq) || c.phone.includes(cq))
+    .map((c) => ({
+      rowIndex: c.rowIndex,
+      name: c.name,
+      phone: c.phone,
+      address: c.address,
+      locText: c.lat != null && c.lng != null ? `${c.lat.toFixed(5)}, ${c.lng.toFixed(5)}` : 'ไม่มีพิกัด',
+      mapLink: c.mapLink,
+      wantsTaxInvoice: c.wantsTaxInvoice,
+      note: c.note,
+      edit: () => actions.openEditCustomerLatLng(c),
+    }));
 
-  const saveCust = () => {
-    actions.saveCust();
-    const lat = Number(state.custF.lat);
-    const lng = Number(state.custF.lng);
-    if (state.custF.lat.trim() !== '' && state.custF.lng.trim() !== '' && !Number.isNaN(lat) && !Number.isNaN(lng)) {
-      actions.setCustomerOverride(state.custF.id, lat, lng);
-    }
-  };
-
-  const editingCustomer = state.customers.find((c) => c.id === state.custF.id) ?? null;
+  const editing = state.customers.find((c) => c.rowIndex === state.custEditRowIndex) ?? null;
 
   return {
     customersLoading: state.customersLoading,
     customersError: state.customersError,
+    customerCount: state.customers.length,
     custQ: state.custQ,
     onCustSearch: (v: string) => actions.patch({ custQ: v }),
     custRows,
-    custModalOpen: !!state.custModal,
-    custIsEdit: state.custModal === 'edit',
-    custModalTitle: state.custModal === 'edit' ? 'แก้ไขข้อมูลลูกค้า' : 'เพิ่มลูกค้าใหม่',
-    custF: state.custF,
-    custPayCod: state.custF.pay === 'cod',
-    custPayCredit: state.custF.pay === 'credit',
-    custOriginalLatLngText:
-      state.custModal === 'edit' && editingCustomer && editingCustomer.lat != null && editingCustomer.lng != null
-        ? `พิกัดจาก Unii: ${editingCustomer.lat.toFixed(5)}, ${editingCustomer.lng.toFixed(5)}`
-        : state.custModal === 'edit'
-          ? 'พิกัดจาก Unii: ไม่มีข้อมูล'
-          : '',
-    openAddCust: () =>
-      actions.patch({
-        custModal: 'add',
-        custF: { id: nextCustIdLocal(state), name: '', addr: '', route: 'A', pay: 'cod', limit: '', balance: '', term: '', status: 'active', conds: '', lat: '', lng: '' },
-      }),
-    closeCust: () => actions.patch({ custModal: null }),
-    onCFId: (v: string) => actions.patch({ custF: { ...state.custF, id: v } }),
-    onCFName: (v: string) => actions.patch({ custF: { ...state.custF, name: v } }),
-    onCFAddr: (v: string) => actions.patch({ custF: { ...state.custF, addr: v } }),
-    onCFRoute: (v: 'A' | 'B') => actions.patch({ custF: { ...state.custF, route: v } }),
-    onCFStatus: (v: 'active' | 'hold') => actions.patch({ custF: { ...state.custF, status: v } }),
-    onCFConds: (v: string) => actions.patch({ custF: { ...state.custF, conds: v } }),
-    onCFLimit: (v: string) => actions.patch({ custF: { ...state.custF, limit: v.replace(/[^0-9]/g, '') } }),
-    onCFBalance: (v: string) => actions.patch({ custF: { ...state.custF, balance: v.replace(/[^0-9]/g, '') } }),
-    onCFTerm: (v: string) => actions.patch({ custF: { ...state.custF, term: v.replace(/[^0-9]/g, '') } }),
-    onCFLat: (v: string) => actions.patch({ custF: { ...state.custF, lat: v.replace(/[^0-9.\-]/g, '') } }),
-    onCFLng: (v: string) => actions.patch({ custF: { ...state.custF, lng: v.replace(/[^0-9.\-]/g, '') } }),
-    setPayCod: () => actions.patch({ custF: { ...state.custF, pay: 'cod' } }),
-    setPayCredit: () => actions.patch({ custF: { ...state.custF, pay: 'credit' } }),
-    saveCust,
+    editModalOpen: editing !== null,
+    editingName: editing?.name ?? '',
+    editingPhone: editing?.phone ?? '',
+    editingAddress: editing?.address ?? '',
+    editingOriginalLatLngText: editing && editing.lat != null && editing.lng != null ? `${editing.lat.toFixed(5)}, ${editing.lng.toFixed(5)}` : 'ไม่มีข้อมูล',
+    custEditLat: state.custEditLat,
+    custEditLng: state.custEditLng,
+    custEditSaving: state.custEditSaving,
+    custEditError: state.custEditError,
+    onEditLat: (v: string) => actions.patch({ custEditLat: v.replace(/[^0-9.\-]/g, '') }),
+    onEditLng: (v: string) => actions.patch({ custEditLng: v.replace(/[^0-9.\-]/g, '') }),
+    closeEdit: () => actions.closeEditCustomerLatLng(),
+    saveEdit: () => {
+      if (!editing) return;
+      const lat = Number(state.custEditLat);
+      const lng = Number(state.custEditLng);
+      if (state.custEditLat.trim() === '' || state.custEditLng.trim() === '' || Number.isNaN(lat) || Number.isNaN(lng)) {
+        actions.patch({ custEditError: 'กรุณากรอกพิกัดให้ถูกต้อง (ตัวเลขเท่านั้น)' });
+        return;
+      }
+      actions.saveCustomerLatLng(editing.rowIndex, editing.name, editing.phone, lat, lng);
+    },
   };
 }
 
