@@ -1,7 +1,6 @@
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { useEffect, useRef } from 'react';
-import { sheetStatusColor } from '../state/helpers';
 
 interface Stop {
   id: string;
@@ -9,6 +8,9 @@ interface Stop {
   lng: number;
   label: string;
   status: string;
+  /** Zone colour, so a glance at the map shows which zone each drop is in. */
+  color: string;
+  zoneName: string;
 }
 
 interface Props {
@@ -51,12 +53,12 @@ export function RouteMap({ stops, warehouse }: Props) {
       L.marker([warehouse.lat, warehouse.lng], {
         icon: L.divIcon({
           className: '',
-          html: '<div style="width:26px;height:26px;border-radius:7px;background:#78e3ac;color:#0b0c14;display:grid;place-items:center;font-weight:700;font-size:13px;border:2px solid #161826;box-shadow:0 2px 8px rgba(0,0,0,.6)">คล</div>',
-          iconSize: [26, 26],
-          iconAnchor: [13, 13],
+          html: '<div style="width:34px;height:24px;border-radius:6px;background:#fff;color:#161826;display:grid;place-items:center;font-weight:800;font-size:12px;letter-spacing:.04em;border:2px solid #161826;box-shadow:0 2px 8px rgba(0,0,0,.6)">WH</div>',
+          iconSize: [34, 24],
+          iconAnchor: [17, 12],
         }),
       })
-        .bindTooltip('คลังสินค้า')
+        .bindTooltip('WH · คลังสินค้า')
         .addTo(layer);
     }
 
@@ -65,10 +67,10 @@ export function RouteMap({ stops, warehouse }: Props) {
         radius: 6,
         color: '#161826',
         weight: 2,
-        fillColor: sheetStatusColor(s.status),
+        fillColor: s.color,
         fillOpacity: 0.95,
       })
-        .bindTooltip(`${s.label} · ${s.status || '—'}`)
+        .bindTooltip(`${s.label} · ${s.zoneName}${s.status ? ` · ${s.status}` : ''}`)
         .addTo(layer);
     }
 

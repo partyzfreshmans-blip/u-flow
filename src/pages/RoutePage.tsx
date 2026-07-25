@@ -24,13 +24,12 @@ export function RoutePage({ state, actions }: { state: AppState; actions: AppAct
           <i className="ph ph-magnifying-glass" style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', fontSize: 15, color: 'var(--color-neutral-500)' }} />
           <input className="input" style={{ paddingLeft: 32 }} placeholder="ค้นหาลูกค้า / เลขคำสั่งซื้อ" value={v.routeQ} onChange={(e) => v.onRouteSearch(e.target.value)} />
         </div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11.5, color: 'var(--color-neutral-500)' }}>
-          เส้นทาง
-          <select className="input" style={{ width: 'auto', minWidth: 160 }} value={v.routeFilterValue} onChange={(e) => v.onRouteFilter(e.target.value)}>
-            {v.routeOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
-        </label>
         <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-neutral-500)' }}>{v.resultCount} รายการ</div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10, alignItems: 'center' }}>
+        <span style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginRight: 2 }}>โซน</span>
+        {v.routeTabs.map((t) => <button key={t.key} style={t.style} onClick={t.go}>{t.label}</button>)}
       </div>
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12, alignItems: 'center' }}>
@@ -39,12 +38,17 @@ export function RoutePage({ state, actions }: { state: AppState; actions: AppAct
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', padding: '10px 14px', marginBottom: 16, borderRadius: 10, background: 'var(--color-surface)', boxShadow: 'var(--shadow-sm)', fontSize: 12 }}>
-        <span style={{ fontWeight: 600 }}><i className="ph ph-path" style={{ marginRight: 6, color: 'var(--color-accent-300)' }} />แบ่งโซนอัตโนมัติ</span>
-        <span style={{ color: 'var(--st-info-fg)' }}>Route A · {v.zoneSummary.a}</span>
-        <span style={{ color: 'var(--color-accent-300)' }}>Route B · {v.zoneSummary.b}</span>
-        {v.zoneSummary.unassigned > 0 && (
-          <span style={{ color: 'var(--color-neutral-500)' }} title="ที่อยู่อยู่นอกลำพูน/เชียงใหม่ — กฎที่ให้มายังไม่ครอบคลุม">
-            นอกพื้นที่ · {v.zoneSummary.unassigned}
+        <span style={{ fontWeight: 600 }}><i className="ph ph-path" style={{ marginRight: 6, color: 'var(--color-accent-300)' }} />โซนจัดส่ง</span>
+        {v.zoneLegend.map((z) => (
+          <span key={z.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ width: 10, height: 10, borderRadius: '50%', background: z.color, flex: 'none' }} />
+            {z.name} · {z.count}
+          </span>
+        ))}
+        {v.unzonedCount > 0 && (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: 'var(--color-neutral-500)' }} title="ที่อยู่อยู่นอกโซนที่ตั้งไว้">
+            <span style={{ width: 10, height: 10, borderRadius: '50%', background: v.unassignedColor, flex: 'none' }} />
+            นอกพื้นที่ · {v.unzonedCount}
           </span>
         )}
         {v.mismatchCount > 0 && (
@@ -68,7 +72,10 @@ export function RoutePage({ state, actions }: { state: AppState; actions: AppAct
                 <tr key={r.orderNo}>
                   <td><span style={{ display: 'inline-flex', fontSize: 11, padding: '2px 8px', borderRadius: 5, background: 'var(--color-neutral-800)', color: 'var(--color-neutral-200)' }}>{r.route}</span></td>
                   <td style={{ textAlign: 'center' }} title={r.zoneReason}>
-                    <span style={r.zoneStyle}>{r.zoneRoute}</span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, whiteSpace: 'nowrap' }}>
+                      <span style={{ width: 9, height: 9, borderRadius: '50%', background: r.zoneColor, flex: 'none' }} />
+                      {r.zoneName}
+                    </span>
                     {r.zoneMismatch && (
                       <div style={{ fontSize: 10, color: 'var(--st-warn-fg)', marginTop: 2, whiteSpace: 'nowrap' }}>
                         <i className="ph ph-warning" style={{ marginRight: 3 }} />ไม่ตรงกับชีท

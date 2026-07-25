@@ -5,6 +5,7 @@ import type { AppActions } from '../state/store';
 const navDef: [RouteKey, string, string][] = [
   ['dashboard', 'แดชบอร์ด / ออเดอร์', 'ph ph-squares-four'],
   ['route', 'จัดเส้นทางส่ง', 'ph ph-path'],
+  ['planner', 'วางแผนจัดรูท', 'ph ph-map-trifold'],
   ['pick', 'จัดล็อตหยิบสินค้า', 'ph ph-list-checks'],
   ['cod', 'เคลียร์เงิน COD', 'ph ph-wallet'],
   ['promo', 'โปรโมชั่น', 'ph ph-tag'],

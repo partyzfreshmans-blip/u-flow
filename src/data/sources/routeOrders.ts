@@ -1,5 +1,4 @@
 import { SHEET_TABS, csvExportUrl } from '../../config/sheets';
-import { resolveZoneRoute } from '../routeZones';
 import type { RouteOrder } from '../types';
 import { fetchSheetRows } from './sheetCsv';
 
@@ -26,11 +25,8 @@ function rowToRouteOrder(row: Record<string, string>): RouteOrder | null {
   const autoRoute = (row['AutoR'] ?? '').trim();
   const districtProvince = (row['อำเภอ, จังหวัด'] ?? '').trim();
   const addressFromUnii = (row['ที่อยู่จาก Unii'] ?? '').trim();
-  const zone = resolveZoneRoute(districtProvince, addressFromUnii);
   return {
     route: manualRoute || autoRoute || '—',
-    zoneRoute: zone.route,
-    zoneReason: zone.reason,
     plannedDeliveryDate: (row['วันที่จะจัดส่ง'] ?? '').trim(),
     orderedAtText: (row['วันเวลาที่สั่ง'] ?? '').trim(),
     customer: (row['ชื่อลูกค้า'] ?? '').trim(),

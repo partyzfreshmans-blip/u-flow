@@ -1,6 +1,8 @@
 import type { CSSProperties } from 'react';
 import { orders, pickBatch, suppliers } from '../data/mockData';
-import type { Order, PromoStatus } from '../data/types';
+import { PROMO_UNITS, type Order, type PromoStatus, type PromoUnit } from '../data/types';
+import { loadCode } from '../data/vehicles';
+import { matchZone, UNASSIGNED_COLOR } from '../data/zoneConfig';
 import { badgeStyle, fmt, sheetStatusStyle } from './helpers';
 import type { AppActions, AppState } from './store';
 
@@ -11,6 +13,7 @@ orders.forEach((o) => (orderById[o.id] = o));
 export const pageTitles: Record<AppState['route'], [string, string]> = {
   dashboard: ['แดชบอร์ด / ออเดอร์ใหม่', 'ออเดอร์ล่าสุดที่ยังไม่ได้จัดเส้นทาง · จาก Google Sheet (API Import)'],
   route: ['จัดเส้นทางส่ง / ประวัติการจัดส่ง', 'ข้อมูลจริงจาก Google Sheet (คำสั่งซื้อ) · อ่านอย่างเดียว'],
+  planner: ['วางแผนจัดรูท', 'จัดออเดอร์ลงรถ · เรียงลำดับส่งจากไกลไปใกล้คลัง · ออกลำดับโหลด'],
   pick: ['Batch picking / จัดล็อตหยิบสินค้า', 'รวมหลายออเดอร์เป็นล็อตเดียว หยิบสินค้าตามตำแหน่งเก็บ'],
   cod: ['เคลียร์เงินปลายทาง (COD)', 'เทียบยอดที่ควรเก็บกับยอดคืนจริงต่อ driver'],
   promo: ['โปรโมชั่น / ส่วนลด', 'โปรโมชั่นที่ Active จาก Google Sheet · สร้างโปรโมชั่นใหม่ได้ในเครื่องนี้'],
@@ -98,13 +101,26 @@ export function computeOrderDetail(state: AppState) {
 }
 
 // ---------- ROUTE PLANNING / DELIVERY HISTORY ("คำสั่งซื้อ" tab) ----------
+
+/** The sheet's Route/AutoR column mixes zone letters with trip numbers
+ * ("A", "B1523", "a1908", "2345", "รับเอง/1020"). Only the leading letter is
+ * the delivery zone, so that is what the UI filters on — otherwise the filter
+ * lists well over a thousand one-off trip codes. */
+export function routeZoneLetter(route: string): string {
+  const m = (route ?? '').trim().match(/^([A-Za-z])/);
+  return m ? m[1].toUpperCase() : '';
+}
+
 export function computeRoute(state: AppState, actions: AppActions) {
   const rq = state.routeQ.trim().toLowerCase();
-  const routeValues = Array.from(new Set(state.routeOrders.map((o) => o.route))).sort();
+  const zoneLetters = Array.from(new Set(state.routeOrders.map((o) => routeZoneLetter(o.route)).filter(Boolean))).sort();
   const statusValues = Array.from(new Set(state.routeOrders.map((o) => o.status).filter(Boolean))).sort();
 
   const filtered = state.routeOrders.filter((o) => {
-    if (state.routeFilterValue !== 'all' && o.route !== state.routeFilterValue) return false;
+    if (state.routeFilterValue !== 'all') {
+      const letter = routeZoneLetter(o.route);
+      if (state.routeFilterValue === 'other' ? letter !== '' : letter !== state.routeFilterValue) return false;
+    }
     if (state.routeStatusFilter !== 'all' && o.status !== state.routeStatusFilter) return false;
     if (rq && !(o.customer.toLowerCase().includes(rq) || o.orderNo.toLowerCase().includes(rq))) return false;
     return true;
@@ -122,52 +138,55 @@ export function computeRoute(state: AppState, actions: AppActions) {
       go: () => onSelect(v),
     }));
 
-  // The Route column is high-cardinality real-world data (trip numbers,
-  // letter lanes, and ad-hoc values like "รับเอง/1020"), so it gets a
-  // dropdown; status is a small fixed set and stays as chips.
-  const routeOptions = [
-    { value: 'all', label: `ทุกเส้นทาง (${state.routeOrders.length})` },
-    ...routeValues.map((v) => ({ value: v, label: `${v} (${state.routeOrders.filter((o) => o.route === v).length})` })),
-  ];
-
-  const rows = filtered.map((o) => ({
-    route: o.route,
-    zoneRoute: o.zoneRoute ?? '—',
-    zoneReason: o.zoneReason,
-    zoneStyle: badgeStyle(o.zoneRoute === null ? 'neutral' : o.zoneRoute === 'A' ? 'info' : 'accent'),
-    // Flag only when the sheet has a concrete letter route that contradicts
-    // the zone rules; numeric trip codes aren't comparable.
-    zoneMismatch: o.zoneRoute !== null && /^[AB]$/i.test(o.route) && o.route.toUpperCase() !== o.zoneRoute,
-    orderNo: o.orderNo,
-    customer: o.customer,
-    stLabel: o.status || '—',
-    stStyle: sheetStatusStyle(o.status),
-    amtText: fmt(o.totalAmount),
-    itemCount: o.itemCount,
-    paymentType: o.paymentType,
-    plannedDeliveryDate: o.plannedDeliveryDate,
-    completedDate: o.completedDate || '—',
-    distanceText: o.distanceFromWhKm != null ? `${o.distanceFromWhKm.toFixed(1)} กม.` : '—',
-    address: o.addressFromUnii || o.districtProvince,
-    mapLink: o.mapLink,
-    isNewCustomer: o.isNewCustomer,
-    note: o.note,
-    viewItems: () => actions.openOrderDetail(o.orderNo, o.customer),
+  const countForLetter = (l: string) => state.routeOrders.filter((o) => routeZoneLetter(o.route) === l).length;
+  const noLetterCount = state.routeOrders.filter((o) => routeZoneLetter(o.route) === '').length;
+  const routeTabs = [
+    { key: 'all', label: `ทั้งหมด (${state.routeOrders.length})`, active: state.routeFilterValue === 'all' },
+    ...zoneLetters.map((l) => ({ key: l, label: `${l} (${countForLetter(l)})`, active: state.routeFilterValue === l })),
+    ...(noLetterCount > 0 ? [{ key: 'other', label: `ไม่ระบุโซน (${noLetterCount})`, active: state.routeFilterValue === 'other' }] : []),
+  ].map((t) => ({
+    ...t,
+    style: t.active
+      ? { ...chipBase, background: 'var(--color-accent)', color: '#fff' }
+      : { ...chipBase, background: 'var(--color-surface)', color: 'var(--color-neutral-300)', boxShadow: 'inset 0 0 0 1px var(--color-divider)' },
+    go: () => actions.patch({ routeFilterValue: t.key }),
   }));
+
+  const rows = filtered.map((o) => {
+    const zone = matchZone(state.zoneRules, o.districtProvince, o.addressFromUnii);
+    return {
+      route: routeZoneLetter(o.route) || '—',
+      zoneName: zone.zoneName,
+      zoneColor: zone.color,
+      zoneReason: zone.reason,
+      zoneMismatch: zone.route !== '—' && routeZoneLetter(o.route) !== '' && routeZoneLetter(o.route) !== zone.route,
+      orderNo: o.orderNo,
+      customer: o.customer,
+      stLabel: o.status || '—',
+      stStyle: sheetStatusStyle(o.status),
+      amtText: fmt(o.totalAmount),
+      itemCount: o.itemCount,
+      paymentType: o.paymentType,
+      plannedDeliveryDate: o.plannedDeliveryDate,
+      completedDate: o.completedDate || '—',
+      distanceText: o.distanceFromWhKm != null ? `${o.distanceFromWhKm.toFixed(1)} กม.` : '—',
+      address: o.addressFromUnii || o.districtProvince,
+      mapLink: o.mapLink,
+      isNewCustomer: o.isNewCustomer,
+      note: o.note,
+      viewItems: () => actions.openOrderDetail(o.orderNo, o.customer),
+    };
+  });
 
   const wh = state.routeOrders.find((o) => o.whLat != null && o.whLng != null);
   const warehouse = wh && wh.whLat != null && wh.whLng != null ? { lat: wh.whLat, lng: wh.whLng } : null;
 
-  const zoneSummary = {
-    a: filtered.filter((o) => o.zoneRoute === 'A').length,
-    b: filtered.filter((o) => o.zoneRoute === 'B').length,
-    unassigned: filtered.filter((o) => o.zoneRoute === null).length,
-  };
-  const mismatchCount = rows.filter((r) => r.zoneMismatch).length;
-
   const geocoded = filtered
     .filter((o) => o.lat != null && o.lng != null)
-    .map((o) => ({ id: o.orderNo, lat: o.lat as number, lng: o.lng as number, label: o.customer, status: o.status }));
+    .map((o) => {
+      const zone = matchZone(state.zoneRules, o.districtProvince, o.addressFromUnii);
+      return { id: o.orderNo, lat: o.lat as number, lng: o.lng as number, label: o.customer, status: o.status, color: zone.color, zoneName: zone.zoneName };
+    });
 
   // Coordinates coming out of Unii are unreliable (0,0 placeholders, points in
   // the wrong province or country). Left in, a single bad point stretches the
@@ -176,19 +195,28 @@ export function computeRoute(state: AppState, actions: AppActions) {
   // silently hiding data.
   const { kept: mapStops, excluded: excludedStopCount } = rejectOutlierStops(geocoded, warehouse);
 
+  const zoneLegend = state.zoneRules.map((z) => ({
+    id: z.id,
+    name: z.name,
+    color: z.color,
+    count: filtered.filter((o) => matchZone(state.zoneRules, o.districtProvince, o.addressFromUnii).zoneId === z.id).length,
+  }));
+  const unzonedCount = filtered.filter((o) => matchZone(state.zoneRules, o.districtProvince, o.addressFromUnii).zoneId === null).length;
+  const mismatchCount = rows.filter((r) => r.zoneMismatch).length;
+
   return {
     routeOrdersLoading: state.routeOrdersLoading,
     routeOrdersError: state.routeOrdersError,
     routeQ: state.routeQ,
     onRouteSearch: (v: string) => actions.patch({ routeQ: v }),
-    routeOptions,
-    routeFilterValue: state.routeFilterValue,
-    onRouteFilter: (v: string) => actions.patch({ routeFilterValue: v }),
+    routeTabs,
     statusTabs: makeTabs(statusValues, state.routeStatusFilter, (v) => actions.patch({ routeStatusFilter: v })),
     rows,
     resultCount: filtered.length,
     isEmpty: filtered.length === 0,
-    zoneSummary,
+    zoneLegend,
+    unzonedCount,
+    unassignedColor: UNASSIGNED_COLOR,
     mismatchCount,
     mapStops,
     excludedStopCount,
@@ -202,6 +230,8 @@ export interface MapStop {
   lng: number;
   label: string;
   status: string;
+  color: string;
+  zoneName: string;
 }
 
 /** Radius (km) around the bulk of the delivery area beyond which a coordinate
@@ -225,7 +255,7 @@ function median(values: number[]): number {
   return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
 }
 
-export function rejectOutlierStops(stops: MapStop[], warehouse: { lat: number; lng: number } | null): { kept: MapStop[]; excluded: number } {
+export function rejectOutlierStops<T extends { lat: number; lng: number }>(stops: T[], warehouse: { lat: number; lng: number } | null): { kept: T[]; excluded: number } {
   if (stops.length === 0) return { kept: [], excluded: 0 };
 
   // Anchor on the warehouse when known, else on the median point — either way
@@ -241,6 +271,179 @@ export function rejectOutlierStops(stops: MapStop[], warehouse: { lat: number; l
 
   return { kept, excluded: stops.length - kept.length };
 }
+
+// ---------- ROUTE PLANNER ----------
+export function computePlanner(state: AppState, actions: AppActions) {
+  const wh = state.routeOrders.find((o) => o.whLat != null && o.whLng != null);
+  const warehouse = wh && wh.whLat != null && wh.whLng != null ? { lat: wh.whLat, lng: wh.whLng } : null;
+
+  // Plan today's outstanding work: anything not yet delivered or cancelled.
+  const DONE = ['ส่งสำเร็จ', 'ได้รับแล้ว', 'ยกเลิก'];
+  const candidates = state.routeOrders.filter((o) => !DONE.includes(o.status));
+
+  const assignedTo = new Map<string, string>();
+  for (const [vehicleId, orderNos] of Object.entries(state.routePlan)) {
+    for (const no of orderNos) assignedTo.set(no, vehicleId);
+  }
+
+  const distanceOf = (o: (typeof candidates)[number]) =>
+    o.distanceFromWhKm ?? (warehouse && o.lat != null && o.lng != null ? haversineKm(warehouse.lat, warehouse.lng, o.lat, o.lng) : 0);
+
+  const byOrderNo = new Map(state.routeOrders.map((o) => [o.orderNo, o]));
+
+  const unassigned = candidates
+    .filter((o) => !assignedTo.has(o.orderNo))
+    .map((o) => {
+      const zone = matchZone(state.zoneRules, o.districtProvince, o.addressFromUnii);
+      return {
+        orderNo: o.orderNo,
+        customer: o.customer,
+        address: o.addressFromUnii || o.districtProvince,
+        amtText: fmt(o.totalAmount),
+        itemCount: o.itemCount,
+        zoneName: zone.zoneName,
+        zoneColor: zone.color,
+        suggestedRoute: zone.route,
+        distanceKm: distanceOf(o),
+        distanceText: `${distanceOf(o).toFixed(1)} กม.`,
+        assignTo: (vehicleId: string) => {
+          const plan = { ...state.routePlan };
+          plan[vehicleId] = [...(plan[vehicleId] ?? []), o.orderNo];
+          actions.setRoutePlan(plan);
+        },
+      };
+    })
+    .sort((a, b) => b.distanceKm - a.distanceKm);
+
+  const vehicles = state.vehicles.map((v) => {
+    const orderNos = state.routePlan[v.id] ?? [];
+    const stops = orderNos
+      .map((no) => byOrderNo.get(no))
+      .filter((o): o is NonNullable<typeof o> => o != null)
+      .map((o, i, arr) => {
+        const zone = matchZone(state.zoneRules, o.districtProvince, o.addressFromUnii);
+        return {
+          seq: i + 1,
+          // Load codes count down so the first drop is loaded last.
+          loadCode: loadCode(v.loadPrefix, i, arr.length),
+          orderNo: o.orderNo,
+          customer: o.customer,
+          address: o.addressFromUnii || o.districtProvince,
+          phone: o.phone,
+          amtText: fmt(o.totalAmount),
+          amount: o.totalAmount,
+          itemCount: o.itemCount,
+          paymentType: o.paymentType,
+          zoneName: zone.zoneName,
+          zoneColor: zone.color,
+          distanceText: `${distanceOf(o).toFixed(1)} กม.`,
+          mapLink: o.mapLink,
+          moveUp: () => {
+            if (i === 0) return;
+            const arr2 = [...orderNos];
+            [arr2[i - 1], arr2[i]] = [arr2[i], arr2[i - 1]];
+            actions.setRoutePlan({ ...state.routePlan, [v.id]: arr2 });
+          },
+          moveDown: () => {
+            if (i === orderNos.length - 1) return;
+            const arr2 = [...orderNos];
+            [arr2[i + 1], arr2[i]] = [arr2[i], arr2[i + 1]];
+            actions.setRoutePlan({ ...state.routePlan, [v.id]: arr2 });
+          },
+          remove: () => {
+            actions.setRoutePlan({ ...state.routePlan, [v.id]: orderNos.filter((n) => n !== o.orderNo) });
+          },
+        };
+      });
+
+    return {
+      id: v.id,
+      name: v.name,
+      loadPrefix: v.loadPrefix,
+      crew: v.crew,
+      zoneNote: v.zoneNote,
+      stops,
+      stopCount: stops.length,
+      totalText: fmt(stops.reduce((a, s) => a + s.amount, 0)),
+      // Farthest drop first, working back toward the warehouse — the order the
+      // ops sheet uses.
+      autoSequence: () => {
+        const sorted = [...orderNos].sort((a, b) => {
+          const oa = byOrderNo.get(a);
+          const ob = byOrderNo.get(b);
+          return (ob ? distanceOf(ob) : 0) - (oa ? distanceOf(oa) : 0);
+        });
+        actions.setRoutePlan({ ...state.routePlan, [v.id]: sorted });
+      },
+      clear: () => actions.setRoutePlan({ ...state.routePlan, [v.id]: [] }),
+      mapStops: stops
+        .filter((s) => {
+          const o = byOrderNo.get(s.orderNo);
+          return o?.lat != null && o?.lng != null;
+        })
+        .map((s) => {
+          const o = byOrderNo.get(s.orderNo)!;
+          return { id: s.orderNo, lat: o.lat as number, lng: o.lng as number, label: `${s.seq}. ${s.customer}`, status: '', color: s.zoneColor, zoneName: s.zoneName };
+        }),
+    };
+  });
+
+  const plannedStops = vehicles.reduce((a, v) => a + v.stopCount, 0);
+  const totalCrew = state.vehicles.reduce((a, v) => a + (Number.isFinite(v.crew) ? v.crew : 0), 0);
+  const activeCrew = vehicles.filter((v) => v.stopCount > 0).reduce((a, v) => a + v.crew, 0);
+
+  const allStops = vehicles.flatMap((v) => v.mapStops);
+  const { kept: mapStops, excluded: excludedStopCount } = rejectOutlierStops(allStops, warehouse);
+
+  const suggestByZone = () => {
+    const plan: RoutePlanShape = { ...state.routePlan };
+    for (const o of candidates.filter((x) => !assignedTo.has(x.orderNo))) {
+      const zone = matchZone(state.zoneRules, o.districtProvince, o.addressFromUnii);
+      if (zone.route === '—') continue;
+      // Prefer the vehicle explicitly assigned this zone; only fall back to
+      // matching the load prefix against the zone's route letter, since two
+      // zones can share a route letter and would otherwise pile onto one truck.
+      const target =
+        state.vehicles.find((v) => v.zoneNote.trim() !== '' && zone.zoneName.includes(v.zoneNote.trim())) ??
+        state.vehicles.find((v) => v.zoneNote.trim() !== '' && v.zoneNote.includes(zone.zoneName)) ??
+        state.vehicles.find((v) => v.loadPrefix.toUpperCase() === zone.route.toUpperCase());
+      if (!target) continue;
+      plan[target.id] = [...(plan[target.id] ?? []), o.orderNo];
+    }
+    // Keep each vehicle in farthest-first order after bulk assignment.
+    for (const id of Object.keys(plan)) {
+      plan[id] = [...plan[id]].sort((a, b) => {
+        const oa = byOrderNo.get(a);
+        const ob = byOrderNo.get(b);
+        return (ob ? distanceOf(ob) : 0) - (oa ? distanceOf(oa) : 0);
+      });
+    }
+    actions.setRoutePlan(plan);
+  };
+
+  return {
+    loading: state.routeOrdersLoading,
+    error: state.routeOrdersError,
+    vehicles,
+    unassigned,
+    unassignedCount: unassigned.length,
+    plannedStops,
+    totalCrew,
+    activeCrew,
+    mapStops,
+    excludedStopCount,
+    warehouse,
+    suggestByZone,
+    clearAll: () => actions.setRoutePlan({}),
+    zoneLegend: state.zoneRules.map((z) => ({ id: z.id, name: z.name, color: z.color })),
+    unassignedColor: UNASSIGNED_COLOR,
+    configTab: state.plannerConfigTab,
+    openZones: () => actions.patch({ plannerConfigTab: state.plannerConfigTab === 'zones' ? null : 'zones' }),
+    openVehicles: () => actions.patch({ plannerConfigTab: state.plannerConfigTab === 'vehicles' ? null : 'vehicles' }),
+  };
+}
+
+type RoutePlanShape = Record<string, string[]>;
 
 // ---------- BATCH PICKING ----------
 export function computePick(state: AppState, actions: AppActions) {
@@ -383,7 +586,17 @@ export function computePromo(state: AppState, actions: AppActions) {
   const pq = state.promoQ.trim().toLowerCase();
   const rows = state.promos
     .filter((p) => !pq || p.sku.toLowerCase().includes(pq) || p.skuName.toLowerCase().includes(pq) || p.name.toLowerCase().includes(pq))
-    .map((p) => ({ ...p, stLabel: promoMeta[p.st][0], stStyle: badgeStyle(promoMeta[p.st][1]), typeStyle: badgeStyle('accent') }));
+    .map((p) => ({
+      ...p,
+      stLabel: promoMeta[p.st][0],
+      stStyle: badgeStyle(promoMeta[p.st][1]),
+      typeStyle: badgeStyle(p.tiers.length > 1 ? 'info' : 'accent'),
+      isStepped: p.tiers.length > 1,
+      tierRows: p.tiers.map((t) => ({
+        label: t.minQty > 1 ? `${t.minQty}${p.unit}ขึ้นไป` : `1 ${p.unit}`,
+        priceText: `฿${t.price.toLocaleString('en-US')}`,
+      })),
+    }));
 
   return {
     promosLoading: state.promosLoading,
@@ -400,6 +613,28 @@ export function computePromo(state: AppState, actions: AppActions) {
     onPromoType: (v: string) => actions.patch({ promoForm: { ...state.promoForm, type: v } }),
     onPromoStart: (v: string) => actions.patch({ promoForm: { ...state.promoForm, start: v } }),
     onPromoEnd: (v: string) => actions.patch({ promoForm: { ...state.promoForm, end: v } }),
+    onPromoUnit: (v: PromoUnit) => actions.patch({ promoForm: { ...state.promoForm, unit: v } }),
+    promoUnits: PROMO_UNITS,
+    tierRows: state.promoForm.tiers.map((t, i) => ({
+      minQty: t.minQty === 0 ? '' : String(t.minQty),
+      price: t.price === 0 ? '' : String(t.price),
+      isFirst: i === 0,
+      onMinQty: (val: string) => {
+        const tiers = state.promoForm.tiers.map((x, j) => (j === i ? { ...x, minQty: Number(val.replace(/[^0-9]/g, '') || 0) } : x));
+        actions.patch({ promoForm: { ...state.promoForm, tiers } });
+      },
+      onPrice: (val: string) => {
+        const tiers = state.promoForm.tiers.map((x, j) => (j === i ? { ...x, price: Number(val.replace(/[^0-9.]/g, '') || 0) } : x));
+        actions.patch({ promoForm: { ...state.promoForm, tiers } });
+      },
+      remove: () => actions.patch({ promoForm: { ...state.promoForm, tiers: state.promoForm.tiers.filter((_, j) => j !== i) } }),
+    })),
+    addTier: () => {
+      const last = state.promoForm.tiers[state.promoForm.tiers.length - 1];
+      const nextQty = last ? Math.max(last.minQty + 1, 2) : 1;
+      actions.patch({ promoForm: { ...state.promoForm, tiers: [...state.promoForm.tiers, { minQty: nextQty, price: 0 }] } });
+    },
+    canSavePromo: state.promoForm.name.trim() !== '' && state.promoForm.tiers.some((t) => t.price > 0),
     addPromo: () => actions.addPromo(),
   };
 }

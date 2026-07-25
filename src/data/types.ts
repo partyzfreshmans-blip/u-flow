@@ -30,8 +30,21 @@ export interface PickBatch {
   items: PickItem[];
 }
 
-// ---------- Promotions (sheet-sourced list; local "create promo" form unchanged) ----------
+// ---------- Promotions ("โปรโมชั่น" tab, Active rows only) ----------
 export type PromoStatus = 'active' | 'upcoming' | 'expired';
+
+/** Units a promotion price can be quoted per. The sheet quotes prices per
+ * หีบ/ลัง most often, but singles and paired deals also occur. */
+export const PROMO_UNITS = ['ชิ้น', 'คู่', 'แพ็ค', 'ลัง', 'หีบ'] as const;
+export type PromoUnit = (typeof PROMO_UNITS)[number];
+
+/** One step of a volume promotion: buy `minQty` or more, pay `price` per unit.
+ * Mirrors the sheet's own wording, e.g. "ลังละ 279บาท, 5ลังขึ้นไป 275บาท,
+ * 20ลังขึ้นไป 270บาท" becomes three tiers. */
+export interface PromoTier {
+  minQty: number;
+  price: number;
+}
 
 export interface Promo {
   name: string;
@@ -41,6 +54,13 @@ export interface Promo {
   type: string;
   period: string;
   st: PromoStatus;
+  /** Unit the promotion price applies to. */
+  unit: PromoUnit;
+  /** Volume steps, ascending by minQty. A single-step promo has one entry. */
+  tiers: PromoTier[];
+  /** Original free-text term from the sheet, kept verbatim so nothing the
+   * parser could not interpret is lost. */
+  termText: string;
 }
 
 // ---------- GRN (unchanged) ----------
@@ -106,11 +126,6 @@ export interface ApiImportOrder {
 export interface RouteOrder {
   /** Effective route: the manual "Route" column if set, else the "AutoR" column. */
   route: string;
-  /** Route suggested by the delivery-zone rules, or null when the address
-   * falls outside the covered provinces. See src/data/routeZones.ts. */
-  zoneRoute: 'A' | 'B' | null;
-  /** Human-readable justification for zoneRoute, shown in the UI. */
-  zoneReason: string;
   plannedDeliveryDate: string;
   orderedAtText: string;
   customer: string;
@@ -165,4 +180,4 @@ export interface CsMasterCustomer {
   note: string;
 }
 
-export type RouteKey = 'dashboard' | 'route' | 'pick' | 'cod' | 'promo' | 'grn' | 'sku' | 'customer' | 'settings';
+export type RouteKey = 'dashboard' | 'route' | 'planner' | 'pick' | 'cod' | 'promo' | 'grn' | 'sku' | 'customer' | 'settings';

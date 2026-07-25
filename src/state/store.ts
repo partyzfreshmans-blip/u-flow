@@ -8,7 +8,9 @@ import { fetchRouteOrders } from '../data/sources/routeOrders';
 import { invalidateSheetCache } from '../data/sources/sheetCsv';
 import { fetchOrderLineItems } from '../data/sources/skuDetail';
 import { fetchSkusFromSheet } from '../data/sources/skuSheet';
-import type { ApiImportOrder, CsMasterCustomer, GrnLine, Promo, RouteKey, RouteOrder, Sku } from '../data/types';
+import { DEFAULT_VEHICLES, loadRoutePlan, loadVehicles, saveRoutePlan, saveVehicles, type RoutePlan, type Vehicle } from '../data/vehicles';
+import { DEFAULT_ZONE_RULES, loadZoneRules, saveZoneRules, type ZoneRule } from '../data/zoneConfig';
+import type { ApiImportOrder, CsMasterCustomer, GrnLine, Promo, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
 
 export interface SkuForm {
   /** Hidden unique key of the row being edited; empty when adding a new SKU. */
@@ -48,6 +50,12 @@ export interface AppState {
   routeStatusFilter: string;
   routeQ: string;
 
+  // route planner (zones + vehicles are user-editable and persisted locally)
+  zoneRules: ZoneRule[];
+  vehicles: Vehicle[];
+  routePlan: RoutePlan;
+  plannerConfigTab: 'zones' | 'vehicles' | null;
+
   // batch picking
   picked: Record<string, boolean>;
   pickClosed: boolean;
@@ -68,7 +76,7 @@ export interface AppState {
   promosError: string | null;
   promoQ: string;
   promoModal: boolean;
-  promoForm: { name: string; sku: string; type: string; start: string; end: string };
+  promoForm: { name: string; sku: string; type: string; start: string; end: string; unit: PromoUnit; tiers: PromoTier[] };
 
   // GRN
   grnSupplier: string;
@@ -137,6 +145,11 @@ export const initialState: AppState = {
   routeStatusFilter: 'all',
   routeQ: '',
 
+  zoneRules: DEFAULT_ZONE_RULES,
+  vehicles: DEFAULT_VEHICLES,
+  routePlan: {},
+  plannerConfigTab: null,
+
   picked: {},
   pickClosed: false,
   codDriver: 'สมชาย ป.',
@@ -150,7 +163,7 @@ export const initialState: AppState = {
   promosError: null,
   promoQ: '',
   promoModal: false,
-  promoForm: { name: '', sku: '', type: 'ลดราคา', start: '2026-07-24', end: '2026-08-24' },
+  promoForm: { name: '', sku: '', type: 'ลดราคา', start: '2026-07-24', end: '2026-08-24', unit: 'ลัง', tiers: [{ minQty: 1, price: 0 }] },
 
   grnSupplier: '',
   grnDoc: '',
@@ -324,20 +337,25 @@ function reducer(state: AppState, action: Action): AppState {
       const f = state.promoForm;
       if (!f.name.trim()) return state;
       const match = state.skus.find((s) => s.id === f.sku || s.name === f.sku);
+      const tiers = f.tiers.filter((t) => t.price > 0).sort((a, b) => a.minQty - b.minQty);
+      const base = tiers[0];
       const promo: Promo = {
         name: f.name.trim(),
-        value: f.type,
-        sku: match ? match.id : f.sku.trim() || '—',
+        value: base ? `฿${base.price}/${f.unit}` : f.type,
+        sku: match ? match.displayId : f.sku.trim() || '—',
         skuName: match ? match.name : f.sku.trim() || '—',
-        type: f.type,
+        type: tiers.length > 1 ? 'ลดขั้นบันได' : f.type,
         period: `${f.start} – ${f.end}`,
         st: 'active',
+        unit: f.unit,
+        tiers,
+        termText: tiers.map((t) => (t.minQty > 1 ? `${t.minQty}${f.unit}ขึ้นไป ${t.price}บาท` : `${f.unit}ละ ${t.price}บาท`)).join(', '),
       };
       return {
         ...state,
         promos: [promo, ...state.promos],
         promoModal: false,
-        promoForm: { name: '', sku: '', type: 'ลดราคา', start: '2026-07-24', end: '2026-08-24' },
+        promoForm: { name: '', sku: '', type: 'ลดราคา', start: '2026-07-24', end: '2026-08-24', unit: 'ลัง', tiers: [{ minQty: 1, price: 0 }] },
       };
     }
 
@@ -439,9 +457,27 @@ export function useAppStore() {
     };
   }, []);
 
+  // Zones, vehicles and the current plan live in localStorage, so they survive
+  // a reload without needing the sheet or a backend.
+  useEffect(() => {
+    dispatch({ type: 'patch', patch: { zoneRules: loadZoneRules(), vehicles: loadVehicles(), routePlan: loadRoutePlan() } });
+  }, []);
+
   const actions = useMemo(
     () => ({
       patch: (patch: Partial<AppState>) => dispatch({ type: 'patch', patch }),
+      setZoneRules: (rules: ZoneRule[]) => {
+        dispatch({ type: 'patch', patch: { zoneRules: rules } });
+        saveZoneRules(rules);
+      },
+      setVehicles: (vehicles: Vehicle[]) => {
+        dispatch({ type: 'patch', patch: { vehicles } });
+        saveVehicles(vehicles);
+      },
+      setRoutePlan: (plan: RoutePlan) => {
+        dispatch({ type: 'patch', patch: { routePlan: plan } });
+        saveRoutePlan(plan);
+      },
       doLookup: () => dispatch({ type: 'doLookup' }),
       createSkuFromGrn: () => dispatch({ type: 'createSkuFromGrn' }),
       addGrnLine: () => dispatch({ type: 'addGrnLine' }),
