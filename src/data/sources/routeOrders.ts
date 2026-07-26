@@ -41,6 +41,10 @@ function rowToRouteOrder(row: Record<string, string>): RouteOrder | null {
     deliveredDate: (row['วันที่จัดส่ง'] ?? '').trim(),
     completedDate: (row['วันที่ส่งสำเร็จ'] ?? '').trim(),
     updatedDate: (row['วันที่อัปเดต'] ?? '').trim(),
+    // No clean boolean column exists in this tab yet — the backend bootstraps
+    // one named exactly "ขอใบกำกับภาษี" the first time someone saves the
+    // toggle (see server/index.ts). Until then this just reads blank/false.
+    wantsTaxInvoice: /^(ใช่|yes|true|y)$/i.test((row['ขอใบกำกับภาษี'] ?? '').trim()),
     districtProvince,
     addressFromUnii,
     mapLink: (row['Link'] ?? '').trim(),

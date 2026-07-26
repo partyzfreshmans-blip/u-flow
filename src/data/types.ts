@@ -140,6 +140,8 @@ export interface RouteOrder {
   deliveredDate: string;
   completedDate: string;
   updatedDate: string;
+  /** Parsed from a bootstrapped "ขอใบกำกับภาษี" column — see routeOrdersWrite.ts. */
+  wantsTaxInvoice: boolean;
   districtProvince: string;
   addressFromUnii: string;
   mapLink: string;

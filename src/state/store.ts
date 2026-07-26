@@ -11,11 +11,23 @@ import { attachmentKey, loadAttachments, saveAttachments, uploadToDrive, type At
 import { emptyLine, loadReceivingLog, receivingFolderKey, saveReceivingLog, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { DEFAULT_VEHICLES, loadRoutePlan, loadVehicles, saveRoutePlan, saveVehicles, type RoutePlan, type Vehicle } from '../data/vehicles';
 import { DEFAULT_ZONE_RULES, loadZoneRules, saveZoneRules, type ZoneRule } from '../data/zoneConfig';
-import { loadDeliveryOverrides, saveDeliveryOverrides, type DeliveryOverrides } from '../data/deliveryOverrides';
 import { loadRouteCodState, saveRouteCodState } from '../data/routeCod';
-import { todayDayKey } from '../data/dateUtils';
+import { isoToSheetDateText, sheetDateToDayKey, todayDayKey } from '../data/dateUtils';
+import { updateRouteOrder } from '../data/sources/routeOrdersWrite';
 import type { AttachmentScope } from '../config/drive';
 import type { ApiImportOrder, CsMasterCustomer, Promo, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
+
+export interface OrderEditDraft {
+  /** ISO YYYY-MM-DD, '' = not set. */
+  plannedDeliveryDate: string;
+  note: string;
+  wantsTaxInvoice: boolean;
+}
+
+export interface OrderSaveStatus {
+  state: 'saving' | 'saved' | 'error';
+  message?: string;
+}
 
 export interface SkuForm {
   /** Hidden unique key of the row being edited; empty when adding a new SKU. */
@@ -49,6 +61,11 @@ export interface AppState {
   orderDetailLines: { sku: string; name: string; unit: string; qty: number; unitPrice: number; discount: number; lineTotal: number }[];
   orderDetailLoading: boolean;
   orderDetailError: string | null;
+  /** true when the opened order has a matching "คำสั่งซื้อ" row to edit/save against. */
+  orderEditAvailable: boolean;
+  orderEditDraft: OrderEditDraft;
+  /** Per orderNo, so the table can also show a save indicator after the modal closes. */
+  orderSaveStatus: Record<string, OrderSaveStatus>;
 
   // route planning / delivery history ("คำสั่งซื้อ" tab)
   routeOrders: RouteOrder[];
@@ -60,11 +77,6 @@ export interface AppState {
   /** ISO date (YYYY-MM-DD) filters; '' = no filter. */
   routeOrderDateFilter: string;
   routeDeliveryDateFilter: string;
-  /** Local override of a delivery date, keyed by orderNo — the sheet itself
-   * is read-only, so a rescheduled/missed case is corrected only here. */
-  deliveryOverrides: DeliveryOverrides;
-  editDeliveryDateOrderNo: string | null;
-  editDeliveryDateValue: string;
 
   // route planner (zones + vehicles are user-editable and persisted locally)
   zoneRules: ZoneRule[];
@@ -162,6 +174,9 @@ export const initialState: AppState = {
   orderDetailLines: [],
   orderDetailLoading: false,
   orderDetailError: null,
+  orderEditAvailable: false,
+  orderEditDraft: { plannedDeliveryDate: '', note: '', wantsTaxInvoice: false },
+  orderSaveStatus: {},
 
   routeOrders: [],
   routeOrdersLoading: true,
@@ -171,9 +186,6 @@ export const initialState: AppState = {
   routeQ: '',
   routeOrderDateFilter: '',
   routeDeliveryDateFilter: '',
-  deliveryOverrides: {},
-  editDeliveryDateOrderNo: null,
-  editDeliveryDateValue: '',
 
   zoneRules: DEFAULT_ZONE_RULES,
   vehicles: DEFAULT_VEHICLES,
@@ -242,7 +254,9 @@ export type Action =
   | { type: 'openEditSku'; sku: Sku }
   | { type: 'saveSku' }
   | { type: 'addPromo' }
-  | { type: 'updateCustomerLatLng'; rowIndex: number; lat: number; lng: number };
+  | { type: 'updateCustomerLatLng'; rowIndex: number; lat: number; lng: number }
+  | { type: 'setOrderSaveStatus'; orderNo: string; status: OrderSaveStatus | null }
+  | { type: 'applyOrderEdit'; orderNo: string; plannedDeliveryDateSheetText: string | null; note: string | null; wantsTaxInvoice: boolean | null };
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -305,6 +319,35 @@ function reducer(state: AppState, action: Action): AppState {
     case 'updateCustomerLatLng': {
       const arr = state.customers.map((c) => (c.rowIndex === action.rowIndex ? { ...c, lat: action.lat, lng: action.lng } : c));
       return { ...state, customers: arr };
+    }
+
+    case 'setOrderSaveStatus': {
+      const next = { ...state.orderSaveStatus };
+      if (action.status === null) delete next[action.orderNo];
+      else next[action.orderNo] = action.status;
+      return { ...state, orderSaveStatus: next };
+    }
+
+    case 'applyOrderEdit': {
+      // Written back to the real sheet successfully, so state.routeOrders
+      // becomes the authoritative copy again — no separate local override
+      // layer needed. Mirrors wantsTaxInvoice onto the matching API Import
+      // row too (by orderUid), since that's the one field both tabs share.
+      const routeOrders = state.routeOrders.map((o) =>
+        o.orderNo === action.orderNo
+          ? {
+              ...o,
+              ...(action.plannedDeliveryDateSheetText !== null ? { plannedDeliveryDate: action.plannedDeliveryDateSheetText } : {}),
+              ...(action.note !== null ? { note: action.note } : {}),
+              ...(action.wantsTaxInvoice !== null ? { wantsTaxInvoice: action.wantsTaxInvoice } : {}),
+            }
+          : o,
+      );
+      const apiOrders =
+        action.wantsTaxInvoice !== null
+          ? state.apiOrders.map((o) => (o.orderUid === action.orderNo ? { ...o, wantsTaxInvoice: action.wantsTaxInvoice ? 'ใช่' : '' } : o))
+          : state.apiOrders;
+      return { ...state, routeOrders, apiOrders };
     }
 
     default:
@@ -412,7 +455,6 @@ export function useAppStore() {
         routePlan: loadRoutePlan(),
         attachments: loadAttachments(),
         receivingLog: loadReceivingLog(),
-        deliveryOverrides: loadDeliveryOverrides(),
         routeCodCollected: routeCod.collected,
         routeCodMethod: routeCod.method,
       },
@@ -433,10 +475,6 @@ export function useAppStore() {
       setRoutePlan: (plan: RoutePlan) => {
         dispatch({ type: 'patch', patch: { routePlan: plan } });
         saveRoutePlan(plan);
-      },
-      setDeliveryOverrides: (overrides: DeliveryOverrides) => {
-        saveDeliveryOverrides(overrides);
-        dispatch({ type: 'patch', patch: { deliveryOverrides: overrides, editDeliveryDateOrderNo: null } });
       },
       saveRouteCod: (collected: Record<string, string>, method: Record<string, 'cash' | 'transfer'>) => {
         saveRouteCodState({ collected, method });
@@ -491,10 +529,21 @@ export function useAppStore() {
       saveSku: () => dispatch({ type: 'saveSku' }),
       addPromo: () => dispatch({ type: 'addPromo' }),
 
-      openOrderDetail: (orderNo: string, customer: string) => {
+      openOrderDetail: (orderNo: string, customer: string, matchedOrder: RouteOrder | undefined) => {
         dispatch({
           type: 'patch',
-          patch: { orderDetailOpen: true, orderDetailOrderNo: orderNo, orderDetailCustomer: customer, orderDetailLoading: true, orderDetailError: null, orderDetailLines: [] },
+          patch: {
+            orderDetailOpen: true,
+            orderDetailOrderNo: orderNo,
+            orderDetailCustomer: customer,
+            orderDetailLoading: true,
+            orderDetailError: null,
+            orderDetailLines: [],
+            orderEditAvailable: matchedOrder != null,
+            orderEditDraft: matchedOrder
+              ? { plannedDeliveryDate: sheetDateToDayKey(matchedOrder.plannedDeliveryDate) ?? '', note: matchedOrder.note, wantsTaxInvoice: matchedOrder.wantsTaxInvoice }
+              : { plannedDeliveryDate: '', note: '', wantsTaxInvoice: false },
+          },
         });
         fetchOrderLineItems(orderNo)
           .then((lines) => {
@@ -512,6 +561,35 @@ export function useAppStore() {
           });
       },
       closeOrderDetail: () => dispatch({ type: 'patch', patch: { orderDetailOpen: false } }),
+
+      setOrderEditDraft: (draft: OrderEditDraft) => dispatch({ type: 'patch', patch: { orderEditDraft: draft } }),
+      /** Writes to the real "คำสั่งซื้อ" sheet via the backend; local state is
+       * only ever updated after that succeeds, so a failed save can't leave
+       * the app showing something the sheet doesn't actually have. */
+      saveOrderEdit: (orderNo: string, draft: OrderEditDraft) => {
+        dispatch({ type: 'setOrderSaveStatus', orderNo, status: { state: 'saving' } });
+        updateRouteOrder({
+          orderNo,
+          plannedDeliveryDate: draft.plannedDeliveryDate || undefined,
+          note: draft.note,
+          wantsTaxInvoice: draft.wantsTaxInvoice,
+        })
+          .then(() => {
+            dispatch({
+              type: 'applyOrderEdit',
+              orderNo,
+              plannedDeliveryDateSheetText: draft.plannedDeliveryDate ? isoToSheetDateText(draft.plannedDeliveryDate) : null,
+              note: draft.note,
+              wantsTaxInvoice: draft.wantsTaxInvoice,
+            });
+            dispatch({ type: 'setOrderSaveStatus', orderNo, status: { state: 'saved' } });
+            setTimeout(() => dispatch({ type: 'setOrderSaveStatus', orderNo, status: null }), 2500);
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'บันทึกไม่สำเร็จ';
+            dispatch({ type: 'setOrderSaveStatus', orderNo, status: { state: 'error', message } });
+          });
+      },
 
       openEditCustomerLatLng: (c: CsMasterCustomer) => {
         dispatch({

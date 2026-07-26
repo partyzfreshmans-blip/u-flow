@@ -27,12 +27,50 @@ app.use(express.json());
 
 const PORT = Number(process.env.SERVER_PORT ?? 8787);
 const CS_MASTER_GID = Number(SHEET_TABS.csMaster.gid);
+const ROUTE_ORDERS_GID = Number(SHEET_TABS.routeOrders.gid);
 
 // Columns in the CS Master tab: A=ชื่อ B=เบอร์ C=ที่อยู่ D=ละ(lat) E=ลอง(lng)
 const LAT_COLUMN = 'D';
 const LNG_COLUMN = 'E';
 const NAME_COLUMN_INDEX = 0;
 const PHONE_COLUMN_INDEX = 1;
+
+// Columns in the "คำสั่งซื้อ" tab, looked up by header text each request (not
+// by position) so a future column reorder in the sheet doesn't silently write
+// to the wrong cell.
+const ORDER_NO_HEADER = 'เลขคำสั่งซื้อ';
+const NOTE_HEADER = 'หมายเหตุ';
+// "วันที่จะจัดส่ง" (planned delivery date) — NOT the sheet's separate
+// "วันที่จัดส่ง" column, which is a datetime stamped once a driver actually
+// delivers and would be corrupted by a manually-picked future date.
+const DELIVERY_DATE_HEADER = 'วันที่จะจัดส่ง';
+const TAX_INVOICE_HEADER = 'ขอใบกำกับภาษี';
+// The real sheet has no dedicated boolean tax-invoice column — only a legacy
+// field ("ใบกำกับภาษี/หมายเหตุเดิม") that mixes it with old free-text notes
+// and already holds real note content on some rows, so it's not safe to
+// overwrite. The column right after it is blank in every row today; claim it
+// by labelling its header on first write, and refuse if that ever turns out
+// not to be true anymore (someone typed something else into it since).
+const TAX_INVOICE_FALLBACK_COLUMN_INDEX = 13; // column N, 0-based
+
+function columnLetter(index: number): string {
+  let n = index + 1;
+  let s = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+/** Sheet dates read as M/D/YYYY (no leading zeros); write back the same way so
+ * USER_ENTERED parses it as the same date type as the surrounding cells. */
+function isoToSheetDate(iso: string): string {
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) throw new Error('รูปแบบวันที่ไม่ถูกต้อง (ต้องเป็น YYYY-MM-DD)');
+  return `${Number(m[2])}/${Number(m[3])}/${Number(m[1])}`;
+}
 
 function getServiceAccountCredentials(): { client_email: string; private_key: string } {
   const raw = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
@@ -262,6 +300,135 @@ app.post('/api/cs-master/update-location', async (req, res) => {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
     console.error('[cs-master/update-location]', message);
+    return res.status(500).json({ error: message });
+  }
+});
+
+app.post('/api/route-orders/update', async (req, res) => {
+  const { orderNo, plannedDeliveryDate, note, wantsTaxInvoice } = req.body ?? {};
+
+  if (typeof orderNo !== 'string' || orderNo.trim() === '') {
+    return res.status(400).json({ error: 'ต้องระบุเลขคำสั่งซื้อ' });
+  }
+  if (plannedDeliveryDate === undefined && note === undefined && wantsTaxInvoice === undefined) {
+    return res.status(400).json({ error: 'ไม่มีข้อมูลให้บันทึก' });
+  }
+  if (plannedDeliveryDate !== undefined && typeof plannedDeliveryDate !== 'string') {
+    return res.status(400).json({ error: 'plannedDeliveryDate ต้องเป็นข้อความรูปแบบ YYYY-MM-DD' });
+  }
+  if (note !== undefined && typeof note !== 'string') {
+    return res.status(400).json({ error: 'note ต้องเป็นข้อความ' });
+  }
+  if (wantsTaxInvoice !== undefined && typeof wantsTaxInvoice !== 'boolean') {
+    return res.status(400).json({ error: 'wantsTaxInvoice ต้องเป็น true/false' });
+  }
+
+  let sheetDate: string | null = null;
+  if (typeof plannedDeliveryDate === 'string') {
+    try {
+      sheetDate = isoToSheetDate(plannedDeliveryDate);
+    } catch (err: unknown) {
+      return res.status(400).json({ error: err instanceof Error ? err.message : 'วันที่ไม่ถูกต้อง' });
+    }
+  }
+
+  try {
+    const sheets = await getSheetsClient();
+    const title = await resolveSheetTitle(sheets, ROUTE_ORDERS_GID);
+
+    const current = await sheets.spreadsheets.values.get({
+      spreadsheetId: MAIN_SHEET_ID,
+      range: `${title}!A:AB`,
+    });
+    const rows = current.data.values ?? [];
+    const header = rows[0] ?? [];
+    const headerAt = (name: string) => header.findIndex((h) => String(h ?? '').trim() === name);
+
+    const orderNoCol = headerAt(ORDER_NO_HEADER);
+    if (orderNoCol === -1) return res.status(500).json({ error: `ไม่พบคอลัมน์ "${ORDER_NO_HEADER}" ในชีท` });
+
+    const wanted = orderNo.trim();
+    const matches: number[] = [];
+    for (let i = 1; i < rows.length; i++) {
+      if (String(rows[i]?.[orderNoCol] ?? '').trim() === wanted) matches.push(i + 1); // sheet rows are 1-based
+    }
+    if (matches.length === 0) return res.status(404).json({ error: `ไม่พบคำสั่งซื้อ "${wanted}" ในชีทคำสั่งซื้อ` });
+    if (matches.length > 1) {
+      return res.status(409).json({ error: `พบเลขคำสั่งซื้อ "${wanted}" ซ้ำกัน ${matches.length} แถว (แถว ${matches.join(', ')}) — โปรดแก้ไขในชีทโดยตรง` });
+    }
+    const targetRow = matches[0];
+
+    // Resolve every target column up front so a missing column fails the
+    // whole request before anything is written, rather than leaving a
+    // partial edit behind.
+    let deliveryDateCol = -1;
+    if (sheetDate !== null) {
+      deliveryDateCol = headerAt(DELIVERY_DATE_HEADER);
+      if (deliveryDateCol === -1) return res.status(500).json({ error: `ไม่พบคอลัมน์ "${DELIVERY_DATE_HEADER}" ในชีท` });
+    }
+    let noteCol = -1;
+    if (typeof note === 'string') {
+      noteCol = headerAt(NOTE_HEADER);
+      if (noteCol === -1) return res.status(500).json({ error: `ไม่พบคอลัมน์ "${NOTE_HEADER}" ในชีท` });
+    }
+    let taxInvoiceCol = -1;
+    if (typeof wantsTaxInvoice === 'boolean') {
+      taxInvoiceCol = headerAt(TAX_INVOICE_HEADER);
+      if (taxInvoiceCol === -1) {
+        const fallbackHeader = String(header[TAX_INVOICE_FALLBACK_COLUMN_INDEX] ?? '').trim();
+        if (fallbackHeader !== '') {
+          return res.status(500).json({
+            error: `ไม่พบคอลัมน์ "${TAX_INVOICE_HEADER}" และคอลัมน์สำรอง (${columnLetter(TAX_INVOICE_FALLBACK_COLUMN_INDEX)}) ก็มีชื่ออื่นอยู่แล้ว ("${fallbackHeader}") — ต้องเพิ่มคอลัมน์นี้ในชีทเอง`,
+          });
+        }
+        taxInvoiceCol = TAX_INVOICE_FALLBACK_COLUMN_INDEX;
+      }
+    }
+
+    // Bootstrap the tax-invoice header the first time it's needed. Plain
+    // values.update (not append) so it can never create a new row.
+    if (typeof wantsTaxInvoice === 'boolean' && headerAt(TAX_INVOICE_HEADER) === -1) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: MAIN_SHEET_ID,
+        range: `${title}!${columnLetter(taxInvoiceCol)}1`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[TAX_INVOICE_HEADER]] },
+      });
+    }
+
+    // USER_ENTERED for the date so Sheets parses it the same way a person
+    // typing it in would (matching the existing column's date formatting);
+    // RAW for free text so a note starting with "=" can never be read as a
+    // formula.
+    if (sheetDate !== null) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: MAIN_SHEET_ID,
+        range: `${title}!${columnLetter(deliveryDateCol)}${targetRow}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: { values: [[sheetDate]] },
+      });
+    }
+    if (typeof note === 'string') {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: MAIN_SHEET_ID,
+        range: `${title}!${columnLetter(noteCol)}${targetRow}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[note]] },
+      });
+    }
+    if (typeof wantsTaxInvoice === 'boolean') {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: MAIN_SHEET_ID,
+        range: `${title}!${columnLetter(taxInvoiceCol)}${targetRow}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[wantsTaxInvoice ? 'ใช่' : '']] },
+      });
+    }
+
+    return res.json({ ok: true, updatedRow: targetRow });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+    console.error('[route-orders/update]', message);
     return res.status(500).json({ error: message });
   }
 });

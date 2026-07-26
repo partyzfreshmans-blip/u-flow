@@ -3,7 +3,7 @@ import { pageTitles } from './state/derive';
 import { useAppStore } from './state/store';
 import { DashboardPage } from './pages/DashboardPage';
 import { PlannerPage } from './pages/PlannerPage';
-import { RoutePage } from './pages/RoutePage';
+import { OrderManagementPage } from './pages/OrderManagementPage';
 import { PickPage } from './pages/PickPage';
 import { CodPage } from './pages/CodPage';
 import { PromoPage } from './pages/PromoPage';
@@ -45,7 +45,7 @@ function App() {
 
         <div style={{ flex: 1, padding: '24px 26px 60px', overflow: 'auto' }}>
           {state.route === 'dashboard' && <DashboardPage state={state} actions={actions} />}
-          {state.route === 'route' && <RoutePage state={state} actions={actions} />}
+          {state.route === 'route' && <OrderManagementPage state={state} actions={actions} />}
           {state.route === 'planner' && <PlannerPage state={state} actions={actions} />}
           {state.route === 'pick' && <PickPage state={state} actions={actions} />}
           {state.route === 'cod' && <CodPage state={state} actions={actions} />}

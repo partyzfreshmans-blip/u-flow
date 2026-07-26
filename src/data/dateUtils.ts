@@ -56,6 +56,14 @@ export function todayDayKey(): string {
   return dayKey(new Date());
 }
 
+/** ISO day key -> the sheet's own "M/D/YYYY" text form (no leading zeros), so
+ * a freshly-saved date reads identically to one fetched straight from the sheet. */
+export function isoToSheetDateText(iso: string): string {
+  const d = dayKeyToDate(iso);
+  if (!d) return iso;
+  return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
+}
+
 /** Whole-day difference b - a, in days (positive when b is later). */
 export function daysBetweenKeys(a: string, b: string): number {
   const da = dayKeyToDate(a);

@@ -3,7 +3,7 @@ import type { AppActions, AppState } from '../state/store';
 import { AttachmentPanel } from './AttachmentPanel';
 
 export function OrderDetailModal({ state, actions }: { state: AppState; actions: AppActions }) {
-  const v = computeOrderDetail(state);
+  const v = computeOrderDetail(state, actions);
   if (!v.open) return null;
 
   return (
@@ -47,6 +47,50 @@ export function OrderDetailModal({ state, actions }: { state: AppState; actions:
               <span style={{ color: 'var(--color-neutral-400)', fontWeight: 400 }}>รวมทั้งหมด</span>{v.totalText}
             </div>
           )}
+
+          <div className="hr" style={{ margin: '4px 0' }} />
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ fontWeight: 600, fontSize: 13 }}>แก้ไขข้อมูลออเดอร์</div>
+            {!v.canEdit && (
+              <div style={{ fontSize: 12, color: 'var(--color-neutral-500)' }}>
+                <i className="ph ph-info" style={{ marginRight: 4 }} />ไม่พบออเดอร์นี้ในชีท "คำสั่งซื้อ" — แก้ไขได้เมื่อออเดอร์ถูกจัดเข้าชีทนี้แล้ว
+              </div>
+            )}
+            {v.canEdit && (
+              <>
+                <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--color-neutral-400)' }}>
+                    วันที่จะจัดส่ง
+                    <input type="date" className="input" style={{ minHeight: 32, width: 170 }} value={v.plannedDeliveryDate} onChange={(e) => v.onPlannedDeliveryDate(e.target.value)} />
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, marginTop: 19 }}>
+                    <input type="checkbox" checked={v.wantsTaxInvoice} onChange={(e) => v.onWantsTaxInvoice(e.target.checked)} />
+                    ต้องการใบกำกับภาษี
+                  </label>
+                </div>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--color-neutral-400)' }}>
+                  หมายเหตุ
+                  <textarea className="input" style={{ minHeight: 60, resize: 'vertical', fontFamily: 'var(--font-body)' }} value={v.note} onChange={(e) => v.onNote(e.target.value)} placeholder="เช่น เงื่อนไขพิเศษ, ปัญหาที่พบ" />
+                </label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <button className="btn btn-primary" onClick={v.save} disabled={v.saving}>
+                    {v.saving ? (
+                      <><i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังบันทึก...</>
+                    ) : (
+                      <><i className="ph ph-floppy-disk" />บันทึกกลับชีท</>
+                    )}
+                  </button>
+                  {v.saved && (
+                    <span style={{ fontSize: 12, color: 'var(--st-ok-fg)' }}><i className="ph ph-check-circle-fill" style={{ marginRight: 4 }} />บันทึกสำเร็จ</span>
+                  )}
+                  {v.saveError && (
+                    <span style={{ fontSize: 12, color: 'var(--st-bad-fg)' }}><i className="ph ph-warning-fill" style={{ marginRight: 4 }} />{v.saveError} — ลองใหม่อีกครั้ง</span>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
 
           <div className="hr" style={{ margin: '4px 0' }} />
 
