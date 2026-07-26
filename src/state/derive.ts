@@ -4,7 +4,7 @@ import type { PickLot } from '../data/pickLots';
 import { PROMO_UNITS, type Order, type PromoStatus, type PromoUnit, type RouteOrder } from '../data/types';
 import { lineDiff, lineNetTotal, receivingFolderKey, recordHasDiscrepancy, recordTotal, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { loadCode } from '../data/vehicles';
-import { matchZone, UNASSIGNED_COLOR } from '../data/zoneConfig';
+import { resolveZone, UNASSIGNED_COLOR } from '../data/zoneConfig';
 import { addDays, dayKey, dayKeyToDate, daysBetweenKeys, formatOrderedAt, formatThaiShortDate, formatThaiWeekdayDate, sheetDateTimeToMs, sheetDateToDayKey, suggestedDeliveryDayKey, todayDayKey } from '../data/dateUtils';
 import { badgeStyle, DELIVERY_DONE_STATUSES, fmt, sheetStatusStyle } from './helpers';
 import type { AppActions, AppState } from './store';
@@ -260,7 +260,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
   }
 
   const rows = filtered.map((o) => {
-    const zone = matchZone(state.zoneRules, o.districtProvince, o.addressFromUnii);
+    const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
     const skusForOrder = orderSkus.get(o.orderNo);
     const hasPromoItem = skusForOrder ? Array.from(skusForOrder).some((sku) => activePromoSkus.has(sku)) : false;
     const saveStatus = state.orderSaveStatus[o.orderNo];
@@ -276,6 +276,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
       zoneName: zone.zoneName,
       zoneColor: zone.color,
       zoneReason: zone.reason,
+      zoneSource: zone.source,
       zoneMismatch: zone.route !== '—' && routeZoneLetter(o.route) !== '' && routeZoneLetter(o.route) !== zone.route,
       orderNo: o.orderNo,
       customer: o.customer,
@@ -311,9 +312,9 @@ export function computeRoute(state: AppState, actions: AppActions) {
     id: z.id,
     name: z.name,
     color: z.color,
-    count: filtered.filter((o) => matchZone(state.zoneRules, o.districtProvince, o.addressFromUnii).zoneId === z.id).length,
+    count: filtered.filter((o) => resolveZone(state.zoneRules, o, state.geocodeCache).zoneId === z.id).length,
   }));
-  const unzonedCount = filtered.filter((o) => matchZone(state.zoneRules, o.districtProvince, o.addressFromUnii).zoneId === null).length;
+  const unzonedCount = filtered.filter((o) => resolveZone(state.zoneRules, o, state.geocodeCache).zoneId === null).length;
   const mismatchCount = rows.filter((r) => r.zoneMismatch).length;
 
   // Split into two groups so warehouse staff can see at a glance which
@@ -325,6 +326,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
   return {
     routeOrdersLoading: state.routeOrdersLoading,
     routeOrdersError: state.routeOrdersError,
+    geocodeProgress: state.geocodeProgress,
     routeQ: state.routeQ,
     onRouteSearch: (v: string) => actions.patch({ routeQ: v }),
     orderDateFilter: state.routeOrderDateFilter,
@@ -431,7 +433,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
   const unassigned = candidates
     .filter((o) => !assignedTo.has(o.orderNo))
     .map((o) => {
-      const zone = matchZone(state.zoneRules, o.districtProvince, o.addressFromUnii);
+      const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
       return {
         orderNo: o.orderNo,
         customer: o.customer,
@@ -466,7 +468,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
       .map((no) => byOrderNo.get(no))
       .filter((o): o is NonNullable<typeof o> => o != null)
       .map((o, i, arr) => {
-        const zone = matchZone(state.zoneRules, o.districtProvince, o.addressFromUnii);
+        const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
         return {
           seq: i + 1,
           // Load codes count down so the first drop is loaded last.
@@ -624,7 +626,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
   const suggestByZone = () => {
     const plan: RoutePlanShape = { ...state.routePlan };
     for (const o of candidates.filter((x) => !assignedTo.has(x.orderNo))) {
-      const zone = matchZone(state.zoneRules, o.districtProvince, o.addressFromUnii);
+      const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
       if (zone.route === '—') continue;
       // Prefer the vehicle explicitly assigned this zone; only fall back to
       // matching the load prefix against the zone's route letter, since two

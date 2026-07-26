@@ -47,6 +47,11 @@ function OrderTable({ title, tone, rows, isEmpty }: { title: string; tone: 'warn
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, whiteSpace: 'nowrap' }}>
                   <span style={{ width: 9, height: 9, borderRadius: '50%', background: r.zoneColor, flex: 'none' }} />
                   {r.zoneName}
+                  {r.zoneSource === 'geocoded' ? (
+                    <i className="ph ph-map-pin-fill" style={{ fontSize: 10, color: 'var(--st-ok-fg)' }} title="ระบุจากพิกัด (แม่นยำ)" />
+                  ) : (
+                    <i className="ph ph-map-pin-line" style={{ fontSize: 10, color: 'var(--color-neutral-500)' }} title="เดาจากข้อความที่อยู่ (ยังไม่มีพิกัด/รอระบุพื้นที่)" />
+                  )}
                 </span>
                 {r.zoneMismatch && (
                   <div style={{ fontSize: 10, color: 'var(--st-warn-fg)', marginTop: 2, whiteSpace: 'nowrap' }}>
@@ -144,6 +149,12 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
       {v.routeOrdersError && (
         <div style={{ display: 'flex', gap: 9, padding: 13, marginBottom: 16, borderRadius: 10, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 13 }}>
           <i className="ph ph-warning-fill" style={{ flex: 'none' }} />โหลดข้อมูลออเดอร์ไม่สำเร็จ: {v.routeOrdersError}
+        </div>
+      )}
+      {v.geocodeProgress && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: 13, marginBottom: 16, borderRadius: 10, background: 'var(--color-surface)', fontSize: 13, color: 'var(--color-neutral-400)' }}>
+          <i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />
+          กำลังระบุพื้นที่จากพิกัด ({v.geocodeProgress.done.toLocaleString('en-US')}/{v.geocodeProgress.total.toLocaleString('en-US')}) — ใช้ข้อมูลที่มีอยู่ก่อนได้ตามปกติ
         </div>
       )}
 

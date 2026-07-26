@@ -1,11 +1,18 @@
+import { coordKey, type GeocodeCache, type GeocodeResult } from './geocodeCache';
+
 // Editable delivery-zone rules.
 //
 // Rules are evaluated top-down and the first match wins, so put the most
-// specific zone first. Province is matched against the structured
-// "อำเภอ, จังหวัด" value, never the free-text address: real Lamphun customers
-// sit on roads named "ถนนเชียงใหม่-ลำพูน" / "Chiang Mai-Lamphun Road", and a
-// naive text match sends them to the wrong zone. Area terms (ตำบล/อำเภอ names)
-// do search the free text, since they are absent from the district column.
+// specific zone first. When a coordinate has been reverse-geocoded (see
+// src/data/geocodeCache.ts), province/area terms are matched against the
+// geocoded ตำบล/อำเภอ/จังหวัด — accurate regardless of how the sheet's
+// free-text address was typed. Only orders with no coordinate yet (or whose
+// geocode lookup hasn't completed/failed) fall back to the older method:
+// province matched against the structured "อำเภอ, จังหวัด" column (never the
+// free-text address: real Lamphun customers sit on roads named
+// "ถนนเชียงใหม่-ลำพูน" / "Chiang Mai-Lamphun Road", and a naive text match
+// sends them to the wrong zone), with area terms (ตำบล/อำเภอ names) searched
+// in the free text since they're absent from the district column.
 
 export interface ZoneRule {
   id: string;
@@ -27,6 +34,11 @@ export interface ZoneMatch {
   color: string;
   route: string;
   reason: string;
+  /** 'geocoded' when this came from a real reverse-geocoded coordinate,
+   * 'text' when it fell back to guessing from the free-text address (no
+   * coordinate yet, or the geocode lookup hasn't completed/failed). Shown in
+   * the UI so staff know how much to trust a given row's zone. */
+  source: 'geocoded' | 'text';
 }
 
 const STORAGE_KEY = 'warehouse-ops.zoneRules.v1';
@@ -93,17 +105,23 @@ function matchesAny(haystack: string, terms: string[]): boolean {
   });
 }
 
+function matchRule(rules: ZoneRule[], areaHaystack: string, provinceHaystack: string): ZoneRule | null {
+  for (const rule of rules) {
+    if (!matchesAny(provinceHaystack, rule.provinceTerms)) continue;
+    if (!matchesAny(areaHaystack, rule.areaTerms)) continue;
+    return rule;
+  }
+  return null;
+}
+
+/** Legacy method: guesses the zone by searching the free-text address for
+ * area terms and the structured district/province column for province terms.
+ * Used only when a coordinate is missing or not yet (or never) geocoded. */
 export function matchZone(rules: ZoneRule[], districtProvince: string, freeTextAddress: string): ZoneMatch {
   const structured = districtProvince ?? '';
   const areaHaystack = `${structured} ${freeTextAddress ?? ''}`;
-
-  for (const rule of rules) {
-    const provinceOk = matchesAny(structured, rule.provinceTerms);
-    if (!provinceOk) continue;
-    if (!matchesAny(areaHaystack, rule.areaTerms)) continue;
-    const why = rule.areaTerms.length > 0 ? `${rule.name}` : `${rule.name}`;
-    return { zoneId: rule.id, zoneName: rule.name, color: rule.color, route: rule.route, reason: why };
-  }
+  const rule = matchRule(rules, areaHaystack, structured);
+  if (rule) return { zoneId: rule.id, zoneName: rule.name, color: rule.color, route: rule.route, reason: rule.name, source: 'text' };
 
   const province = structured.split(',').pop()?.trim();
   return {
@@ -112,5 +130,39 @@ export function matchZone(rules: ZoneRule[], districtProvince: string, freeTextA
     color: UNASSIGNED_COLOR,
     route: '—',
     reason: province ? `นอกพื้นที่ (${province})` : 'ไม่มีข้อมูลพื้นที่',
+    source: 'text',
   };
+}
+
+/** Preferred method: matches against a coordinate's real reverse-geocoded
+ * ตำบล/อำเภอ/จังหวัด instead of guessing from free-text address wording. */
+export function matchZoneGeocoded(rules: ZoneRule[], geocode: GeocodeResult): ZoneMatch {
+  const areaHaystack = `${geocode.subdistrict} ${geocode.district}`;
+  const rule = matchRule(rules, areaHaystack, geocode.province);
+  if (rule) return { zoneId: rule.id, zoneName: rule.name, color: rule.color, route: rule.route, reason: rule.name, source: 'geocoded' };
+
+  return {
+    zoneId: null,
+    zoneName: '—',
+    color: UNASSIGNED_COLOR,
+    route: '—',
+    reason: geocode.province ? `นอกพื้นที่ (${geocode.province})` : 'ไม่มีข้อมูลพื้นที่',
+    source: 'geocoded',
+  };
+}
+
+/** Resolves an order's zone: uses its coordinate's geocode result when one
+ * is already cached, otherwise falls back to the free-text guess — covers
+ * orders with no coordinate at all, and ones whose geocode lookup hasn't
+ * completed yet (or failed) while the rest of the batch is still running. */
+export function resolveZone(
+  rules: ZoneRule[],
+  order: { lat: number | null; lng: number | null; districtProvince: string; addressFromUnii: string },
+  geocodeCache: GeocodeCache,
+): ZoneMatch {
+  if (order.lat != null && order.lng != null) {
+    const entry = geocodeCache[coordKey(order.lat, order.lng)];
+    if (entry) return matchZoneGeocoded(rules, entry);
+  }
+  return matchZone(rules, order.districtProvince, order.addressFromUnii);
 }

@@ -3,7 +3,7 @@ import 'dotenv/config';
 import express from 'express';
 import multer from 'multer';
 import { DRIVE_ROOT_FOLDER_ENV, MAX_UPLOAD_BYTES } from '../src/config/drive.js';
-import { handleDriveUpload, handleHealth, handleUpdateCsMasterLocation, handleUpdateRouteOrder } from './lib.js';
+import { handleDriveUpload, handleHealth, handleReverseGeocode, handleUpdateCsMasterLocation, handleUpdateRouteOrder } from './lib.js';
 
 // Local dev server: thin Express wrapper around server/lib.ts. The same
 // handlers are also called from api/*.ts as Vercel serverless functions in
@@ -46,6 +46,11 @@ app.post('/api/cs-master/update-location', async (req, res) => {
 
 app.post('/api/route-orders/update', async (req, res) => {
   const { status, body } = await handleUpdateRouteOrder(req.body);
+  res.status(status).json(body);
+});
+
+app.post('/api/geocode/reverse', async (req, res) => {
+  const { status, body } = await handleReverseGeocode(req.body);
   res.status(status).json(body);
 });
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer } from 'react';
+import { useEffect, useMemo, useReducer, useRef } from 'react';
 import { fetchApiImportOrders } from '../data/sources/apiImportOrders';
 import { CS_MASTER_CSV_URL, fetchCsMasterCustomers } from '../data/sources/csMaster';
 import { updateCsMasterLatLng } from '../data/sources/csMasterWrite';
@@ -11,6 +11,9 @@ import { attachmentKey, loadAttachments, saveAttachments, uploadToDrive, type At
 import { emptyLine, loadReceivingLog, receivingFolderKey, saveReceivingLog, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { DEFAULT_VEHICLES, loadRoutePlan, loadVehicles, saveRoutePlan, saveVehicles, type RoutePlan, type Vehicle } from '../data/vehicles';
 import { DEFAULT_ZONE_RULES, loadZoneRules, saveZoneRules, type ZoneRule } from '../data/zoneConfig';
+import { coordKey, loadGeocodeCache, saveGeocodeCache, type GeocodeCache } from '../data/geocodeCache';
+import { reverseGeocode } from '../data/sources/geocoding';
+import { GEOCODE_MIN_INTERVAL_MS } from '../config/geocoding';
 import { loadRouteCodState, saveRouteCodState } from '../data/routeCod';
 import { isoToSheetDateText, sheetDateToDayKey, todayDayKey } from '../data/dateUtils';
 import { updateRouteOrder } from '../data/sources/routeOrdersWrite';
@@ -83,6 +86,13 @@ export interface AppState {
 
   // route planner (zones + vehicles are user-editable and persisted locally)
   zoneRules: ZoneRule[];
+  /** Reverse-geocoded ตำบล/อำเภอ/จังหวัด per unique coordinate — see
+   * src/data/geocodeCache.ts. Persisted so a coordinate is only ever looked
+   * up once, across reloads. */
+  geocodeCache: GeocodeCache;
+  /** Progress of the background batch geocoding not-yet-cached coordinates
+   * found in routeOrders; null when nothing is currently running. */
+  geocodeProgress: { done: number; total: number } | null;
   vehicles: Vehicle[];
   routePlan: RoutePlan;
   plannerConfigTab: 'zones' | 'vehicles' | null;
@@ -223,6 +233,8 @@ export const initialState: AppState = {
   routeDeliveryDateFilter: '',
 
   zoneRules: DEFAULT_ZONE_RULES,
+  geocodeCache: {},
+  geocodeProgress: null,
   vehicles: DEFAULT_VEHICLES,
   routePlan: {},
   plannerConfigTab: null,
@@ -579,6 +591,7 @@ export function useAppStore() {
       type: 'patch',
       patch: {
         zoneRules: loadZoneRules(),
+        geocodeCache: loadGeocodeCache(),
         vehicles: loadVehicles(),
         routePlan: loadRoutePlan(),
         attachments: loadAttachments(),
@@ -590,6 +603,54 @@ export function useAppStore() {
       },
     });
   }, []);
+
+  // Background batch-geocode: once routeOrders has loaded, reverse-geocode
+  // every unique coordinate not already in the cache (paced at
+  // GEOCODE_MIN_INTERVAL_MS so this never bursts past Nominatim's rate
+  // limit), updating the cache — and every row using it — one coordinate at
+  // a time rather than blocking the page until the whole batch finishes.
+  // Guarded by a ref (not a state flag) so it only ever runs once even if
+  // this effect re-fires for an unrelated reason.
+  const geocodeBatchStarted = useRef(false);
+  useEffect(() => {
+    if (state.routeOrders.length === 0 || geocodeBatchStarted.current) return;
+
+    const localCache: GeocodeCache = { ...state.geocodeCache };
+    const seen = new Set<string>();
+    const toFetch: { key: string; lat: number; lng: number }[] = [];
+    for (const o of state.routeOrders) {
+      if (o.lat == null || o.lng == null) continue;
+      const key = coordKey(o.lat, o.lng);
+      if (localCache[key] || seen.has(key)) continue;
+      seen.add(key);
+      toFetch.push({ key, lat: o.lat, lng: o.lng });
+    }
+    if (toFetch.length === 0) return;
+    geocodeBatchStarted.current = true;
+
+    let cancelled = false;
+    (async () => {
+      dispatch({ type: 'patch', patch: { geocodeProgress: { done: 0, total: toFetch.length } } });
+      for (let i = 0; i < toFetch.length && !cancelled; i++) {
+        const { key, lat, lng } = toFetch[i];
+        const result = await reverseGeocode(lat, lng);
+        if (cancelled) break;
+        if (result) {
+          localCache[key] = { ...result, fetchedAt: Date.now() };
+          saveGeocodeCache(localCache);
+          dispatch({ type: 'patch', patch: { geocodeCache: { ...localCache } } });
+        }
+        dispatch({ type: 'patch', patch: { geocodeProgress: { done: i + 1, total: toFetch.length } } });
+        if (i < toFetch.length - 1) await new Promise((r) => setTimeout(r, GEOCODE_MIN_INTERVAL_MS));
+      }
+      if (!cancelled) dispatch({ type: 'patch', patch: { geocodeProgress: null } });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.routeOrders.length]);
 
   // Driver view offline support: retry any queued delivery marks whenever
   // connectivity returns, and keep trying periodically in case a request

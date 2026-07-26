@@ -1,6 +1,7 @@
 import { google } from 'googleapis';
 import { Readable } from 'node:stream';
 import { DRIVE_ROOT_FOLDER_ENV, driveFolderPath, isAllowedFile, type AttachmentScope } from '../src/config/drive.js';
+import { GEOCODE_MIN_INTERVAL_MS, NOMINATIM_REVERSE_URL, NOMINATIM_USER_AGENT } from '../src/config/geocoding.js';
 import { MAIN_SHEET_ID, SHEET_TABS } from '../src/config/sheets.js';
 
 // Shared core for the backend that needs Google credentials: the CS Master
@@ -404,6 +405,68 @@ export async function handleUpdateRouteOrder(body: unknown): Promise<ApiResult> 
     const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
     console.error('[route-orders/update]', message);
     return { status: 500, body: { error: message } };
+  }
+}
+
+// Reverse geocoding proxy: the frontend never calls Nominatim directly,
+// both because browsers can't set the custom User-Agent its usage policy
+// requires, and so every caller (however many browser tabs are open) shares
+// one throttle instead of each independently hammering the free API.
+let lastNominatimCallAt = 0;
+
+/** Nominatim's address fields don't line up 1:1 with Thai ตำบล/อำเภอ/จังหวัด —
+ * which OSM tag a given place uses (suburb vs quarter vs village vs hamlet
+ * for sub-district; county vs city_district vs state_district for district)
+ * varies by how the area was mapped, so each level tries several candidates
+ * in priority order and takes the first that's present. */
+function pickAddressField(address: Record<string, unknown>, candidates: string[]): string {
+  for (const key of candidates) {
+    const v = address[key];
+    if (typeof v === 'string' && v.trim() !== '') return v.trim();
+  }
+  return '';
+}
+
+export async function handleReverseGeocode(body: unknown): Promise<ApiResult> {
+  const { lat, lng } = (body ?? {}) as Record<string, unknown>;
+  if (typeof lat !== 'number' || typeof lng !== 'number' || !Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return { status: 400, body: { error: 'lat/lng ต้องเป็นตัวเลข' } };
+  }
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+    return { status: 400, body: { error: 'lat/lng อยู่นอกช่วงที่เป็นไปได้' } };
+  }
+
+  const wait = lastNominatimCallAt + GEOCODE_MIN_INTERVAL_MS - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastNominatimCallAt = Date.now();
+
+  const url = `${NOMINATIM_REVERSE_URL}?lat=${lat}&lon=${lng}&format=json&addressdetails=1&accept-language=th`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': NOMINATIM_USER_AGENT, 'Accept-Language': 'th' },
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      return { status: 502, body: { error: `Nominatim ตอบกลับ HTTP ${res.status}` } };
+    }
+    const data = (await res.json()) as { address?: Record<string, unknown>; error?: string };
+    if (!data.address) {
+      return { status: 404, body: { error: data.error || 'ไม่พบข้อมูลที่อยู่สำหรับพิกัดนี้' } };
+    }
+    const address = data.address;
+    const subdistrict = pickAddressField(address, ['suburb', 'quarter', 'neighbourhood', 'village', 'hamlet', 'town']);
+    const district = pickAddressField(address, ['county', 'city_district', 'state_district', 'district']);
+    const province = pickAddressField(address, ['state', 'province', 'region']);
+
+    return { status: 200, body: { subdistrict, district, province } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+    console.error('[geocode/reverse]', message);
+    return { status: 502, body: { error: `เรียก Nominatim ไม่สำเร็จ: ${message}` } };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
