@@ -1,9 +1,85 @@
+import { useState } from 'react';
 import { OrderDetailModal } from '../components/OrderDetailModal';
 import { computeDashboard } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 
+type DashboardRow = ReturnType<typeof computeDashboard>['orders'][number];
+
+const PAGE_SIZE = 50;
+
+function DashboardTable({ rows }: { rows: DashboardRow[] }) {
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const visible = rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  return (
+    <>
+      <table className="table">
+        <thead>
+          <tr>
+            <th>เลขออเดอร์</th><th>ลูกค้า</th><th style={{ textAlign: 'center' }}>รายการ</th><th>จำนวนสินค้า</th><th style={{ textAlign: 'right' }}>ยอดขายรวม</th>
+            <th>การชำระ</th><th>ไทม์ไลน์</th><th>สถานะ</th><th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {visible.map((o) => (
+            <tr key={o.orderUid}>
+              <td style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 500, fontSize: 12.5 }}>{o.orderUid}</td>
+              <td>
+                {o.cust}
+                <div style={{ fontSize: 11, color: 'var(--color-neutral-500)' }}>{o.addr}</div>
+                {o.phone && <div style={{ fontSize: 10.5, color: 'var(--color-neutral-600)', fontVariantNumeric: 'tabular-nums' }}>{o.phone}</div>}
+              </td>
+              <td style={{ textAlign: 'center' }}>{o.items}</td>
+              <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>{o.qtyText}</td>
+              <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{o.amtText}</td>
+              <td style={{ fontSize: 12 }}>
+                {o.paymentType}
+                <div style={{ fontSize: 10.5, color: 'var(--color-neutral-600)' }}>{o.paid}</div>
+                {o.codInfo && (
+                  <div style={{ marginTop: 4 }}>
+                    <span style={o.codInfo.style}>{o.codInfo.label}</span>
+                  </div>
+                )}
+              </td>
+              <td style={{ fontSize: 10.5, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+                {o.stages.length === 0 ? (
+                  '—'
+                ) : (
+                  o.stages.map((s) => (
+                    <div key={s.label}>
+                      <span style={{ color: 'var(--color-neutral-600)' }}>{s.label}:</span> {s.text}
+                    </div>
+                  ))
+                )}
+              </td>
+              <td><span style={o.stStyle}>{o.stLabel}</span></td>
+              <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12, whiteSpace: 'nowrap' }} onClick={o.viewItems}>ดูสินค้า</button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {totalPages > 1 && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, padding: '12px 0 6px' }}>
+          <button className="btn btn-ghost" style={{ fontSize: 12.5 }} disabled={page === 1} onClick={() => setPage((p) => p - 1)}>
+            <i className="ph ph-caret-left" />ก่อนหน้า
+          </button>
+          <span style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>หน้า {page} / {totalPages}</span>
+          <button className="btn btn-ghost" style={{ fontSize: 12.5 }} disabled={page === totalPages} onClick={() => setPage((p) => p + 1)}>
+            หน้าถัดไป<i className="ph ph-caret-right" />
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
 export function DashboardPage({ state, actions }: { state: AppState; actions: AppActions }) {
   const v = computeDashboard(state, actions);
+  // Remounts the table (resetting to page 1) whenever a filter narrows/widens
+  // the result set — otherwise switching status tabs could land on a now
+  // out-of-range page from a previous, larger result set.
+  const filterSignature = [state.statusFilter, state.q].join('|');
 
   return (
     <div>
@@ -100,35 +176,7 @@ export function DashboardPage({ state, actions }: { state: AppState; actions: Ap
       </div>
 
       <div className="card elev-sm" style={{ padding: '4px 14px 8px' }}>
-        <table className="table">
-          <thead>
-            <tr>
-              <th>เลขออเดอร์</th><th>ลูกค้า</th><th style={{ textAlign: 'center' }}>รายการ</th><th style={{ textAlign: 'right' }}>ยอดขายรวม</th>
-              <th>การชำระ</th><th>วันที่สั่ง</th><th>สถานะ</th><th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {v.orders.map((o) => (
-              <tr key={o.orderUid}>
-                <td style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 500, fontSize: 12.5 }}>{o.orderUid}</td>
-                <td>
-                  {o.cust}
-                  <div style={{ fontSize: 11, color: 'var(--color-neutral-500)' }}>{o.addr}</div>
-                  {o.phone && <div style={{ fontSize: 10.5, color: 'var(--color-neutral-600)', fontVariantNumeric: 'tabular-nums' }}>{o.phone}</div>}
-                </td>
-                <td style={{ textAlign: 'center' }}>{o.items}</td>
-                <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{o.amtText}</td>
-                <td style={{ fontSize: 12 }}>
-                  {o.paymentType}
-                  <div style={{ fontSize: 10.5, color: 'var(--color-neutral-600)' }}>{o.paid}</div>
-                </td>
-                <td style={{ fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums' }}>{o.orderedAt}</td>
-                <td><span style={o.stStyle}>{o.stLabel}</span></td>
-                <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12, whiteSpace: 'nowrap' }} onClick={o.viewItems}>ดูสินค้า</button></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <DashboardTable key={filterSignature} rows={v.orders} />
         {v.noOrders && !v.apiOrdersLoading && (
           <div style={{ padding: 26, textAlign: 'center', color: 'var(--color-neutral-500)', fontSize: 12.5 }}>ไม่พบออเดอร์ที่ตรงกับตัวกรอง</div>
         )}

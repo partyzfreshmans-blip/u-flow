@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react';
 import { orders } from '../data/mockData';
 import type { PickLot } from '../data/pickLots';
-import { PROMO_UNITS, type Order, type PromoStatus, type PromoUnit, type RouteOrder } from '../data/types';
+import { PROMO_UNITS, type Order, type OrderLineItem, type PromoStatus, type PromoUnit, type RouteOrder } from '../data/types';
 import { lineDiff, lineNetTotal, receivingFolderKey, recordHasDiscrepancy, recordTotal, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { loadCode } from '../data/vehicles';
 import { resolveZone, UNASSIGNED_COLOR } from '../data/zoneConfig';
@@ -15,6 +15,29 @@ import type { AppActions, AppState } from './store';
  * actually succeeds, so this value is always the real, current one. */
 function effectiveDeliveryDayKey(o: RouteOrder): string | null {
   return sheetDateToDayKey(o.plannedDeliveryDate);
+}
+
+/** Per-order quantity broken down into the three units warehouse staff
+ * actually load by (ชิ้น/แพ็ค/ลัง) — หีบ and คู่ fold into ลัง/ชิ้น
+ * respectively since they're the same real-world unit under a different
+ * sheet spelling (see detectUnit's own regexes for why). */
+function buildOrderUnitQtyMap(orderLineItems: OrderLineItem[]): Map<string, Partial<Record<'ชิ้น' | 'แพ็ค' | 'ลัง', number>>> {
+  const map = new Map<string, Partial<Record<'ชิ้น' | 'แพ็ค' | 'ลัง', number>>>();
+  for (const li of orderLineItems) {
+    const detected = detectUnit(li.unit);
+    const bucket = detected === 'หีบ' ? 'ลัง' : detected === 'คู่' ? 'ชิ้น' : detected;
+    const m = map.get(li.orderNo) ?? {};
+    m[bucket] = (m[bucket] ?? 0) + li.qty;
+    map.set(li.orderNo, m);
+  }
+  return map;
+}
+
+function qtyTextForOrder(map: Map<string, Partial<Record<'ชิ้น' | 'แพ็ค' | 'ลัง', number>>>, orderNo: string): string {
+  const m = map.get(orderNo);
+  if (!m) return '—';
+  const parts = (['ชิ้น', 'แพ็ค', 'ลัง'] as const).map((u) => (m[u] ? `${m[u]!.toLocaleString('en-US')} ${u}` : null)).filter((s): s is string => s !== null);
+  return parts.length > 0 ? parts.join(' · ') : '—';
 }
 
 /** True when the sheet's payment-type text indicates a cash-on-delivery order. */
@@ -54,19 +77,49 @@ export function computeDashboard(state: AppState, actions: AppActions) {
     return true;
   });
 
+  const orderUnitQty = buildOrderUnitQtyMap(state.orderLineItems);
+
+  // Cash/transfer collection status, entered by the driver on the mobile
+  // Driver View page (or by an admin from the Planner's own COD panel) — see
+  // routeCodCollected/routeCodMethod. Transfers are already in the company
+  // account so they're never checked against the order total; cash is
+  // flagged short/over/exact by comparing what was actually collected.
+  const codInfoFor = (o: (typeof list)[number]) => {
+    if (!isCodPayment(o.paymentType)) return null;
+    const method = state.routeCodMethod[o.orderUid];
+    const collected = state.routeCodCollected[o.orderUid];
+    if (!method) return { label: 'ยังไม่บันทึก', style: badgeStyle('neutral') };
+    if (method === 'transfer') return { label: 'โอนแล้ว', style: badgeStyle('info') };
+    const collectedNum = Number(collected || 0);
+    if (!collected) return { label: 'เก็บสด · ยังไม่ระบุยอด', style: badgeStyle('warn') };
+    if (collectedNum === o.totalAmount) return { label: 'เก็บสดครบ', style: badgeStyle('ok') };
+    if (collectedNum < o.totalAmount) return { label: `เก็บสดขาด ${fmt(o.totalAmount - collectedNum)}`, style: badgeStyle('bad') };
+    return { label: `เก็บสดเกิน +${fmt(collectedNum - o.totalAmount)}`, style: badgeStyle('warn') };
+  };
+
   const rows = list.map((o) => ({
     orderUid: o.orderUid,
     cust: o.customer,
     phone: o.phone,
     addr: [o.address, o.district, o.province].filter(Boolean).join(' · '),
     items: o.itemCount,
+    qtyText: qtyTextForOrder(orderUnitQty, o.orderUid),
     amtText: fmt(o.totalAmount),
     paymentType: o.paymentType,
     paid: o.paid,
-    orderedAt: o.orderedAt,
+    orderedAt: formatOrderedAt(o.orderedAt),
+    // Stage timeline: only the stages that actually have a timestamp show up,
+    // so an order still mid-pipeline doesn't display a row of blank dashes.
+    stages: [
+      { label: 'สั่งซื้อ', text: o.orderedAt ? formatOrderedAt(o.orderedAt) : '' },
+      { label: 'จัดส่ง', text: o.deliveredAt ? formatOrderedAt(o.deliveredAt) : '' },
+      { label: 'สำเร็จ', text: o.completedAt ? formatOrderedAt(o.completedAt) : '' },
+      { label: 'อัปเดตล่าสุด', text: o.updatedAt ? formatOrderedAt(o.updatedAt) : '' },
+    ].filter((s) => s.text !== ''),
     stLabel: o.status || '—',
     stStyle: sheetStatusStyle(o.status),
     wantsTax: o.wantsTaxInvoice,
+    codInfo: codInfoFor(o),
     viewItems: () => actions.openOrderDetail(o.orderUid, o.customer, state.routeOrders.find((r) => r.orderNo === o.orderUid)),
   }));
 
@@ -84,12 +137,23 @@ export function computeDashboard(state: AppState, actions: AppActions) {
     go: () => actions.patch({ statusFilter: k }),
   }));
 
-  const totalValue = state.apiOrders.reduce((a, o) => a + o.totalAmount, 0);
+  // Tiles 1 & 4 track whatever's currently filtered/searched (matching tile
+  // 4's own subtitle, which already promised "orders currently shown" even
+  // though the number behind it used to ignore the filter entirely); tiles 2
+  // & 3 stay fixed per-status reference counts regardless of the active tab.
+  const isFiltered = state.statusFilter !== 'all' || q !== '';
+  const filteredValue = list.reduce((a, o) => a + o.totalAmount, 0);
   const stats = [
-    { label: 'ออเดอร์ใหม่ทั้งหมด', value: String(state.apiOrders.length), sub: 'ยังไม่ได้จัดเส้นทาง', icon: 'ph ph-package', iconColor: 'var(--color-accent-300)' },
+    {
+      label: isFiltered ? `ออเดอร์ · ${state.statusFilter === 'all' ? 'ตามคำค้นหา' : state.statusFilter}` : 'ออเดอร์ใหม่ทั้งหมด',
+      value: String(list.length),
+      sub: isFiltered ? 'ตามตัวกรองที่เลือก' : 'ยังไม่ได้จัดเส้นทาง',
+      icon: 'ph ph-package',
+      iconColor: 'var(--color-accent-300)',
+    },
     { label: 'รอยืนยันออเดอร์', value: String(cnt('รอยืนยันออเดอร์')), sub: 'ต้องยืนยัน', icon: 'ph ph-hourglass-medium', iconColor: 'var(--st-warn-fg)' },
     { label: 'กำลังดำเนินการ', value: String(cnt('กำลังดำเนินการ')), sub: 'อยู่ระหว่างจัดของ', icon: 'ph ph-truck', iconColor: 'var(--st-info-fg)' },
-    { label: 'มูลค่ารวม', value: fmt(totalValue), sub: 'ออเดอร์ที่แสดงทั้งหมด', icon: 'ph ph-wallet', iconColor: 'var(--st-ok-fg)' },
+    { label: 'มูลค่ารวม', value: fmt(filteredValue), sub: isFiltered ? 'ตามตัวกรองที่เลือก' : 'ออเดอร์ที่แสดงทั้งหมด', icon: 'ph ph-wallet', iconColor: 'var(--st-ok-fg)' },
   ];
 
   // ---- 7-day delivery forecast (from routeOrders — the tab with delivery dates) ----
@@ -431,24 +495,8 @@ export function computePlanner(state: AppState, actions: AppActions) {
     actions.setRoutePlan(plan);
   };
 
-  // Per-order quantity broken down into the three units warehouse staff
-  // actually load by (ชิ้น/แพ็ค/ลัง) — หีบ and คู่ fold into ลัง/ชิ้น
-  // respectively since they're the same real-world unit under a different
-  // sheet spelling (see detectUnit's own regexes for why).
-  const orderUnitQty = new Map<string, Partial<Record<'ชิ้น' | 'แพ็ค' | 'ลัง', number>>>();
-  for (const li of state.orderLineItems) {
-    const detected = detectUnit(li.unit);
-    const bucket = detected === 'หีบ' ? 'ลัง' : detected === 'คู่' ? 'ชิ้น' : detected;
-    const m = orderUnitQty.get(li.orderNo) ?? {};
-    m[bucket] = (m[bucket] ?? 0) + li.qty;
-    orderUnitQty.set(li.orderNo, m);
-  }
-  const qtyTextFor = (orderNo: string): string => {
-    const m = orderUnitQty.get(orderNo);
-    if (!m) return '—';
-    const parts = (['ชิ้น', 'แพ็ค', 'ลัง'] as const).map((u) => (m[u] ? `${m[u]!.toLocaleString('en-US')} ${u}` : null)).filter((s): s is string => s !== null);
-    return parts.length > 0 ? parts.join(' · ') : '—';
-  };
+  const orderUnitQty = buildOrderUnitQtyMap(state.orderLineItems);
+  const qtyTextFor = (orderNo: string) => qtyTextForOrder(orderUnitQty, orderNo);
 
   const unassigned = candidates
     .filter((o) => !assignedTo.has(o.orderNo))
