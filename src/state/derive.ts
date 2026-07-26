@@ -683,12 +683,13 @@ function computePickOrderSelection(state: AppState, actions: AppActions) {
   const rows = candidates.map((o) => ({
     orderNo: o.orderNo,
     customer: o.customer,
-    itemCount: o.itemCount,
+    itemCountText: o.itemCount.toLocaleString('en-US'),
     amtText: fmt(o.totalAmount),
     orderedDate: o.orderedDate || '—',
     plannedDeliveryDate: o.plannedDeliveryDate || '—',
     checked: state.pickSelectedOrderNos.includes(o.orderNo),
     toggle: () => actions.togglePickOrderSelection(o.orderNo, state.pickSelectedOrderNos),
+    viewItems: () => actions.openOrderDetail(o.orderNo, o.customer, o),
   }));
 
   const lotProgress = (l: PickLot) => {

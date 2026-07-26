@@ -1,3 +1,4 @@
+import { OrderDetailModal } from '../components/OrderDetailModal';
 import { computePick } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 
@@ -152,7 +153,7 @@ export function PickPage({ state, actions }: { state: AppState; actions: AppActi
             <thead>
               <tr>
                 <th style={{ width: 36 }}></th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th style={{ textAlign: 'center' }}>รายการ</th>
-                <th style={{ textAlign: 'right' }}>ยอดขาย</th><th>วันที่สั่ง</th><th>วันที่จะจัดส่ง</th>
+                <th style={{ textAlign: 'right' }}>ยอดขาย</th><th>วันที่สั่ง</th><th>วันที่จะจัดส่ง</th><th style={{ width: 90 }}></th>
               </tr>
             </thead>
             <tbody>
@@ -163,10 +164,13 @@ export function PickPage({ state, actions }: { state: AppState; actions: AppActi
                   </td>
                   <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 500 }}>{r.orderNo}</td>
                   <td>{r.customer}</td>
-                  <td style={{ textAlign: 'center' }}>{r.itemCount}</td>
+                  <td style={{ textAlign: 'center', fontVariantNumeric: 'tabular-nums' }}>{r.itemCountText}</td>
                   <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{r.amtText}</td>
                   <td style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{r.orderedDate}</td>
                   <td style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{r.plannedDeliveryDate}</td>
+                  <td style={{ textAlign: 'right' }} onClick={(e) => e.stopPropagation()}>
+                    <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={r.viewItems}>ดูสินค้า</button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -188,6 +192,8 @@ export function PickPage({ state, actions }: { state: AppState; actions: AppActi
           )}
         </button>
       </div>
+
+      <OrderDetailModal state={state} actions={actions} />
     </div>
   );
 }
