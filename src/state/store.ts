@@ -22,6 +22,12 @@ import { loadPickLots, savePickLots, type PickLot, type PickLotLine } from '../d
 import { PICK_CLOSED_STATUS } from './helpers';
 import type { AttachmentScope } from '../config/drive';
 import type { ApiImportOrder, CsMasterCustomer, OrderLineItem, Promo, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
+import { csvExportUrl, SHEET_TABS } from '../config/sheets';
+import { loadLastSyncAt, saveLastSyncAt } from '../data/syncMeta';
+import { appendNotificationEvents, loadNotificationEvents, loadNotificationReadIds, saveNotificationReadIds, type NotificationEvent } from '../data/notifications';
+import { appendActivityLog, loadActivityLog, type ActivityLogEntry } from '../data/activityLog';
+import { loadSidebarCollapsed, saveSidebarCollapsed } from '../data/sidebarState';
+import { CURRENT_USER_NAME } from '../config/currentUser';
 
 export interface OrderEditDraft {
   /** ISO YYYY-MM-DD, '' = not set. */
@@ -70,6 +76,10 @@ export interface AppState {
   /** true when the opened order has a matching "คำสั่งซื้อ" row to edit/save against. */
   orderEditAvailable: boolean;
   orderEditDraft: OrderEditDraft;
+  /** Snapshot of orderEditDraft taken the moment the modal opened — diffed
+   * against the current draft on save so the activity log can record what
+   * actually changed, without the memoized actions needing to read live state. */
+  orderEditOriginal: OrderEditDraft;
   /** Per orderNo, so the table can also show a save indicator after the modal closes. */
   orderSaveStatus: Record<string, OrderSaveStatus>;
 
@@ -199,6 +209,29 @@ export interface AppState {
   apiTesting: boolean;
   apiOk: boolean;
   keySaved: boolean;
+
+  // sync status — every Google Sheet source this app reads, refreshed
+  // together by the header's "Sync" button (see actions.syncNow)
+  /** ms epoch of the last time every source refreshed successfully; null = never yet. */
+  lastSyncAt: number | null;
+  lastSyncErrorAt: number | null;
+  syncError: string | null;
+  /** true only while the manual "Sync" button's batch refresh is in flight. */
+  syncing: boolean;
+
+  // notifications (header bell) — persisted one-time events (new order
+  // arrived, sync failed); standing-condition items (stuck/overdue orders)
+  // are recomputed fresh from current data in computeNotifications instead
+  notificationEvents: NotificationEvent[];
+  notificationReadIds: string[];
+  notificationsOpen: boolean;
+
+  // activity log — user-action audit trail, kept in this browser only
+  activityLog: ActivityLogEntry[];
+  activityLogQ: string;
+
+  // sidebar collapse (mobile-friendly + optional on desktop)
+  sidebarCollapsed: boolean;
 }
 
 /** ?driver=<vehicleId> jumps straight into the mobile driver view for that
@@ -230,6 +263,7 @@ export const initialState: AppState = {
   orderDetailError: null,
   orderEditAvailable: false,
   orderEditDraft: { plannedDeliveryDate: '', note: '', wantsTaxInvoice: false },
+  orderEditOriginal: { plannedDeliveryDate: '', note: '', wantsTaxInvoice: false },
   orderSaveStatus: {},
 
   routeOrders: [],
@@ -321,6 +355,20 @@ export const initialState: AppState = {
   apiTesting: false,
   apiOk: false,
   keySaved: false,
+
+  lastSyncAt: null,
+  lastSyncErrorAt: null,
+  syncError: null,
+  syncing: false,
+
+  notificationEvents: [],
+  notificationReadIds: [],
+  notificationsOpen: false,
+
+  activityLog: [],
+  activityLogQ: '',
+
+  sidebarCollapsed: false,
 };
 
 export type Action =
@@ -502,16 +550,80 @@ export function useAppStore() {
     });
   }
 
+  /** Appends one entry to the persisted activity log and reflects it in
+   * state immediately. Called from every user action that changes something
+   * meaningful (order edits, planner moves, pick-lot closes, lat/lng fixes,
+   * receiving, attachments) — see each action below. */
+  function logActivity(action: string, detail: string, orderNo?: string) {
+    dispatch({
+      type: 'patch',
+      patch: { activityLog: appendActivityLog(loadActivityLog(), { user: CURRENT_USER_NAME, action, detail, orderNo }) },
+    });
+  }
+
+  /** Marks a successful refresh of any Google Sheet source — called from
+   * every fetch-on-mount effect below and from the manual syncNow action, so
+   * "อัปเดตล่าสุด" in the header reflects whichever happened most recently. */
+  function recordSyncSuccess() {
+    const now = Date.now();
+    saveLastSyncAt(now);
+    dispatch({ type: 'patch', patch: { lastSyncAt: now } });
+  }
+
+  function recordSyncFailure(sourceLabel: string, message: string) {
+    const now = Date.now();
+    dispatch({
+      type: 'patch',
+      patch: {
+        lastSyncErrorAt: now,
+        syncError: `${sourceLabel}: ${message}`,
+        notificationEvents: appendNotificationEvents(loadNotificationEvents(), [
+          { kind: 'sync-error', message: `Sync ล้มเหลว — ${sourceLabel}: ${message}` },
+        ]),
+      },
+    });
+  }
+
+  // Seeds silently on the very first successful apiOrders load (so the
+  // 1700+ existing orders don't all fire as "new order" notifications), then
+  // diffs against it on every subsequent refresh to spot genuine new
+  // arrivals. In-memory only — a fresh page load reseeds without notifying,
+  // which is the safe default (never floods on reload).
+  const seenOrderUidsRef = useRef<Set<string> | null>(null);
+  function noteNewOrders(apiOrders: ApiImportOrder[]) {
+    if (seenOrderUidsRef.current === null) {
+      seenOrderUidsRef.current = new Set(apiOrders.map((o) => o.orderUid));
+      return;
+    }
+    const seen = seenOrderUidsRef.current;
+    const arrivals = apiOrders.filter((o) => !seen.has(o.orderUid) && o.status === 'รอยืนยันออเดอร์');
+    seenOrderUidsRef.current = new Set(apiOrders.map((o) => o.orderUid));
+    if (arrivals.length === 0) return;
+    dispatch({
+      type: 'patch',
+      patch: {
+        notificationEvents: appendNotificationEvents(
+          loadNotificationEvents(),
+          arrivals.map((o) => ({ kind: 'new-order' as const, message: `ออเดอร์ใหม่ ${o.orderUid} รอยืนยัน — ${o.customer}`, orderNo: o.orderUid })),
+        ),
+      },
+    });
+  }
+
   useEffect(() => {
     let cancelled = false;
     fetchSkusFromSheet()
       .then((skus) => {
-        if (!cancelled) dispatch({ type: 'patch', patch: { skus, skusLoading: false, skusError: null } });
+        if (!cancelled) {
+          dispatch({ type: 'patch', patch: { skus, skusLoading: false, skusError: null } });
+          recordSyncSuccess();
+        }
       })
       .catch((err: unknown) => {
         if (!cancelled) {
           const message = err instanceof Error ? err.message : 'โหลดข้อมูลสินค้าไม่สำเร็จ';
           dispatch({ type: 'patch', patch: { skusLoading: false, skusError: message } });
+          recordSyncFailure('ฐานข้อมูลสินค้า (SKU Master)', message);
         }
       });
     return () => {
@@ -523,12 +635,17 @@ export function useAppStore() {
     let cancelled = false;
     fetchApiImportOrders()
       .then((apiOrders) => {
-        if (!cancelled) dispatch({ type: 'patch', patch: { apiOrders, apiOrdersLoading: false, apiOrdersError: null } });
+        if (!cancelled) {
+          dispatch({ type: 'patch', patch: { apiOrders, apiOrdersLoading: false, apiOrdersError: null } });
+          noteNewOrders(apiOrders);
+          recordSyncSuccess();
+        }
       })
       .catch((err: unknown) => {
         if (!cancelled) {
           const message = err instanceof Error ? err.message : 'โหลดออเดอร์ใหม่ไม่สำเร็จ';
           dispatch({ type: 'patch', patch: { apiOrdersLoading: false, apiOrdersError: message } });
+          recordSyncFailure('ออเดอร์ใหม่ (API Import)', message);
         }
       });
     return () => {
@@ -540,12 +657,16 @@ export function useAppStore() {
     let cancelled = false;
     fetchRouteOrders()
       .then((routeOrders) => {
-        if (!cancelled) dispatch({ type: 'patch', patch: { routeOrders, routeOrdersLoading: false, routeOrdersError: null } });
+        if (!cancelled) {
+          dispatch({ type: 'patch', patch: { routeOrders, routeOrdersLoading: false, routeOrdersError: null } });
+          recordSyncSuccess();
+        }
       })
       .catch((err: unknown) => {
         if (!cancelled) {
           const message = err instanceof Error ? err.message : 'โหลดข้อมูลเส้นทาง/ประวัติการจัดส่งไม่สำเร็จ';
           dispatch({ type: 'patch', patch: { routeOrdersLoading: false, routeOrdersError: message } });
+          recordSyncFailure('ออเดอร์/คำสั่งซื้อ', message);
         }
       });
     return () => {
@@ -557,12 +678,16 @@ export function useAppStore() {
     let cancelled = false;
     fetchActivePromotions()
       .then((promos) => {
-        if (!cancelled) dispatch({ type: 'patch', patch: { promos, promosLoading: false, promosError: null } });
+        if (!cancelled) {
+          dispatch({ type: 'patch', patch: { promos, promosLoading: false, promosError: null } });
+          recordSyncSuccess();
+        }
       })
       .catch((err: unknown) => {
         if (!cancelled) {
           const message = err instanceof Error ? err.message : 'โหลดโปรโมชั่นไม่สำเร็จ';
           dispatch({ type: 'patch', patch: { promosLoading: false, promosError: message } });
+          recordSyncFailure('โปรโมชั่น', message);
         }
       });
     return () => {
@@ -574,12 +699,16 @@ export function useAppStore() {
     let cancelled = false;
     fetchAllOrderLineItems()
       .then((orderLineItems) => {
-        if (!cancelled) dispatch({ type: 'patch', patch: { orderLineItems, orderLineItemsLoading: false, orderLineItemsError: null } });
+        if (!cancelled) {
+          dispatch({ type: 'patch', patch: { orderLineItems, orderLineItemsLoading: false, orderLineItemsError: null } });
+          recordSyncSuccess();
+        }
       })
       .catch((err: unknown) => {
         if (!cancelled) {
           const message = err instanceof Error ? err.message : 'โหลดรายการสินค้าต่อออเดอร์ไม่สำเร็จ';
           dispatch({ type: 'patch', patch: { orderLineItemsLoading: false, orderLineItemsError: message } });
+          recordSyncFailure('รายการสินค้าต่อออเดอร์ (SKU Detail)', message);
         }
       });
     return () => {
@@ -591,12 +720,16 @@ export function useAppStore() {
     let cancelled = false;
     fetchCsMasterCustomers()
       .then((customers) => {
-        if (!cancelled) dispatch({ type: 'patch', patch: { customers, customersLoading: false, customersError: null } });
+        if (!cancelled) {
+          dispatch({ type: 'patch', patch: { customers, customersLoading: false, customersError: null } });
+          recordSyncSuccess();
+        }
       })
       .catch((err: unknown) => {
         if (!cancelled) {
           const message = err instanceof Error ? err.message : 'โหลดรายชื่อลูกค้าไม่สำเร็จ';
           dispatch({ type: 'patch', patch: { customersLoading: false, customersError: message } });
+          recordSyncFailure('รายชื่อลูกค้า (CS Master)', message);
         }
       });
     return () => {
@@ -621,6 +754,11 @@ export function useAppStore() {
         routeCodMethod: routeCod.method,
         driverSyncQueue: loadDriverQueue(),
         pickLots: loadPickLots(),
+        lastSyncAt: loadLastSyncAt(),
+        notificationEvents: loadNotificationEvents(),
+        notificationReadIds: loadNotificationReadIds(),
+        activityLog: loadActivityLog(),
+        sidebarCollapsed: loadSidebarCollapsed() ?? window.innerWidth < 900,
       },
     });
   }, []);
@@ -725,6 +863,7 @@ export function useAppStore() {
           const next: AttachmentIndex = { ...index, [storeKey]: [...(index[storeKey] ?? []), ...uploaded] };
           saveAttachments(next);
           dispatch({ type: 'patch', patch: { attachments: next, uploadingKey: null } });
+          logActivity('แนบไฟล์', `${scope === 'order' ? 'ออเดอร์' : 'รับสินค้า'} ${key} · ${files.map((f) => f.name).join(', ')}`, scope === 'order' ? key : undefined);
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : 'อัปโหลดไฟล์ไม่สำเร็จ';
           dispatch({ type: 'patch', patch: { uploadingKey: null, uploadError: message } });
@@ -753,6 +892,7 @@ export function useAppStore() {
             recvSaved: receivingFolderKey(record.receivedDate, record.supplier),
           },
         });
+        logActivity('บันทึกรับสินค้าเข้าคลัง', `${record.supplier} · บิล ${record.billNo || '—'} · ${record.receivedDate} · ${record.lines.length} รายการ`);
       },
       deleteReceiving: (id: string, log: ReceivingRecord[]) => {
         const next = log.filter((r) => r.id !== id);
@@ -777,6 +917,9 @@ export function useAppStore() {
             orderEditDraft: matchedOrder
               ? { plannedDeliveryDate: sheetDateToDayKey(matchedOrder.plannedDeliveryDate) ?? '', note: matchedOrder.note, wantsTaxInvoice: matchedOrder.wantsTaxInvoice }
               : { plannedDeliveryDate: '', note: '', wantsTaxInvoice: false },
+            orderEditOriginal: matchedOrder
+              ? { plannedDeliveryDate: sheetDateToDayKey(matchedOrder.plannedDeliveryDate) ?? '', note: matchedOrder.note, wantsTaxInvoice: matchedOrder.wantsTaxInvoice }
+              : { plannedDeliveryDate: '', note: '', wantsTaxInvoice: false },
           },
         });
         fetchOrderLineItems(orderNo)
@@ -799,8 +942,10 @@ export function useAppStore() {
       setOrderEditDraft: (draft: OrderEditDraft) => dispatch({ type: 'patch', patch: { orderEditDraft: draft } }),
       /** Writes to the real "คำสั่งซื้อ" sheet via the backend; local state is
        * only ever updated after that succeeds, so a failed save can't leave
-       * the app showing something the sheet doesn't actually have. */
-      saveOrderEdit: (orderNo: string, draft: OrderEditDraft) => {
+       * the app showing something the sheet doesn't actually have. `original`
+       * is the draft's value the moment the modal opened (state.orderEditOriginal),
+       * passed in explicitly so the activity log can record what changed. */
+      saveOrderEdit: (orderNo: string, draft: OrderEditDraft, original: OrderEditDraft) => {
         dispatch({ type: 'setOrderSaveStatus', orderNo, status: { state: 'saving' } });
         updateRouteOrder({
           orderNo,
@@ -818,6 +963,16 @@ export function useAppStore() {
             });
             dispatch({ type: 'setOrderSaveStatus', orderNo, status: { state: 'saved' } });
             setTimeout(() => dispatch({ type: 'setOrderSaveStatus', orderNo, status: null }), 2500);
+
+            const changes: string[] = [];
+            if (original.plannedDeliveryDate !== draft.plannedDeliveryDate) {
+              changes.push(`วันที่จัดส่ง: ${original.plannedDeliveryDate || '—'} → ${draft.plannedDeliveryDate || '—'}`);
+            }
+            if (original.note !== draft.note) changes.push(`หมายเหตุ: "${original.note || '—'}" → "${draft.note || '—'}"`);
+            if (original.wantsTaxInvoice !== draft.wantsTaxInvoice) {
+              changes.push(`ใบกำกับภาษี: ${original.wantsTaxInvoice ? 'ต้องการ' : 'ไม่ต้องการ'} → ${draft.wantsTaxInvoice ? 'ต้องการ' : 'ไม่ต้องการ'}`);
+            }
+            if (changes.length > 0) logActivity('แก้ไขออเดอร์', changes.join(' · '), orderNo);
           })
           .catch((err: unknown) => {
             const message = err instanceof Error ? err.message : 'บันทึกไม่สำเร็จ';
@@ -837,13 +992,15 @@ export function useAppStore() {
         });
       },
       closeEditCustomerLatLng: () => dispatch({ type: 'patch', patch: { custEditRowIndex: null, custEditError: null } }),
-      saveCustomerLatLng: (rowIndex: number, name: string, phone: string, lat: number, lng: number) => {
+      saveCustomerLatLng: (rowIndex: number, name: string, phone: string, lat: number, lng: number, originalLat: number | null, originalLng: number | null) => {
         dispatch({ type: 'patch', patch: { custEditSaving: true, custEditError: null } });
         updateCsMasterLatLng(name, phone, lat, lng)
           .then(() => {
             invalidateSheetCache(CS_MASTER_CSV_URL);
             dispatch({ type: 'updateCustomerLatLng', rowIndex, lat, lng });
             dispatch({ type: 'patch', patch: { custEditSaving: false, custEditRowIndex: null } });
+            const originalText = originalLat != null && originalLng != null ? `${originalLat.toFixed(5)}, ${originalLng.toFixed(5)}` : 'ไม่มีข้อมูล';
+            logActivity('แก้ไขพิกัดลูกค้า', `${name} · จาก ${originalText} → ${lat.toFixed(5)}, ${lng.toFixed(5)}`);
           })
           .catch((err: unknown) => {
             const message = err instanceof Error ? err.message : 'บันทึกพิกัดไม่สำเร็จ';
@@ -874,13 +1031,15 @@ export function useAppStore() {
        * uses) rather than inventing a new write to the คำสั่งซื้อ sheet's own
        * CS_Lat/CS_Long columns — those are populated by a lookup from CS
        * Master, so fixing the source there is the correct place to edit. */
-      saveOrderLocation: (orderNo: string, name: string, phone: string, lat: number, lng: number) => {
+      saveOrderLocation: (orderNo: string, name: string, phone: string, lat: number, lng: number, originalLat: number | null, originalLng: number | null) => {
         dispatch({ type: 'patch', patch: { orderLocationSaving: true, orderLocationError: null } });
         updateCsMasterLatLng(name, phone, lat, lng)
           .then(async () => {
             invalidateSheetCache(CS_MASTER_CSV_URL);
             dispatch({ type: 'updateOrderLocation', orderNo, lat, lng });
             dispatch({ type: 'patch', patch: { orderLocationSaving: false, orderLocationOrderNo: null } });
+            const originalText = originalLat != null && originalLng != null ? `${originalLat.toFixed(5)}, ${originalLng.toFixed(5)}` : 'ไม่มีข้อมูล';
+            logActivity('แก้ไขโลเคชั่น (จากหน้าวางแผนจัดรูท)', `${name} · จาก ${originalText} → ${lat.toFixed(5)}, ${lng.toFixed(5)}`, orderNo);
             // Eagerly geocode the corrected coordinate so the zone badge
             // reflects the fix immediately, instead of waiting for the next
             // full page load to pick it up via the background batch.
@@ -999,11 +1158,124 @@ export function useAppStore() {
         savePickLots(next);
         dispatch({ type: 'patch', patch: { pickLots: next } });
         syncPickLotStatus(lot.orderNos);
+        logActivity('ปิดล็อตหยิบสินค้า', `ล็อต ${lot.id} · ${lot.orderNos.length} ออเดอร์ (${lot.orderNos.join(', ')})`);
       },
       retryPickLotStatusSync: (orderNos: string[]) => syncPickLotStatus(orderNos),
 
       openPickLot: (lotId: string) => dispatch({ type: 'patch', patch: { activePickLotId: lotId } }),
       backToPickerHome: () => dispatch({ type: 'patch', patch: { activePickLotId: null } }),
+
+      logActivity,
+
+      /** Manual "Sync" button — force-refreshes every Google Sheet source at
+       * once (bypassing fetchSheetRows' normal ~45s cache) instead of waiting
+       * for the next page load. Uses allSettled so one failing source never
+       * discards the others' fresh data; only the sources that actually
+       * failed keep showing their last-known-good values. */
+      syncNow: async () => {
+        dispatch({ type: 'patch', patch: { syncing: true } });
+        [
+          csvExportUrl(SHEET_TABS.apiImport),
+          csvExportUrl(SHEET_TABS.routeOrders),
+          csvExportUrl(SHEET_TABS.skuDetail),
+          csvExportUrl(SHEET_TABS.promotions),
+          csvExportUrl(SHEET_TABS.csMaster),
+          csvExportUrl(SHEET_TABS.skuMaster),
+        ].forEach(invalidateSheetCache);
+
+        const [apiOrdersR, routeOrdersR, lineItemsR, promosR, customersR, skusR] = await Promise.allSettled([
+          fetchApiImportOrders(),
+          fetchRouteOrders(),
+          fetchAllOrderLineItems(),
+          fetchActivePromotions(),
+          fetchCsMasterCustomers(),
+          fetchSkusFromSheet(),
+        ]);
+
+        const patch: Partial<AppState> = {};
+        const failures: string[] = [];
+        let anySucceeded = false;
+
+        if (apiOrdersR.status === 'fulfilled') {
+          patch.apiOrders = apiOrdersR.value;
+          patch.apiOrdersError = null;
+          noteNewOrders(apiOrdersR.value);
+          anySucceeded = true;
+        } else failures.push(`ออเดอร์ใหม่ (API Import): ${apiOrdersR.reason instanceof Error ? apiOrdersR.reason.message : 'ไม่สำเร็จ'}`);
+
+        if (routeOrdersR.status === 'fulfilled') {
+          patch.routeOrders = routeOrdersR.value;
+          patch.routeOrdersError = null;
+          anySucceeded = true;
+        } else failures.push(`ออเดอร์/คำสั่งซื้อ: ${routeOrdersR.reason instanceof Error ? routeOrdersR.reason.message : 'ไม่สำเร็จ'}`);
+
+        if (lineItemsR.status === 'fulfilled') {
+          patch.orderLineItems = lineItemsR.value;
+          patch.orderLineItemsError = null;
+          anySucceeded = true;
+        } else failures.push(`รายการสินค้าต่อออเดอร์ (SKU Detail): ${lineItemsR.reason instanceof Error ? lineItemsR.reason.message : 'ไม่สำเร็จ'}`);
+
+        if (promosR.status === 'fulfilled') {
+          patch.promos = promosR.value;
+          patch.promosError = null;
+          anySucceeded = true;
+        } else failures.push(`โปรโมชั่น: ${promosR.reason instanceof Error ? promosR.reason.message : 'ไม่สำเร็จ'}`);
+
+        if (customersR.status === 'fulfilled') {
+          patch.customers = customersR.value;
+          patch.customersError = null;
+          anySucceeded = true;
+        } else failures.push(`รายชื่อลูกค้า (CS Master): ${customersR.reason instanceof Error ? customersR.reason.message : 'ไม่สำเร็จ'}`);
+
+        if (skusR.status === 'fulfilled') {
+          patch.skus = skusR.value;
+          patch.skusError = null;
+          anySucceeded = true;
+        } else failures.push(`ฐานข้อมูลสินค้า (SKU Master): ${skusR.reason instanceof Error ? skusR.reason.message : 'ไม่สำเร็จ'}`);
+
+        patch.syncing = false;
+        if (anySucceeded) {
+          const now = Date.now();
+          saveLastSyncAt(now);
+          patch.lastSyncAt = now;
+        }
+        if (failures.length > 0) {
+          patch.lastSyncErrorAt = Date.now();
+          patch.syncError = `Sync ไม่สำเร็จบางส่วน: ${failures.join(' · ')}`;
+          patch.notificationEvents = appendNotificationEvents(
+            loadNotificationEvents(),
+            failures.map((f) => ({ kind: 'sync-error' as const, message: `Sync ล้มเหลว — ${f}` })),
+          );
+        } else {
+          patch.syncError = null;
+        }
+        dispatch({ type: 'patch', patch });
+      },
+
+      // These take the current value as an explicit parameter (from
+      // derive.ts, which always has fresh state) rather than reading
+      // state.* directly — this actions object is memoized once with an
+      // empty dependency array, so any closure that captured state.* here
+      // would be permanently stuck with whatever it was at mount.
+      toggleNotifications: (isOpen: boolean) => dispatch({ type: 'patch', patch: { notificationsOpen: !isOpen } }),
+      markNotificationRead: (id: string, readIds: string[]) => {
+        const ids = Array.from(new Set([...readIds, id]));
+        saveNotificationReadIds(ids);
+        dispatch({ type: 'patch', patch: { notificationReadIds: ids } });
+      },
+      markAllNotificationsRead: (idsToMark: string[], readIds: string[]) => {
+        const ids = Array.from(new Set([...readIds, ...idsToMark]));
+        saveNotificationReadIds(ids);
+        dispatch({ type: 'patch', patch: { notificationReadIds: ids } });
+      },
+
+      setActivityLogQ: (v: string) => dispatch({ type: 'patch', patch: { activityLogQ: v } }),
+
+      toggleSidebar: (collapsed: boolean) => {
+        const next = !collapsed;
+        saveSidebarCollapsed(next);
+        dispatch({ type: 'patch', patch: { sidebarCollapsed: next } });
+      },
     }),
     [],
   );

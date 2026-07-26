@@ -9,7 +9,12 @@ export function OrderDetailModal({ state, actions }: { state: AppState; actions:
   return (
     <div className="dialog-backdrop" onClick={actions.closeOrderDetail}>
       <div className="dialog" onClick={(e) => e.stopPropagation()} style={{ width: 'min(620px, 100%)' }}>
-        <div className="dialog-title">รายการสินค้า · {v.orderNo}</div>
+        <div className="dialog-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          รายการสินค้า · {v.orderNo}
+          <button className="btn btn-ghost" style={{ marginLeft: 'auto', fontSize: 11.5 }} onClick={v.viewHistory}>
+            <i className="ph ph-clock-counter-clockwise" />ดูประวัติการแก้ไข
+          </button>
+        </div>
         <div style={{ fontSize: 12.5, color: 'var(--color-neutral-400)', marginTop: -6 }}>{v.customer}</div>
         <div className="dialog-body" style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
           {v.loading && (

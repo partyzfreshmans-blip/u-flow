@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react';
 import { orders } from '../data/mockData';
 import type { PickLot } from '../data/pickLots';
-import { PROMO_UNITS, type Order, type OrderLineItem, type PromoStatus, type PromoUnit, type RouteOrder } from '../data/types';
+import { PROMO_UNITS, type ApiImportOrder, type Order, type OrderLineItem, type PromoStatus, type PromoUnit, type RouteOrder } from '../data/types';
 import { lineDiff, lineNetTotal, receivingFolderKey, recordHasDiscrepancy, recordTotal, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { loadCode } from '../data/vehicles';
 import { resolveZone, UNASSIGNED_COLOR } from '../data/zoneConfig';
@@ -40,6 +40,34 @@ function qtyTextForOrder(map: Map<string, Partial<Record<'ชิ้น' | 'แ�
   return parts.length > 0 ? parts.join(' · ') : '—';
 }
 
+/** Orders whose delivery date has already passed without reaching a done
+ * status — shared by the dashboard's own "ออเดอร์ตกหล่น" panel and the
+ * notification bell's standing-condition items. */
+function stuckRouteOrders(state: AppState, today: string): RouteOrder[] {
+  return state.routeOrders.filter((o) => {
+    const key = effectiveDeliveryDayKey(o);
+    if (!key || key >= today) return false;
+    return !DELIVERY_DONE_STATUSES.includes(o.status);
+  });
+}
+
+/** How many days an order can sit at "รอชำระเงิน" before the bell flags it —
+ * measured from its last update (or order date if that's blank). */
+const PAYMENT_OVERDUE_DAYS = 2;
+function overduePaymentOrders(state: AppState, today: string): ApiImportOrder[] {
+  return state.apiOrders.filter((o) => {
+    if (o.status !== 'รอชำระเงิน') return false;
+    const key = sheetDateToDayKey(o.updatedAt || o.orderedAt);
+    if (!key) return false;
+    return daysBetweenKeys(key, today) >= PAYMENT_OVERDUE_DAYS;
+  });
+}
+
+export function formatDateTime(ms: number): string {
+  const d = new Date(ms);
+  return `${formatThaiShortDate(d)} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
 /** True when the sheet's payment-type text indicates a cash-on-delivery order. */
 function isCodPayment(paymentType: string): boolean {
   const p = paymentType.toLowerCase();
@@ -63,6 +91,7 @@ export const pageTitles: Record<AppState['route'], [string, string]> = {
   grn: ['รับสินค้าเข้าคลัง (Goods Receiving)', 'บันทึกของเข้าจากซัพพลายเออร์ · เทียบจำนวนกับบิล · แนบไฟล์บิลขึ้น Drive'],
   sku: ['ฐานข้อมูลสินค้า (SKU master)', 'ทะเบียนสินค้าทั้งหมดในระบบ'],
   customer: ['ฐานข้อมูลลูกค้า (CS Master)', 'แก้ไขพิกัด lat/long แล้วบันทึกกลับเข้า Google Sheet จริง'],
+  activity: ['บันทึกการเปลี่ยนแปลง (Activity Log)', 'ประวัติการแก้ไขทั้งหมดในระบบ · เก็บไว้ในเครื่องนี้'],
   settings: ['ตั้งค่า / API Key', 'จัดการการเชื่อมต่อระบบออเดอร์ภายนอก'],
 };
 
@@ -182,12 +211,7 @@ export function computeDashboard(state: AppState, actions: AppActions) {
   });
 
   // ---- stuck orders: delivery date already passed, but never reached a done status ----
-  const stuckOrders = state.routeOrders
-    .filter((o) => {
-      const key = effectiveDeliveryDayKey(o);
-      if (!key || key >= today) return false;
-      return !DELIVERY_DONE_STATUSES.includes(o.status);
-    })
+  const stuckOrders = stuckRouteOrders(state, today)
     .map((o) => {
       const key = effectiveDeliveryDayKey(o)!;
       return {
@@ -221,6 +245,95 @@ export function computeDashboard(state: AppState, actions: AppActions) {
   };
 }
 
+// ---------- NOTIFICATIONS (header bell) ----------
+export function computeNotifications(state: AppState, actions: AppActions) {
+  const today = todayDayKey();
+
+  // Standing-condition items recompute fresh from current data every render
+  // (no persisted "it happened" record needed — they're just currently-true
+  // facts) — but get a stable id so read/unread state survives recomputation.
+  const liveItems = [
+    ...stuckRouteOrders(state, today).map((o) => {
+      const key = effectiveDeliveryDayKey(o)!;
+      return {
+        id: `stuck-${o.orderNo}`,
+        kind: 'stuck-order' as const,
+        message: `ออเดอร์ ${o.orderNo} (${o.customer}) เลยวันจัดส่งแล้ว ${Math.abs(daysBetweenKeys(key, today))} วัน แต่ยังไม่สำเร็จ`,
+        createdAt: dayKeyToDate(key)?.getTime() ?? Date.now(),
+        orderNo: o.orderNo as string | undefined,
+      };
+    }),
+    ...overduePaymentOrders(state, today).map((o) => {
+      const dateKey = sheetDateToDayKey(o.updatedAt || o.orderedAt);
+      return {
+        id: `overdue-payment-${o.orderUid}`,
+        kind: 'overdue-payment' as const,
+        message: `ออเดอร์ ${o.orderUid} (${o.customer}) รอชำระเงินนานเกิน ${PAYMENT_OVERDUE_DAYS} วัน`,
+        createdAt: dateKey ? (dayKeyToDate(dateKey)?.getTime() ?? Date.now()) : Date.now(),
+        orderNo: o.orderUid as string | undefined,
+      };
+    }),
+  ];
+
+  const combined = [
+    ...state.notificationEvents.map((e) => ({ id: e.id, kind: e.kind, message: e.message, createdAt: e.createdAt, orderNo: e.orderNo })),
+    ...liveItems,
+  ].sort((a, b) => b.createdAt - a.createdAt);
+
+  const readSet = new Set(state.notificationReadIds);
+  const iconFor = (kind: string) =>
+    kind === 'new-order' ? 'ph ph-package' : kind === 'sync-error' ? 'ph ph-warning-fill' : kind === 'stuck-order' ? 'ph ph-clock-countdown' : 'ph ph-currency-circle-dollar';
+  const colorFor = (kind: string) => (kind === 'sync-error' ? 'var(--st-bad-fg)' : kind === 'new-order' ? 'var(--st-info-fg)' : 'var(--st-warn-fg)');
+
+  const items = combined.map((n) => ({
+    id: n.id,
+    message: n.message,
+    timeText: formatDateTime(n.createdAt),
+    orderNo: n.orderNo,
+    icon: iconFor(n.kind),
+    iconColor: colorFor(n.kind),
+    read: readSet.has(n.id),
+    markRead: () => actions.markNotificationRead(n.id, state.notificationReadIds),
+  }));
+  const unreadCount = items.filter((n) => !n.read).length;
+
+  return {
+    isOpen: state.notificationsOpen,
+    toggle: () => actions.toggleNotifications(state.notificationsOpen),
+    close: () => (state.notificationsOpen ? actions.toggleNotifications(state.notificationsOpen) : undefined),
+    items,
+    unreadCount,
+    isEmpty: items.length === 0,
+    markAllRead: () => actions.markAllNotificationsRead(
+      items.map((n) => n.id),
+      state.notificationReadIds,
+    ),
+  };
+}
+
+// ---------- ACTIVITY LOG (user-action audit trail — kept in-browser only) ----------
+export function computeActivityLog(state: AppState, actions: AppActions) {
+  const q = state.activityLogQ.trim().toLowerCase();
+  const rows = state.activityLog
+    .filter((e) => !q || (e.orderNo ?? '').toLowerCase().includes(q) || e.action.toLowerCase().includes(q) || e.detail.toLowerCase().includes(q))
+    .map((e) => ({
+      id: e.id,
+      timeText: formatDateTime(e.at),
+      user: e.user,
+      action: e.action,
+      detail: e.detail,
+      orderNo: e.orderNo ?? '—',
+    }));
+
+  return {
+    q: state.activityLogQ,
+    onSearch: (v: string) => actions.setActivityLogQ(v),
+    rows,
+    isEmpty: rows.length === 0,
+    totalCount: state.activityLog.length,
+  };
+}
+
 // ---------- ORDER DETAIL (line items — "SKU Detail" tab) ----------
 export function computeOrderDetail(state: AppState, actions: AppActions) {
   const total = state.orderDetailLines.reduce((a, l) => a + l.lineTotal, 0);
@@ -249,7 +362,11 @@ export function computeOrderDetail(state: AppState, actions: AppActions) {
     saving: saveStatus?.state === 'saving',
     saved: saveStatus?.state === 'saved',
     saveError: saveStatus?.state === 'error' ? (saveStatus.message ?? 'บันทึกไม่สำเร็จ') : null,
-    save: () => actions.saveOrderEdit(orderNo, draft),
+    save: () => actions.saveOrderEdit(orderNo, draft, state.orderEditOriginal),
+    viewHistory: () => {
+      actions.closeOrderDetail();
+      actions.patch({ route: 'activity', activityLogQ: orderNo });
+    },
   };
 }
 
@@ -335,7 +452,12 @@ export function computeRoute(state: AppState, actions: AppActions) {
     // no delivery date yet — once one exists, editing goes through "แก้ไข".
     const suggestedIso = hasDeliveryDate ? null : suggestedDeliveryDayKey(o.orderedAtText);
     const suggestedDate = suggestedIso ? dayKeyToDate(suggestedIso) : null;
-    const setDeliveryDate = (iso: string) => actions.saveOrderEdit(o.orderNo, { plannedDeliveryDate: iso, note: o.note, wantsTaxInvoice: o.wantsTaxInvoice });
+    const setDeliveryDate = (iso: string) =>
+      actions.saveOrderEdit(
+        o.orderNo,
+        { plannedDeliveryDate: iso, note: o.note, wantsTaxInvoice: o.wantsTaxInvoice },
+        { plannedDeliveryDate: sheetDateToDayKey(o.plannedDeliveryDate) ?? '', note: o.note, wantsTaxInvoice: o.wantsTaxInvoice },
+      );
     return {
       route: routeZoneLetter(o.route) || '—',
       zoneName: zone.zoneName,
@@ -473,6 +595,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
     o.distanceFromWhKm ?? (warehouse && o.lat != null && o.lng != null ? haversineKm(warehouse.lat, warehouse.lng, o.lat, o.lng) : 0);
 
   const byOrderNo = new Map(state.routeOrders.map((o) => [o.orderNo, o]));
+  const vehicleNameById = new Map(state.vehicles.map((v) => [v.id, v.name]));
 
   /** Moves an order between vehicles (or reorders within one), splicing it
    * out of its source list and into the target at `toIndex` (end of list
@@ -493,6 +616,12 @@ export function computePlanner(state: AppState, actions: AppActions) {
     plan[toVehicleId] = toList;
 
     actions.setRoutePlan(plan);
+    // Only a genuine cross-vehicle move is worth a log entry — reordering
+    // stops within the same vehicle's own list happens too often (every
+    // drag) to be a meaningful audit event.
+    if (fromVehicleId !== toVehicleId) {
+      actions.logActivity('ย้ายออเดอร์ (วางแผนจัดรูท)', `จาก ${vehicleNameById.get(fromVehicleId) ?? fromVehicleId} → ${vehicleNameById.get(toVehicleId) ?? toVehicleId}`, orderNo);
+    }
   };
 
   const orderUnitQty = buildOrderUnitQtyMap(state.orderLineItems);
@@ -528,6 +657,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
           const plan = { ...state.routePlan };
           plan[vehicleId] = [...(plan[vehicleId] ?? []), o.orderNo];
           actions.setRoutePlan(plan);
+          actions.logActivity('จัดออเดอร์ลงรถ (วางแผนจัดรูท)', `${vehicleNameById.get(vehicleId) ?? vehicleId}`, o.orderNo);
         },
       };
     })
@@ -543,6 +673,10 @@ export function computePlanner(state: AppState, actions: AppActions) {
     plan[vehicleId] = [...(plan[vehicleId] ?? []), ...selectedInUnassigned];
     actions.setRoutePlan(plan);
     actions.setPlannerSelection([]);
+    actions.logActivity(
+      'จัดออเดอร์ลงรถ (วางแผนจัดรูท, เลือกหลายรายการ)',
+      `${vehicleNameById.get(vehicleId) ?? vehicleId} · ${selectedInUnassigned.length} ออเดอร์ (${selectedInUnassigned.join(', ')})`,
+    );
   };
   const clearSelection = () => actions.setPlannerSelection([]);
 
@@ -715,6 +849,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
 
   const suggestByZone = () => {
     const plan: RoutePlanShape = { ...state.routePlan };
+    let assignedCount = 0;
     for (const o of candidates.filter((x) => !assignedTo.has(x.orderNo))) {
       const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
       if (zone.route === '—') continue;
@@ -727,6 +862,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
         state.vehicles.find((v) => v.loadPrefix.toUpperCase() === zone.route.toUpperCase());
       if (!target) continue;
       plan[target.id] = [...(plan[target.id] ?? []), o.orderNo];
+      assignedCount++;
     }
     // Keep each vehicle in farthest-first order after bulk assignment.
     for (const id of Object.keys(plan)) {
@@ -737,6 +873,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
       });
     }
     actions.setRoutePlan(plan);
+    if (assignedCount > 0) actions.logActivity('จัดอัตโนมัติตามโซน (วางแผนจัดรูท)', `จัดลงรถอัตโนมัติ ${assignedCount} ออเดอร์`);
   };
 
   return {
@@ -770,7 +907,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
         actions.patch({ orderLocationError: 'กรุณากรอกพิกัดให้ถูกต้อง (ตัวเลขเท่านั้น)' });
         return;
       }
-      actions.saveOrderLocation(locationEditing.orderNo, locationEditing.customer, locationEditing.phone, locationLatNum, locationLngNum);
+      actions.saveOrderLocation(locationEditing.orderNo, locationEditing.customer, locationEditing.phone, locationLatNum, locationLngNum, locationEditing.lat, locationEditing.lng);
     },
     plannedStops,
     totalCrew,
@@ -1186,7 +1323,7 @@ export function computeCustomer(state: AppState, actions: AppActions) {
         actions.patch({ custEditError: 'กรุณากรอกพิกัดให้ถูกต้อง (ตัวเลขเท่านั้น)' });
         return;
       }
-      actions.saveCustomerLatLng(editing.rowIndex, editing.name, editing.phone, lat, lng);
+      actions.saveCustomerLatLng(editing.rowIndex, editing.name, editing.phone, lat, lng, editing.lat, editing.lng);
     },
   };
 }

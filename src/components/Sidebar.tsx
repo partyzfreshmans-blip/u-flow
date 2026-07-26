@@ -1,4 +1,5 @@
 import type { CSSProperties } from 'react';
+import { CURRENT_USER_NAME, CURRENT_USER_ROLE } from '../config/currentUser';
 import type { RouteKey } from '../data/types';
 import type { AppActions } from '../state/store';
 
@@ -13,6 +14,7 @@ const navDef: [RouteKey, string, string][] = [
   ['grn', 'รับสินค้าเข้าคลัง', 'ph ph-tray-arrow-down'],
   ['sku', 'ฐานข้อมูลสินค้า', 'ph ph-package'],
   ['customer', 'ฐานข้อมูลลูกค้า', 'ph ph-users'],
+  ['activity', 'บันทึกการเปลี่ยนแปลง', 'ph ph-clock-counter-clockwise'],
   ['settings', 'ตั้งค่า / API Key', 'ph ph-gear'],
 ];
 
@@ -49,8 +51,8 @@ export function Sidebar({ route, actions }: { route: RouteKey; actions: AppActio
       <div style={{ marginTop: 'auto', padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 10, boxShadow: 'inset 0 1px 0 var(--color-divider)' }}>
         <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'var(--color-neutral-800)', display: 'grid', placeItems: 'center', color: 'var(--color-neutral-200)', fontSize: 12, fontWeight: 600 }}>AW</div>
         <div style={{ lineHeight: 1.2, minWidth: 0 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>admin.warehouse</div>
-          <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)' }}>Warehouse manager</div>
+          <div style={{ fontSize: 12.5, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{CURRENT_USER_NAME}</div>
+          <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)' }}>{CURRENT_USER_ROLE}</div>
         </div>
       </div>
     </aside>
