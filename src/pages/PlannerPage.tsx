@@ -14,6 +14,8 @@ const DRAG_MIME = 'application/x-uflow-stop';
 export function PlannerPage({ state, actions }: { state: AppState; actions: AppActions }) {
   const v = computePlanner(state, actions);
   const [dragOverVehicleId, setDragOverVehicleId] = useState<string | null>(null);
+  const [assigningVehicleId, setAssigningVehicleId] = useState<string | null>(null);
+  const [assignSyncError, setAssignSyncError] = useState<string | null>(null);
 
   const updateVehicle = (id: string, patch: Partial<(typeof state.vehicles)[number]>) =>
     actions.setVehicles(state.vehicles.map((x) => (x.id === id ? { ...x, ...patch } : x)));
@@ -30,6 +32,21 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
     }
   };
 
+  /** Always sync the latest sheet data before turning a vehicle's current
+   * stop list into a permanent Batch Route — the confirm dialog should never
+   * be built from data that's already gone stale. */
+  const handleOpenAssign = async (vehicleId: string) => {
+    setAssigningVehicleId(vehicleId);
+    setAssignSyncError(null);
+    const result = await actions.syncNow();
+    setAssigningVehicleId(null);
+    if (!result.routeOrdersOk) {
+      setAssignSyncError('Sync ข้อมูลคำสั่งซื้อล่าสุดไม่สำเร็จ — ลองใหม่อีกครั้งก่อนยืนยันรูท');
+      return;
+    }
+    v.openAssignDialog(vehicleId);
+  };
+
   return (
     <div>
       {v.loading && (
@@ -40,6 +57,12 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
       {v.error && (
         <div style={{ display: 'flex', gap: 9, padding: 13, marginBottom: 16, borderRadius: 10, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 13 }}>
           <i className="ph ph-warning-fill" style={{ flex: 'none' }} />{v.error}
+        </div>
+      )}
+      {assignSyncError && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: 13, marginBottom: 16, borderRadius: 10, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 13 }}>
+          <i className="ph ph-warning-fill" style={{ flex: 'none' }} />{assignSyncError}
+          <button className="btn btn-ghost" style={{ fontSize: 12, marginLeft: 'auto' }} onClick={() => setAssignSyncError(null)}>ปิด</button>
         </div>
       )}
 
@@ -178,7 +201,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 420px', gap: 18, alignItems: 'start' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 420px', gap: 18 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {/* per-vehicle plans */}
           {v.vehicles.map((veh) => (
@@ -202,6 +225,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                 <span style={{ width: 34, height: 26, borderRadius: 6, background: 'var(--color-accent)', color: '#fff', display: 'grid', placeItems: 'center', fontWeight: 700, fontSize: 12 }}>{veh.loadPrefix}</span>
                 <div style={{ lineHeight: 1.2 }}>
                   <div style={{ fontWeight: 600, fontSize: 14.5, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ width: 9, height: 9, borderRadius: '50%', background: veh.vehicleColor, flex: 'none' }} title="สีเส้นทางบนแผนที่" />
                     {veh.name}
                     {veh.batchId && (
                       <span
@@ -231,6 +255,21 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                       <button className="btn btn-secondary" style={{ fontSize: 12 }} onClick={veh.relockBatch}><i className="ph ph-lock-simple" />ล็อกอีกครั้ง</button>
                     )
                   )}
+                  {v.canEdit && !veh.batchId && veh.stopCount > 0 && (
+                    <button
+                      className="btn btn-primary"
+                      style={{ fontSize: 12 }}
+                      onClick={() => handleOpenAssign(veh.id)}
+                      disabled={!v.canAssign || assigningVehicleId === veh.id}
+                      title={!v.plannerDate ? 'เลือกวันที่จัดส่งก่อนจึงจะยืนยันรูทได้' : undefined}
+                    >
+                      {assigningVehicleId === veh.id ? (
+                        <><i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลัง sync...</>
+                      ) : (
+                        <><i className="ph ph-seal-check" />ยืนยันรูท (Assign)</>
+                      )}
+                    </button>
+                  )}
                   {v.canEdit && !veh.batchLocked && (
                     <button className="btn btn-secondary" style={{ minHeight: 30 }} onClick={veh.autoSequence} disabled={veh.stopCount < 2} title={veh.autoSequenceTitle}>
                       <i className={veh.autoSequenceIcon} />{veh.autoSequenceLabel}
@@ -250,7 +289,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                     <tr>
                       <th style={{ width: 24 }}></th>
                       <th style={{ width: 46, textAlign: 'center' }}>ลำดับ</th><th style={{ width: 70, textAlign: 'center' }}>ลำดับโหลด</th>
-                      <th>ลูกค้า</th><th>โซน</th><th style={{ textAlign: 'right' }}>ยอดเงิน</th><th style={{ width: 200 }}>COD</th><th style={{ textAlign: 'right' }}>ระยะ</th><th style={{ width: 190 }}></th>
+                      <th>ลูกค้า</th><th>โซน</th><th style={{ textAlign: 'right' }}>ยอดเงิน</th><th style={{ width: 200 }}>COD</th><th style={{ textAlign: 'right' }}>ระยะ</th><th style={{ width: 130 }}>สถานะ</th><th style={{ width: 190 }}></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -311,6 +350,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                           )}
                         </td>
                         <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums' }}>{s.distanceText}</td>
+                        <td><span style={s.stStyle}>{s.status || '—'}</span></td>
                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                           {v.canEdit && !veh.batchLocked && (
                             <>
@@ -431,10 +471,20 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
           )}
         </div>
 
-        {/* map */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, position: 'sticky', top: 96 }}>
+        {/* map — sticky within the grid row (which stretches to match the
+            left column's height, since the grid no longer forces alignItems:
+            start), so it stays in view all the way down the vehicle list
+            instead of scrolling away once its own short natural height
+            passes. */}
+        <div style={{ position: 'sticky', top: 96, alignSelf: 'start', display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div className="card elev-sm" style={{ padding: 0, overflow: 'hidden', height: 560, position: 'relative' }}>
-            <RouteMap stops={v.mapStops} warehouse={v.warehouse} />
+            <RouteMap
+              stops={v.mapStops}
+              warehouse={v.warehouse}
+              vehicleRoutes={v.vehicleRoutes}
+              vehicleOptions={v.vehicleOptions}
+              onMoveToVehicle={v.canEdit ? v.onMapMoveToVehicle : undefined}
+            />
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, fontSize: 11, color: 'var(--color-neutral-500)' }}>
             {v.zoneLegend.map((z) => (
@@ -449,18 +499,6 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
               <span style={{ color: 'var(--st-warn-fg)' }}><i className="ph ph-warning" style={{ marginRight: 3 }} />ซ่อนพิกัดผิดปกติ {v.excludedStopCount} จุด</span>
             )}
           </div>
-          {v.canEdit && (
-            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-              <button
-                className="btn btn-primary"
-                onClick={v.openAssignDialog}
-                disabled={!v.canAssign || v.assignableVehicles.length === 0}
-                title={!v.plannerDate ? 'เลือกวันที่จัดส่งก่อนจึงจะยืนยันรูทได้' : v.assignableVehicles.length === 0 ? 'ยังไม่มีรถที่จัดจุดส่งพร้อมยืนยัน' : undefined}
-              >
-                <i className="ph ph-seal-check" />ยืนยันรูท (Assign)
-              </button>
-            </div>
-          )}
         </div>
       </div>
         </>

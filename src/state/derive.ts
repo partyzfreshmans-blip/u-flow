@@ -19,6 +19,10 @@ function effectiveDeliveryDayKey(o: RouteOrder): string | null {
   return sheetDateToDayKey(o.plannedDeliveryDate);
 }
 
+/** Per-vehicle distinguishing colour (route lines, name swatch) — separate
+ * from zone colour, since one vehicle's stops can span several zones. */
+const VEHICLE_PALETTE = ['#5b8ff9', '#61ddaa', '#f6bd16', '#e8684a', '#6dc8ec', '#9270ca', '#ff9d4d', '#269a99', '#ff99c3', '#daaa53'];
+
 /** Per-order quantity broken down into the three units warehouse staff
  * actually load by (ชิ้น/แพ็ค/ลัง) — หีบ and คู่ fold into ลัง/ชิ้น
  * respectively since they're the same real-world unit under a different
@@ -472,8 +476,24 @@ export function computeRoute(state: AppState, actions: AppActions) {
     set.add(li.sku);
   }
 
+  // Batch Route "stamp" — read live off state.batchRoutes rather than
+  // written onto the order itself, so it can never drift: once an order
+  // leaves a batch's current orderNos (via "แก้ไข batch"), the stamp just
+  // disappears next render, and a move to another vehicle's batch picks up
+  // that batch's info automatically. If an orderNo happens to still be
+  // listed in more than one batch snapshot, the most recently created batch
+  // wins, since that reflects the order's real current assignment.
+  const batchStampByOrderNo = new Map<string, { vehicleName: string; batchId: string; createdAt: string }>();
+  for (const b of state.batchRoutes) {
+    for (const orderNo of b.orderNos) {
+      const cur = batchStampByOrderNo.get(orderNo);
+      if (!cur || b.createdAt > cur.createdAt) batchStampByOrderNo.set(orderNo, { vehicleName: b.vehicleName, batchId: b.id, createdAt: b.createdAt });
+    }
+  }
+
   const rows = filtered.map((o) => {
     const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
+    const batchStamp = batchStampByOrderNo.get(o.orderNo) ?? null;
     const skusForOrder = orderSkus.get(o.orderNo);
     const hasPromoItem = skusForOrder ? Array.from(skusForOrder).some((sku) => activePromoSkus.has(sku)) : false;
     const saveStatus = state.orderSaveStatus[o.orderNo];
@@ -523,6 +543,9 @@ export function computeRoute(state: AppState, actions: AppActions) {
       note: o.note,
       viewItems: () => actions.openOrderDetail(o.orderNo, o.customer, o),
       edit: () => actions.openOrderDetail(o.orderNo, o.customer, o),
+      batchVehicleName: batchStamp?.vehicleName ?? null,
+      batchId: batchStamp?.batchId ?? null,
+      batchAssignedAtText: batchStamp ? formatThaiShortDate(new Date(batchStamp.createdAt)) : null,
     };
   });
 
@@ -615,6 +638,15 @@ export function computePlanner(state: AppState, actions: AppActions) {
   // the fleet, not the unassigned pool waiting to be routed.
   const vehicleSource = isDriverView ? state.vehicles.filter((v) => v.id === state.session?.driverVehicleId) : state.vehicles;
   const username = state.session?.username ?? '';
+
+  // A distinct colour per vehicle (independent of zone colour) for the map's
+  // route lines and the small swatch next to each vehicle's name — indexed
+  // against the full fleet list so a vehicle keeps the same colour
+  // regardless of any driver-view filtering applied to vehicleSource.
+  const vehicleColorFor = (vehicleId: string) => {
+    const idx = state.vehicles.findIndex((x) => x.id === vehicleId);
+    return VEHICLE_PALETTE[(idx < 0 ? 0 : idx) % VEHICLE_PALETTE.length];
+  };
 
   // Batch Route locking — a vehicle with a locked, not-currently-unlocked
   // batch for the day being planned can't have its sequence/membership
@@ -862,6 +894,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
       loadPrefix: v.loadPrefix,
       crew: v.crew,
       zoneNote: v.zoneNote,
+      vehicleColor: vehicleColorFor(v.id),
       stops,
       stopCount: stops.length,
       totalText: fmt(stops.reduce((a, s) => a + s.amount, 0)),
@@ -931,6 +964,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
             status: '',
             color: s.zoneColor,
             zoneName: s.zoneName,
+            vehicleId: v.id,
             // Short on-pin text: vehicle code + delivery sequence, e.g. "A-3".
             pinLabel: `${v.loadPrefix}-${s.seq}`,
           };
@@ -955,10 +989,29 @@ export function computePlanner(state: AppState, actions: AppActions) {
       color: UNASSIGNED_COLOR,
       zoneName: 'ยังไม่จัดลงรถ',
       pinLabel: null as string | null,
+      vehicleId: null as string | null,
     }));
 
   const allStops = [...vehicles.flatMap((v) => v.mapStops), ...unassignedMapStops];
   const { kept: mapStops, excluded: excludedStopCount } = rejectOutlierStops(allStops, warehouse);
+
+  // Per-vehicle delivery-sequence polyline (WH -> stop 1 -> stop 2 -> ...),
+  // one per vehicle with at least one plotted stop — the map draws these
+  // under the pins in each vehicle's own colour.
+  const vehicleRoutes = vehicles
+    .filter((v) => v.mapStops.length > 0)
+    .map((v) => ({ vehicleId: v.id, color: v.vehicleColor, points: v.mapStops.map((s) => ({ lat: s.lat, lng: s.lng })) }));
+
+  // Move-target list for the map's click-to-move popup — same "not locked"
+  // rule as the table's own "ย้ายไปรถคันอื่น" dropdowns.
+  const vehicleOptions = vehicles.filter((v) => !v.batchLocked).map((v) => ({ id: v.id, name: v.name }));
+  const onMapMoveToVehicle = (orderNo: string, fromVehicleId: string | null, toVehicleId: string) => {
+    if (fromVehicleId) {
+      moveOrderToVehicle(orderNo, fromVehicleId, toVehicleId, null);
+    } else {
+      unassigned.find((u) => u.orderNo === orderNo)?.assignTo(toVehicleId);
+    }
+  };
 
   const codCashExpectedTotal = vehicles.reduce((a, v) => a + v.codCashExpected, 0);
   const codCashCollectedTotal = vehicles.reduce((a, v) => a + v.codCashCollected, 0);
@@ -1074,6 +1127,9 @@ export function computePlanner(state: AppState, actions: AppActions) {
     activeCrew,
     mapStops,
     excludedStopCount,
+    vehicleRoutes,
+    vehicleOptions,
+    onMapMoveToVehicle,
     warehouse,
     plannerDate: state.plannerDate,
     onPlannerDate: (v: string) => actions.patch({ plannerDate: v }),
@@ -1111,7 +1167,10 @@ export function computePlanner(state: AppState, actions: AppActions) {
     assignDialogOpen: state.assignDialogOpen,
     assignableVehicles: assignableVehicles.map((v) => ({ id: v.id, name: v.name, stopCount: v.stopCount, totalText: v.totalText })),
     assignSelectedVehicleIds: state.assignSelectedVehicleIds,
-    openAssignDialog: () => actions.patch({ assignDialogOpen: true, assignSelectedVehicleIds: assignableVehicles.map((v) => v.id) }),
+    // Opened from a specific vehicle's header button — pre-selects just that
+    // vehicle, but the dialog's own checkboxes still allow adding others
+    // (e.g. to assign the whole day's fleet at once from one click).
+    openAssignDialog: (vehicleId: string) => actions.patch({ assignDialogOpen: true, assignSelectedVehicleIds: [vehicleId] }),
     closeAssignDialog: () => actions.patch({ assignDialogOpen: false }),
     toggleAssignVehicle: (vehicleId: string) => {
       const cur = state.assignSelectedVehicleIds;

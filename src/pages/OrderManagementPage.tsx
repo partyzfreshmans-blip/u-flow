@@ -50,7 +50,7 @@ function OrderTable({ title, tone, rows, isEmpty, canEdit }: { title: string; to
       <table className="table">
         <thead>
           <tr>
-            <th>Route</th><th style={{ textAlign: 'center' }}>โซนที่ควรเป็น</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th style={{ textAlign: 'right' }}>ยอดขาย</th>
+            <th>Route</th><th style={{ textAlign: 'center' }}>โซนที่ควรเป็น</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th>Batch Route</th><th style={{ textAlign: 'right' }}>ยอดขาย</th>
             <th style={{ textAlign: 'center' }}>รายการ</th><th>วันเวลาที่สั่ง</th><th style={{ minWidth: 168 }}>วันที่จะจัดส่ง</th><th>หมายเหตุ</th><th style={{ textAlign: 'center' }}>ใบกำกับภาษี</th><th style={{ textAlign: 'center' }}>โปรโมชั่น</th><th>สถานะ</th><th></th>
           </tr>
         </thead>
@@ -78,6 +78,19 @@ function OrderTable({ title, tone, rows, isEmpty, canEdit }: { title: string; to
               <td>
                 {r.customer}
                 <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', maxWidth: 200, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.address}</div>
+              </td>
+              <td style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+                {r.batchId ? (
+                  <span
+                    style={{ display: 'inline-flex', flexDirection: 'column', gap: 1, padding: '3px 8px', borderRadius: 6, background: 'var(--color-neutral-800)', color: 'var(--color-neutral-200)' }}
+                    title={`Assign เมื่อ ${r.batchAssignedAtText}`}
+                  >
+                    <span style={{ fontWeight: 600 }}><i className="ph ph-truck" style={{ marginRight: 4 }} />{r.batchVehicleName}</span>
+                    <span style={{ fontSize: 10, color: 'var(--color-neutral-500)', fontFamily: 'ui-monospace, monospace' }}>{r.batchId}</span>
+                  </span>
+                ) : (
+                  <span style={{ color: 'var(--color-neutral-600)' }}>—</span>
+                )}
               </td>
               <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{r.amtText}</td>
               <td style={{ textAlign: 'center' }}>{r.itemCountText}</td>

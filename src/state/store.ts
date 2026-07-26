@@ -1236,7 +1236,10 @@ export function useAppStore() {
        * for the next page load. Uses allSettled so one failing source never
        * discards the others' fresh data; only the sources that actually
        * failed keep showing their last-known-good values. */
-      syncNow: async () => {
+      // Returns a definite result (not just void) so a caller like the
+      // Planner's "Assign" flow can react to THIS sync's outcome directly,
+      // without reading back potentially-stale state right after the await.
+      syncNow: async (): Promise<{ ok: boolean; routeOrdersOk: boolean; failures: string[] }> => {
         dispatch({ type: 'patch', patch: { syncing: true } });
         [
           csvExportUrl(SHEET_TABS.apiImport),
@@ -1314,6 +1317,7 @@ export function useAppStore() {
           patch.syncError = null;
         }
         dispatch({ type: 'patch', patch });
+        return { ok: failures.length === 0, routeOrdersOk: routeOrdersR.status === 'fulfilled', failures };
       },
 
       // These take the current value as an explicit parameter (from
