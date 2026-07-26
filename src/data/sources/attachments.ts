@@ -1,10 +1,10 @@
 import { MAX_UPLOAD_BYTES, humanFileSize, isAllowedFile, type AttachmentScope } from '../../config/drive';
 
-// Uploads go through the local backend (server/), which is the only place the
-// Service Account credential exists. Attachment metadata is kept in
-// localStorage for now — the spec explicitly defers writing it back to Sheets.
+// Uploads go through the backend (server/ locally, api/ on Vercel), which is
+// the only place the Service Account credential exists. Attachment metadata
+// is kept in localStorage for now — the spec explicitly defers writing it
+// back to Sheets.
 
-const API_BASE: string = import.meta.env.VITE_CS_MASTER_API_URL || 'http://localhost:8787';
 const STORAGE_KEY = 'warehouse-ops.attachments.v1';
 
 export interface Attachment {
@@ -69,11 +69,11 @@ export async function uploadToDrive(scope: AttachmentScope, key: string, files: 
 
   let res: Response;
   try {
-    res = await fetch(`${API_BASE}/api/drive/upload`, { method: 'POST', body: form });
+    res = await fetch('/api/drive/upload', { method: 'POST', body: form });
   } catch {
     // Network failure / backend not running — the most common case in the
     // field, so name it plainly instead of surfacing a raw fetch error.
-    throw new UploadError('เชื่อมต่อเซิร์ฟเวอร์อัปโหลดไม่ได้ — ตรวจสอบว่ารัน npm run server อยู่ แล้วลองใหม่');
+    throw new UploadError('เชื่อมต่อเซิร์ฟเวอร์อัปโหลดไม่ได้ — ลองใหม่อีกครั้ง');
   }
 
   if (!res.ok) {
