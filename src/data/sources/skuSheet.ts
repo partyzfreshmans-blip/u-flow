@@ -12,6 +12,26 @@ function cleanBarcode(...candidates: (string | undefined)[]): string {
   return '';
 }
 
+/** The sheet's "หน่วยสินค้า (Unit)" column holds the full packaging-variant
+ * description, not a short unit word — and "ชื่อสินค้า (Product Name)" is
+ * itself built as "{base name} ({that same unit value})", so showing the
+ * unit column verbatim next to the name column is almost entirely
+ * redundant (e.g. name "ทับทิม น้ำมันปาล์ม ขวด 1ลิตร (...แพค/6ขวด)", unit
+ * "ทับทิม น้ำมันปาล์ม ขวด 1ลิตร แพค/6ขวด"). Strip the shared base-name
+ * prefix so only the actual packaging distinguisher shows ("แพค/6ขวด",
+ * "ทีบX12"); when there's no suffix at all (the single-unit base row),
+ * falls back to "ชิ้น". */
+function cleanUnit(rawUnit: string, name: string): string {
+  const u = rawUnit.trim();
+  if (!u) return '-';
+  const parenIdx = name.indexOf('(');
+  const base = (parenIdx === -1 ? name : name.slice(0, parenIdx)).trim();
+  if (base && u.startsWith(base)) {
+    return u.slice(base.length).trim() || 'ชิ้น';
+  }
+  return u;
+}
+
 function rowToSku(row: Record<string, string>, index: number): Sku | null {
   const skuId = (row['SKU ID'] ?? '').trim();
   const name = (row['ชื่อสินค้า (Product Name)'] ?? '').trim();
@@ -25,6 +45,7 @@ function rowToSku(row: Record<string, string>, index: number): Sku | null {
   // Not a real column in the sheet today — checked defensively under a few
   // plausible names so batch picking can show it the moment one is added.
   const location = (row['ตำแหน่งจัดเก็บ'] ?? row['ตำแหน่ง (Location)'] ?? row['Location'] ?? row['ที่จัดเก็บ'] ?? '').trim();
+  const displayName = name || unit || skuId;
 
   return {
     // SKU IDs repeat across packaging-variant rows in the source sheet, so the
@@ -32,8 +53,8 @@ function rowToSku(row: Record<string, string>, index: number): Sku | null {
     id: `${skuId || 'ROW'}-${index}`,
     displayId: skuId || `(ไม่มีรหัส-${index})`,
     barcode,
-    name: name || unit || skuId,
-    unit: unit || '-',
+    name: displayName,
+    unit: cleanUnit(unit, displayName),
     stock,
     status: inStock === 'หมด' ? 'inactive' : 'active',
     location,
