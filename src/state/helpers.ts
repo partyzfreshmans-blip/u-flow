@@ -89,3 +89,8 @@ export function sheetStatusColor(status: string): string {
 /** Statuses that mean an order is done moving — delivered, received, or
  * cancelled. Anything else with a delivery date in the past is a stuck order. */
 export const DELIVERY_DONE_STATUSES = ['ส่งสำเร็จ', 'ได้รับแล้ว', 'ยกเลิก'];
+
+/** Status written back when a batch-picking lot closes — reuses "กำลังจัดส่ง"
+ * (already a real value in the sheet, the step right after "กำลังดำเนินการ")
+ * rather than inventing a new one that isn't part of the existing flow. */
+export const PICK_CLOSED_STATUS = 'กำลังจัดส่ง';

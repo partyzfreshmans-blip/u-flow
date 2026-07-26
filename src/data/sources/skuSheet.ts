@@ -22,6 +22,9 @@ function rowToSku(row: Record<string, string>, index: number): Sku | null {
   const stockRaw = (row['สต็อกปัจจุบัน (Stock)'] ?? '').trim();
   const stock = stockRaw ? Number(stockRaw.replace(/[^0-9.-]/g, '')) || 0 : 0;
   const inStock = (row['สถานะในสต็อก (In Stock)'] ?? '').trim();
+  // Not a real column in the sheet today — checked defensively under a few
+  // plausible names so batch picking can show it the moment one is added.
+  const location = (row['ตำแหน่งจัดเก็บ'] ?? row['ตำแหน่ง (Location)'] ?? row['Location'] ?? row['ที่จัดเก็บ'] ?? '').trim();
 
   return {
     // SKU IDs repeat across packaging-variant rows in the source sheet, so the
@@ -33,6 +36,7 @@ function rowToSku(row: Record<string, string>, index: number): Sku | null {
     unit: unit || '-',
     stock,
     status: inStock === 'หมด' ? 'inactive' : 'active',
+    location,
   };
 }
 

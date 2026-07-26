@@ -37,6 +37,10 @@ const STATUS_HEADER = 'Status';
 // above) — exactly what should be stamped when a driver marks a stop done.
 const DELIVERED_TIMESTAMP_HEADER = 'วันที่จัดส่ง';
 const DELIVERED_STATUS_VALUE = 'ส่งสำเร็จ';
+// Real status vocabulary observed in the sheet — a small allowlist so a
+// caller passing an arbitrary `status` string (e.g. batch picking closing a
+// lot) can't accidentally write a typo/garbage value into the column.
+const KNOWN_STATUS_VALUES = ['รอยืนยันออเดอร์', 'กำลังดำเนินการ', 'รอชำระเงิน', 'กำลังจัดส่ง', DELIVERED_STATUS_VALUE, 'ได้รับแล้ว', 'ยกเลิก'];
 // The real sheet has no dedicated boolean tax-invoice column — only a legacy
 // field ("ใบกำกับภาษี/หมายเหตุเดิม") that mixes it with old free-text notes
 // and already holds real note content on some rows, so it's not safe to
@@ -236,12 +240,12 @@ export async function handleUpdateCsMasterLocation(body: unknown): Promise<ApiRe
 }
 
 export async function handleUpdateRouteOrder(body: unknown): Promise<ApiResult> {
-  const { orderNo, plannedDeliveryDate, note, wantsTaxInvoice, markDelivered } = (body ?? {}) as Record<string, unknown>;
+  const { orderNo, plannedDeliveryDate, note, wantsTaxInvoice, markDelivered, status } = (body ?? {}) as Record<string, unknown>;
 
   if (typeof orderNo !== 'string' || orderNo.trim() === '') {
     return { status: 400, body: { error: 'ต้องระบุเลขคำสั่งซื้อ' } };
   }
-  if (plannedDeliveryDate === undefined && note === undefined && wantsTaxInvoice === undefined && markDelivered === undefined) {
+  if (plannedDeliveryDate === undefined && note === undefined && wantsTaxInvoice === undefined && markDelivered === undefined && status === undefined) {
     return { status: 400, body: { error: 'ไม่มีข้อมูลให้บันทึก' } };
   }
   if (plannedDeliveryDate !== undefined && typeof plannedDeliveryDate !== 'string') {
@@ -255,6 +259,9 @@ export async function handleUpdateRouteOrder(body: unknown): Promise<ApiResult> 
   }
   if (markDelivered !== undefined && markDelivered !== true) {
     return { status: 400, body: { error: 'markDelivered ต้องเป็น true เท่านั้น' } };
+  }
+  if (status !== undefined && (typeof status !== 'string' || !KNOWN_STATUS_VALUES.includes(status))) {
+    return { status: 400, body: { error: `status ต้องเป็นค่าที่รู้จัก (${KNOWN_STATUS_VALUES.join(', ')})` } };
   }
 
   let sheetDate: string | null = null;
@@ -321,9 +328,11 @@ export async function handleUpdateRouteOrder(body: unknown): Promise<ApiResult> 
     }
     let statusCol = -1;
     let deliveredTimestampCol = -1;
-    if (markDelivered === true) {
+    if (markDelivered === true || typeof status === 'string') {
       statusCol = headerAt(STATUS_HEADER);
       if (statusCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STATUS_HEADER}" ในชีท` } };
+    }
+    if (markDelivered === true) {
       deliveredTimestampCol = headerAt(DELIVERED_TIMESTAMP_HEADER);
       if (deliveredTimestampCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${DELIVERED_TIMESTAMP_HEADER}" ในชีท` } };
     }
@@ -365,6 +374,14 @@ export async function handleUpdateRouteOrder(body: unknown): Promise<ApiResult> 
         range: `${title}!${columnLetter(taxInvoiceCol)}${targetRow}`,
         valueInputOption: 'RAW',
         requestBody: { values: [[wantsTaxInvoice ? 'ใช่' : '']] },
+      });
+    }
+    if (typeof status === 'string') {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: MAIN_SHEET_ID,
+        range: `${title}!${columnLetter(statusCol)}${targetRow}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[status]] },
       });
     }
     if (markDelivered === true) {

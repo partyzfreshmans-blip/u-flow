@@ -1,10 +1,10 @@
-import type { Order, PickBatch } from './types';
+import type { Order } from './types';
 
-// Everything below is still local/mock — COD clearing, batch picking, and
-// GRN supplier list were out of scope for the Google Sheets migration and
-// keep their illustrative data. SKU master, dashboard orders, route/delivery
-// history, promotions, and customers now load from Google Sheets at runtime
-// (see src/data/sources/*.ts and src/state/store.ts).
+// COD clearing is still local/mock — out of scope for the Google Sheets
+// migration and keeps its illustrative data. Everything else (SKU master,
+// dashboard orders, route/delivery history, promotions, customers, and
+// batch-picking lots) now loads from or writes back to Google Sheets at
+// runtime (see src/data/sources/*.ts and src/state/store.ts).
 
 export const orders: Order[] = [
   { id: 'OD-6001', cust: 'ร้านเจ๊แดง มินิมาร์ท', addr: 'ซ.ลาดพร้าว 71', route: 'A', driver: 'สมชาย ป.', status: 'delivering', cod: true, amt: 4820, items: 12, date: '23 ก.ค.', sync: 'synced' },
@@ -18,17 +18,4 @@ export const orders: Order[] = [
   { id: 'OD-6009', cust: 'ร้านสมหญิง ของชำ', addr: 'ซ.โพธิ์แก้ว 3', route: 'A', driver: 'สมชาย ป.', status: 'delivered', cod: true, amt: 3990, items: 11, date: '23 ก.ค.', sync: 'synced' },
   { id: 'OD-6010', cust: 'ครัวคุณแม่ (เครดิต)', addr: 'ถ.รัชดา 32', route: 'B', driver: 'วิรัช ต.', status: 'delivering', cod: false, amt: 0, items: 5, date: '23 ก.ค.', sync: 'synced' },
 ];
-
-export const pickBatch: PickBatch = {
-  id: 'PICK-2207',
-  meta: 'รอบเช้า · Route A · รวม 3 ออเดอร์ (OD-6001, OD-6003, OD-6004)',
-  items: [
-    { sku: 'SKU00125', name: 'ปลากระป๋องสามแม่ครัว', qty: 4, unit: 'ลัง', loc: 'A1-02' },
-    { sku: 'SKU00123', name: 'น้ำปลาทิพรส 700ml', qty: 6, unit: 'แพค', loc: 'A1-05' },
-    { sku: 'SKU00127', name: 'นมข้นหวานตรามะลิ', qty: 3, unit: 'ลัง', loc: 'A2-01' },
-    { sku: 'SKU00124', name: 'น้ำมันพืชองุ่น 1L', qty: 8, unit: 'แพค', loc: 'A2-04' },
-    { sku: 'SKU00126', name: 'ผงซักฟอกบรีส 800g', qty: 24, unit: 'ถุง', loc: 'B1-01' },
-    { sku: 'SKU00128', name: 'บะหมี่มาม่าต้มยำกุ้ง', qty: 5, unit: 'ลัง', loc: 'B1-06' },
-  ],
-};
 

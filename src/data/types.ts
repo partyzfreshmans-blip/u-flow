@@ -16,20 +16,6 @@ export interface Order {
   sync: SyncStatus;
 }
 
-export interface PickItem {
-  sku: string;
-  name: string;
-  qty: number;
-  unit: string;
-  loc: string;
-}
-
-export interface PickBatch {
-  id: string;
-  meta: string;
-  items: PickItem[];
-}
-
 // ---------- Promotions ("โปรโมชั่น" tab, Active rows only) ----------
 export type PromoStatus = 'active' | 'upcoming' | 'expired';
 
@@ -95,6 +81,10 @@ export interface Sku {
   unit: string;
   stock: number;
   status: SkuStatus;
+  /** Warehouse storage/bin location, e.g. "A1-02" — blank if the sheet has
+   * no such column yet (it doesn't today; read defensively so this starts
+   * working the moment one is added, with no further code changes). */
+  location: string;
 }
 
 // ---------- Dashboard / "API Import" tab: newest, not-yet-routed orders ----------

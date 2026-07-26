@@ -39,3 +39,14 @@ export async function fetchOrderLineItems(orderUid: string): Promise<OrderLineIt
     .filter((l): l is OrderLineItem => l !== null)
     .filter((l) => l.orderNo === orderUid);
 }
+
+/** Same as fetchOrderLineItems but for a whole batch-picking selection at
+ * once — one fetch (already cached) instead of one round trip per order. */
+export async function fetchOrderLineItemsForOrders(orderNos: string[]): Promise<OrderLineItem[]> {
+  const wanted = new Set(orderNos);
+  const rows = await fetchSheetRows(CSV_URL);
+  return rows
+    .map(rowToLineItem)
+    .filter((l): l is OrderLineItem => l !== null)
+    .filter((l) => wanted.has(l.orderNo));
+}

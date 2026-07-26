@@ -1,5 +1,6 @@
 import type { CSSProperties } from 'react';
-import { orders, pickBatch } from '../data/mockData';
+import { orders } from '../data/mockData';
+import type { PickLot } from '../data/pickLots';
 import { PROMO_UNITS, type Order, type PromoStatus, type PromoUnit, type RouteOrder } from '../data/types';
 import { lineDiff, lineNetTotal, receivingFolderKey, recordHasDiscrepancy, recordTotal, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { loadCode } from '../data/vehicles';
@@ -661,47 +662,140 @@ export function computePlanner(state: AppState, actions: AppActions) {
 
 type RoutePlanShape = Record<string, string[]>;
 
-// ---------- BATCH PICKING ----------
-export function computePick(state: AppState, actions: AppActions) {
-  const items = [...pickBatch.items].sort((a, b) => a.loc.localeCompare(b.loc));
-  const rowBase: CSSProperties = { display: 'flex', alignItems: 'center', gap: 13, width: '100%', padding: '12px 14px', border: 0, cursor: 'pointer', fontFamily: 'var(--font-body)', borderRadius: 12, background: 'var(--color-surface)', boxShadow: 'var(--shadow-sm)', transition: 'box-shadow .12s' };
-  const boxBase: CSSProperties = { width: 30, height: 30, flex: 'none', borderRadius: 8, display: 'grid', placeItems: 'center' };
+// ---------- BATCH PICKING ("คำสั่งซื้อ" tab — status = "กำลังดำเนินการ") ----------
+const PICK_ROW_BASE: CSSProperties = { display: 'flex', alignItems: 'center', gap: 13, width: '100%', padding: '12px 14px', border: 0, cursor: 'pointer', fontFamily: 'var(--font-body)', borderRadius: 12, background: 'var(--color-surface)', boxShadow: 'var(--shadow-sm)', transition: 'box-shadow .12s' };
+const PICK_BOX_BASE: CSSProperties = { width: 30, height: 30, flex: 'none', borderRadius: 8, display: 'grid', placeItems: 'center' };
 
+function computePickOrderSelection(state: AppState, actions: AppActions) {
+  // An order already sitting in some lot (open or closed) shouldn't be
+  // offered again — it's either mid-pick or already past this stage,
+  // regardless of whether its sheet status write has confirmed yet.
+  const alreadyInALot = new Set(state.pickLots.flatMap((l) => l.orderNos));
+  const q = state.pickOrderQ.trim().toLowerCase();
+
+  const candidates = state.routeOrders.filter((o) => {
+    if (o.status !== 'กำลังดำเนินการ') return false;
+    if (alreadyInALot.has(o.orderNo)) return false;
+    if (q && !(o.customer.toLowerCase().includes(q) || o.orderNo.toLowerCase().includes(q))) return false;
+    return true;
+  });
+
+  const rows = candidates.map((o) => ({
+    orderNo: o.orderNo,
+    customer: o.customer,
+    itemCount: o.itemCount,
+    amtText: fmt(o.totalAmount),
+    orderedDate: o.orderedDate || '—',
+    plannedDeliveryDate: o.plannedDeliveryDate || '—',
+    checked: state.pickSelectedOrderNos.includes(o.orderNo),
+    toggle: () => actions.togglePickOrderSelection(o.orderNo, state.pickSelectedOrderNos),
+  }));
+
+  const lotProgress = (l: PickLot) => {
+    const total = l.lines.length;
+    const done = l.lines.filter((line) => l.picked[line.sku]).length;
+    return { total, done, pct: total ? Math.round((done / total) * 100) : 0 };
+  };
+
+  const openLots = state.pickLots
+    .filter((l) => !l.closed)
+    .map((l) => {
+      const p = lotProgress(l);
+      return {
+        id: l.id,
+        orderCount: l.orderNos.length,
+        skuCount: p.total,
+        doneCount: p.done,
+        pct: p.pct,
+        createdAtText: formatThaiShortDate(new Date(l.createdAt)),
+        resume: () => actions.openPickLot(l.id),
+      };
+    });
+
+  const recentClosedLots = state.pickLots
+    .filter((l) => l.closed)
+    .slice(0, 5)
+    .map((l) => ({
+      id: l.id,
+      orderCount: l.orderNos.length,
+      skuCount: l.lines.length,
+      createdAtText: formatThaiShortDate(new Date(l.createdAt)),
+      pendingSyncCount: l.statusSyncPending.length,
+      view: () => actions.openPickLot(l.id),
+    }));
+
+  return {
+    mode: 'select' as const,
+    loading: state.routeOrdersLoading,
+    error: state.routeOrdersError,
+    q: state.pickOrderQ,
+    onSearch: (v: string) => actions.patch({ pickOrderQ: v }),
+    rows,
+    resultCount: rows.length,
+    isEmpty: rows.length === 0,
+    selectedCount: state.pickSelectedOrderNos.length,
+    creating: state.pickCreating,
+    createError: state.pickCreateError,
+    createLot: () => actions.createPickLot(state.pickSelectedOrderNos, state.routeOrders, state.skus, state.pickLots),
+    clearSelection: () => actions.clearPickOrderSelection(),
+    openLots,
+    hasOpenLots: openLots.length > 0,
+    recentClosedLots,
+    hasRecentClosedLots: recentClosedLots.length > 0,
+  };
+}
+
+function computePickLotDetail(state: AppState, actions: AppActions, lot: PickLot) {
   let pk = 0;
-  const pickItems = items.map((it) => {
-    const on = !!state.picked[it.sku];
+  const pickItems = lot.lines.map((line) => {
+    const on = !!lot.picked[line.sku];
     if (on) pk++;
     return {
-      sku: it.sku,
-      name: it.name,
-      qty: it.qty,
-      unit: it.unit,
-      loc: it.loc,
-      toggle: () => actions.patch({ picked: { ...state.picked, [it.sku]: !state.picked[it.sku] } }),
-      rowStyle: on ? { ...rowBase, boxShadow: 'inset 0 0 0 1.5px var(--color-accent-700)' } : rowBase,
-      boxStyle: on ? { ...boxBase, background: 'var(--color-accent)', color: '#fff' } : { ...boxBase, boxShadow: 'inset 0 0 0 2px var(--color-neutral-600)', color: 'transparent' },
+      sku: line.sku,
+      name: line.name,
+      qty: line.totalQty,
+      unit: line.unit,
+      loc: line.location || '—',
+      perOrderText: line.perOrder.map((p) => `${p.customer} (${p.orderNo}) ×${p.qty}`).join(', '),
+      toggle: () => actions.togglePickItem(lot.id, line.sku, state.pickLots),
+      rowStyle: on ? { ...PICK_ROW_BASE, boxShadow: 'inset 0 0 0 1.5px var(--color-accent-700)' } : PICK_ROW_BASE,
+      boxStyle: on ? { ...PICK_BOX_BASE, background: 'var(--color-accent)', color: '#fff' } : { ...PICK_BOX_BASE, boxShadow: 'inset 0 0 0 2px var(--color-neutral-600)', color: 'transparent' },
       checkVis: on ? {} : { opacity: 0 },
       textStyle: on ? ({ textDecoration: 'line-through', color: 'var(--color-neutral-500)' } as CSSProperties) : {},
     };
   });
 
-  const total = items.length;
+  const total = lot.lines.length;
   const pickPct = total ? Math.round((pk / total) * 100) : 0;
   const complete = pk === total && total > 0;
 
   return {
-    pickBatch,
+    mode: 'lot' as const,
+    lotId: lot.id,
+    orderNos: lot.orderNos,
+    orderSummaries: lot.orderSummaries,
     pickTotal: total,
     pickedCount: pk,
     pickPct,
     pickItems,
-    pickClosed: state.pickClosed,
-    pickCloseDisabled: !complete || state.pickClosed,
-    pickBtnLabel: state.pickClosed ? 'ปิดล็อตแล้ว' : complete ? 'ปิดล็อต — ส่งต่อ Checker' : 'หยิบให้ครบก่อนปิดล็อต',
-    closePick: () => {
-      if (Object.values(state.picked).filter(Boolean).length === pickBatch.items.length) actions.patch({ pickClosed: true });
-    },
+    isEmpty: total === 0,
+    pickClosed: lot.closed,
+    pickCloseDisabled: !complete || lot.closed,
+    pickBtnLabel: lot.closed ? 'ปิดล็อตแล้ว' : complete ? 'ปิดล็อต — อัปเดตสถานะออเดอร์' : 'หยิบให้ครบก่อนปิดล็อต',
+    closePick: () => actions.closePickLot(lot.id, state.pickLots),
+    back: () => actions.backToPickerHome(),
+    hasNoLineOrders: lot.ordersWithNoLines.length > 0,
+    noLineOrdersText: lot.ordersWithNoLines.join(', '),
+    hasPendingSync: lot.statusSyncPending.length > 0,
+    pendingSyncText: lot.statusSyncPending.join(', '),
+    retrySync: () => actions.retryPickLotStatusSync(lot.statusSyncPending),
   };
+}
+
+export function computePick(state: AppState, actions: AppActions) {
+  const activeLot = state.pickLots.find((l) => l.id === state.activePickLotId) ?? null;
+  if (activeLot) return computePickLotDetail(state, actions, activeLot);
+  return computePickOrderSelection(state, actions);
 }
 
 // ---------- COD ----------

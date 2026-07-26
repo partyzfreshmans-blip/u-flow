@@ -5,7 +5,7 @@ import { updateCsMasterLatLng } from '../data/sources/csMasterWrite';
 import { fetchActivePromotions } from '../data/sources/promotionsSheet';
 import { fetchRouteOrders } from '../data/sources/routeOrders';
 import { invalidateSheetCache } from '../data/sources/sheetCsv';
-import { fetchOrderLineItems } from '../data/sources/skuDetail';
+import { fetchOrderLineItems, fetchOrderLineItemsForOrders } from '../data/sources/skuDetail';
 import { fetchSkusFromSheet } from '../data/sources/skuSheet';
 import { attachmentKey, loadAttachments, saveAttachments, uploadToDrive, type AttachmentIndex } from '../data/sources/attachments';
 import { emptyLine, loadReceivingLog, receivingFolderKey, saveReceivingLog, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
@@ -15,6 +15,8 @@ import { loadRouteCodState, saveRouteCodState } from '../data/routeCod';
 import { isoToSheetDateText, sheetDateToDayKey, todayDayKey } from '../data/dateUtils';
 import { updateRouteOrder } from '../data/sources/routeOrdersWrite';
 import { loadDriverQueue, saveDriverQueue } from '../data/driverQueue';
+import { loadPickLots, savePickLots, type PickLot, type PickLotLine } from '../data/pickLots';
+import { PICK_CLOSED_STATUS } from './helpers';
 import type { AttachmentScope } from '../config/drive';
 import type { ApiImportOrder, CsMasterCustomer, Promo, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
 
@@ -101,9 +103,14 @@ export interface AppState {
   driverSyncQueue: string[];
   driverOnline: boolean;
 
-  // batch picking
-  picked: Record<string, boolean>;
-  pickClosed: boolean;
+  // batch picking ("คำสั่งซื้อ" tab, status = "กำลังดำเนินการ")
+  pickOrderQ: string;
+  pickSelectedOrderNos: string[];
+  pickCreating: boolean;
+  pickCreateError: string | null;
+  pickLots: PickLot[];
+  /** null = order-selection / open-lots screen. */
+  activePickLotId: string | null;
 
   // COD
   codDriver: string;
@@ -221,8 +228,12 @@ export const initialState: AppState = {
   driverSyncQueue: [],
   driverOnline: typeof navigator === 'undefined' || navigator.onLine,
 
-  picked: {},
-  pickClosed: false,
+  pickOrderQ: '',
+  pickSelectedOrderNos: [],
+  pickCreating: false,
+  pickCreateError: null,
+  pickLots: [],
+  activePickLotId: null,
   codDriver: 'สมชาย ป.',
   codMobile: false,
   cod: { 'OD-6004': '3380', 'OD-6009': '3900', 'OD-6006': '1980', 'OD-6007': '7450' },
@@ -283,7 +294,8 @@ export type Action =
   | { type: 'updateCustomerLatLng'; rowIndex: number; lat: number; lng: number }
   | { type: 'setOrderSaveStatus'; orderNo: string; status: OrderSaveStatus | null }
   | { type: 'applyOrderEdit'; orderNo: string; plannedDeliveryDateSheetText: string | null; note: string | null; wantsTaxInvoice: boolean | null }
-  | { type: 'applyDeliveryMark'; orderNo: string; statusText: string; completedDateText: string };
+  | { type: 'applyDeliveryMark'; orderNo: string; statusText: string; completedDateText: string }
+  | { type: 'applyPickLotStatus'; orderNo: string; statusText: string };
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -309,9 +321,11 @@ function reducer(state: AppState, action: Action): AppState {
       const f = state.skuF;
       if (!f.id || !f.name) return state;
       const key = f.key || f.id;
-      const rec: Sku = { id: key, displayId: f.id, barcode: f.barcode, name: f.name, unit: f.unit, stock: Number(f.stock || 0), status: f.status };
       const arr = [...state.skus];
       const idx = arr.findIndex((x) => x.id === key);
+      // No location field in the edit form yet (the sheet has no such column
+      // today either) — carry over whatever an existing row already had.
+      const rec: Sku = { id: key, displayId: f.id, barcode: f.barcode, name: f.name, unit: f.unit, stock: Number(f.stock || 0), status: f.status, location: idx >= 0 ? arr[idx].location : '' };
       if (idx >= 0) arr[idx] = rec;
       else arr.push(rec);
       return { ...state, skus: arr, skuModal: null };
@@ -387,6 +401,15 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, routeOrders, apiOrders };
     }
 
+    case 'applyPickLotStatus': {
+      // Confirms one order's post-close status write actually landed in the
+      // sheet — patches the same shared routeOrders/apiOrders every other
+      // page reads, same as applyDeliveryMark above.
+      const routeOrders = state.routeOrders.map((o) => (o.orderNo === action.orderNo ? { ...o, status: action.statusText } : o));
+      const apiOrders = state.apiOrders.map((o) => (o.orderUid === action.orderNo ? { ...o, status: action.statusText } : o));
+      return { ...state, routeOrders, apiOrders };
+    }
+
     default:
       return state;
   }
@@ -411,6 +434,27 @@ export function useAppStore() {
         .catch(() => {
           /* leave it queued — the next online event, interval tick, or
            * markDelivered call will retry it */
+        });
+    });
+  }
+
+  /** Writes the post-pick status back for every order in a closed lot. Each
+   * order is tracked in that lot's own statusSyncPending until its write
+   * confirms, so a partial failure (some orders update, some don't) is
+   * visible and retryable per-lot rather than all-or-nothing. */
+  function syncPickLotStatus(orderNos: string[]) {
+    orderNos.forEach((orderNo) => {
+      updateRouteOrder({ orderNo, status: PICK_CLOSED_STATUS })
+        .then(() => {
+          const next = loadPickLots().map((l) =>
+            l.orderNos.includes(orderNo) ? { ...l, statusSyncPending: l.statusSyncPending.filter((n) => n !== orderNo) } : l,
+          );
+          savePickLots(next);
+          dispatch({ type: 'patch', patch: { pickLots: next } });
+          dispatch({ type: 'applyPickLotStatus', orderNo, statusText: PICK_CLOSED_STATUS });
+        })
+        .catch(() => {
+          /* stays in statusSyncPending — retryable via the lot's own button */
         });
     });
   }
@@ -515,6 +559,7 @@ export function useAppStore() {
         routeCodCollected: routeCod.collected,
         routeCodMethod: routeCod.method,
         driverSyncQueue: loadDriverQueue(),
+        pickLots: loadPickLots(),
       },
     });
   }, []);
@@ -716,6 +761,94 @@ export function useAppStore() {
         syncDriverQueue();
       },
       retrySyncQueue: () => syncDriverQueue(),
+
+      togglePickOrderSelection: (orderNo: string, selected: string[]) => {
+        const next = selected.includes(orderNo) ? selected.filter((n) => n !== orderNo) : [...selected, orderNo];
+        dispatch({ type: 'patch', patch: { pickSelectedOrderNos: next } });
+      },
+      clearPickOrderSelection: () => dispatch({ type: 'patch', patch: { pickSelectedOrderNos: [] } }),
+
+      /** Fetches SKU Detail for every selected order (one request, filtered
+       * client-side — see fetchOrderLineItemsForOrders), merges duplicate SKUs
+       * across orders into one summed line each, and opens the new lot. An
+       * order with zero rows in SKU Detail doesn't fail the whole thing — it's
+       * just flagged in ordersWithNoLines so the picker sees it plainly. */
+      createPickLot: async (orderNos: string[], routeOrders: RouteOrder[], skus: Sku[], lots: PickLot[]) => {
+        if (orderNos.length === 0) return;
+        dispatch({ type: 'patch', patch: { pickCreating: true, pickCreateError: null } });
+        try {
+          const lineItems = await fetchOrderLineItemsForOrders(orderNos);
+          const byOrderNo = new Map(routeOrders.map((o) => [o.orderNo, o]));
+          const locationBySku = new Map(skus.map((s) => [s.displayId, s.location]));
+
+          const merged = new Map<string, PickLotLine>();
+          for (const li of lineItems) {
+            const existing = merged.get(li.sku);
+            if (existing) {
+              existing.totalQty += li.qty;
+              existing.perOrder.push({ orderNo: li.orderNo, customer: li.customer, qty: li.qty });
+            } else {
+              merged.set(li.sku, {
+                sku: li.sku,
+                name: li.productName,
+                unit: li.unit,
+                totalQty: li.qty,
+                location: locationBySku.get(li.sku) ?? '',
+                perOrder: [{ orderNo: li.orderNo, customer: li.customer, qty: li.qty }],
+              });
+            }
+          }
+
+          const ordersWithLines = new Set(lineItems.map((li) => li.orderNo));
+          const ordersWithNoLines = orderNos.filter((n) => !ordersWithLines.has(n));
+          const orderSummaries = orderNos.map((orderNo) => {
+            const o = byOrderNo.get(orderNo);
+            return { orderNo, customer: o?.customer ?? '', itemCount: o?.itemCount ?? 0, amount: o?.totalAmount ?? 0 };
+          });
+
+          const lot: PickLot = {
+            id: `PICK-${Date.now()}`,
+            createdAt: new Date().toISOString(),
+            orderNos,
+            orderSummaries,
+            lines: Array.from(merged.values()),
+            picked: {},
+            closed: false,
+            ordersWithNoLines,
+            statusSyncPending: [],
+          };
+
+          const nextLots = [lot, ...lots];
+          savePickLots(nextLots);
+          dispatch({ type: 'patch', patch: { pickLots: nextLots, activePickLotId: lot.id, pickCreating: false, pickSelectedOrderNos: [] } });
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : 'สร้างล็อตหยิบสินค้าไม่สำเร็จ';
+          dispatch({ type: 'patch', patch: { pickCreating: false, pickCreateError: message } });
+        }
+      },
+
+      togglePickItem: (lotId: string, sku: string, lots: PickLot[]) => {
+        const next = lots.map((l) => (l.id === lotId ? { ...l, picked: { ...l.picked, [sku]: !l.picked[sku] } } : l));
+        savePickLots(next);
+        dispatch({ type: 'patch', patch: { pickLots: next } });
+      },
+
+      /** Closing is immediate/optimistic (the physical picking is already
+       * done); the sheet status write happens after, tracked per-order in
+       * the lot's own statusSyncPending so a partial failure is visible and
+       * retryable without re-closing anything. */
+      closePickLot: (lotId: string, lots: PickLot[]) => {
+        const lot = lots.find((l) => l.id === lotId);
+        if (!lot || lot.closed) return;
+        const next = lots.map((l) => (l.id === lotId ? { ...l, closed: true, statusSyncPending: [...l.orderNos] } : l));
+        savePickLots(next);
+        dispatch({ type: 'patch', patch: { pickLots: next } });
+        syncPickLotStatus(lot.orderNos);
+      },
+      retryPickLotStatusSync: (orderNos: string[]) => syncPickLotStatus(orderNos),
+
+      openPickLot: (lotId: string) => dispatch({ type: 'patch', patch: { activePickLotId: lotId } }),
+      backToPickerHome: () => dispatch({ type: 'patch', patch: { activePickLotId: null } }),
     }),
     [],
   );

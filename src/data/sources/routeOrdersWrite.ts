@@ -6,6 +6,9 @@ export interface RouteOrderUpdatePayload {
   wantsTaxInvoice?: boolean;
   /** Stamps Status='ส่งสำเร็จ' and the delivery timestamp column with now(). */
   markDelivered?: boolean;
+  /** Sets the Status column to an arbitrary known value (see server/lib.ts's
+   * allowlist) — used when closing a batch-picking lot. */
+  status?: string;
 }
 
 /**
