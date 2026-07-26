@@ -3,7 +3,19 @@ import 'dotenv/config';
 import express from 'express';
 import multer from 'multer';
 import { DRIVE_ROOT_FOLDER_ENV, MAX_UPLOAD_BYTES } from '../src/config/drive.js';
-import { handleDriveUpload, handleHealth, handleReverseGeocode, handleUpdateCsMasterLocation, handleUpdateRouteOrder } from './lib.js';
+import {
+  handleCreateUser,
+  handleDriveUpload,
+  handleHealth,
+  handleListUsers,
+  handleLogin,
+  handleMe,
+  handleReverseGeocode,
+  handleUpdateCsMasterLocation,
+  handleUpdateRouteOrder,
+  handleUpdateUser,
+} from './lib.js';
+import { bearerToken } from './session.js';
 
 // Local dev server: thin Express wrapper around server/lib.ts. The same
 // handlers are also called from api/*.ts as Vercel serverless functions in
@@ -34,23 +46,48 @@ app.post('/api/drive/upload', (req, res) => {
     const files = (req.files ?? []) as Express.Multer.File[];
     const scope = String((req.body as Record<string, unknown>)?.scope ?? '');
     const key = String((req.body as Record<string, unknown>)?.key ?? '').trim();
-    const { status, body } = await handleDriveUpload(files, scope, key);
+    const { status, body } = await handleDriveUpload(bearerToken(req.headers.authorization), files, scope, key);
     res.status(status).json(body);
   });
 });
 
 app.post('/api/cs-master/update-location', async (req, res) => {
-  const { status, body } = await handleUpdateCsMasterLocation(req.body);
+  const { status, body } = await handleUpdateCsMasterLocation(bearerToken(req.headers.authorization), req.body);
   res.status(status).json(body);
 });
 
 app.post('/api/route-orders/update', async (req, res) => {
-  const { status, body } = await handleUpdateRouteOrder(req.body);
+  const { status, body } = await handleUpdateRouteOrder(bearerToken(req.headers.authorization), req.body);
   res.status(status).json(body);
 });
 
 app.post('/api/geocode/reverse', async (req, res) => {
   const { status, body } = await handleReverseGeocode(req.body);
+  res.status(status).json(body);
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  const { status, body } = await handleLogin(req.body);
+  res.status(status).json(body);
+});
+
+app.get('/api/auth/me', (req, res) => {
+  const { status, body } = handleMe(bearerToken(req.headers.authorization));
+  res.status(status).json(body);
+});
+
+app.get('/api/users', async (req, res) => {
+  const { status, body } = await handleListUsers(bearerToken(req.headers.authorization));
+  res.status(status).json(body);
+});
+
+app.post('/api/users/create', async (req, res) => {
+  const { status, body } = await handleCreateUser(bearerToken(req.headers.authorization), req.body);
+  res.status(status).json(body);
+});
+
+app.post('/api/users/update', async (req, res) => {
+  const { status, body } = await handleUpdateUser(bearerToken(req.headers.authorization), req.body);
   res.status(status).json(body);
 });
 

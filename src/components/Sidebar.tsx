@@ -1,5 +1,6 @@
 import type { CSSProperties } from 'react';
-import { CURRENT_USER_NAME, CURRENT_USER_ROLE } from '../config/currentUser';
+import { canAccessPage, ROLE_LABELS } from '../config/permissions';
+import type { Session } from '../data/session';
 import type { RouteKey } from '../data/types';
 import type { AppActions } from '../state/store';
 
@@ -15,6 +16,7 @@ const navDef: [RouteKey, string, string][] = [
   ['sku', 'ฐานข้อมูลสินค้า', 'ph ph-package'],
   ['customer', 'ฐานข้อมูลลูกค้า', 'ph ph-users'],
   ['activity', 'บันทึกการเปลี่ยนแปลง', 'ph ph-clock-counter-clockwise'],
+  ['users', 'จัดการผู้ใช้', 'ph ph-identification-badge'],
   ['settings', 'ตั้งค่า / API Key', 'ph ph-gear'],
 ];
 
@@ -24,7 +26,10 @@ const navBase: CSSProperties = {
   padding: '9px 11px', borderRadius: 8, transition: 'background .12s',
 };
 
-export function Sidebar({ route, actions }: { route: RouteKey; actions: AppActions }) {
+export function Sidebar({ route, actions, session }: { route: RouteKey; actions: AppActions; session: Session }) {
+  const visibleNav = navDef.filter(([key]) => canAccessPage(session.role, key));
+  const initials = session.username.slice(0, 2).toUpperCase();
+
   return (
     <aside style={{ flex: 'none', width: 236, background: 'var(--color-surface)', boxShadow: 'inset -1px 0 0 var(--color-divider)', display: 'flex', flexDirection: 'column', position: 'sticky', top: 0, height: '100vh' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '18px 16px 14px' }}>
@@ -35,7 +40,7 @@ export function Sidebar({ route, actions }: { route: RouteKey; actions: AppActio
         </div>
       </div>
       <nav style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: '6px 12px' }}>
-        {navDef.map(([key, label, icon]) => {
+        {visibleNav.map(([key, label, icon]) => {
           const active = key === route;
           const style: CSSProperties = active
             ? { ...navBase, background: 'var(--color-accent-900)', color: 'var(--color-accent-200)', boxShadow: 'inset 0 0 0 1px var(--color-accent-700)' }
@@ -49,11 +54,14 @@ export function Sidebar({ route, actions }: { route: RouteKey; actions: AppActio
         })}
       </nav>
       <div style={{ marginTop: 'auto', padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 10, boxShadow: 'inset 0 1px 0 var(--color-divider)' }}>
-        <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'var(--color-neutral-800)', display: 'grid', placeItems: 'center', color: 'var(--color-neutral-200)', fontSize: 12, fontWeight: 600 }}>AW</div>
-        <div style={{ lineHeight: 1.2, minWidth: 0 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{CURRENT_USER_NAME}</div>
-          <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)' }}>{CURRENT_USER_ROLE}</div>
+        <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'var(--color-neutral-800)', display: 'grid', placeItems: 'center', color: 'var(--color-neutral-200)', fontSize: 12, fontWeight: 600, flex: 'none' }}>{initials}</div>
+        <div style={{ lineHeight: 1.2, minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{session.username}</div>
+          <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)' }}>{ROLE_LABELS[session.role] ?? session.role}</div>
         </div>
+        <button className="btn btn-icon btn-ghost" title="ออกจากระบบ" onClick={() => actions.logout()}>
+          <i className="ph ph-sign-out" style={{ fontSize: 16 }} />
+        </button>
       </div>
     </aside>
   );

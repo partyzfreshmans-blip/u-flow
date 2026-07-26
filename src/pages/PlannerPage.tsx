@@ -55,12 +55,14 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
         <span style={{ color: 'var(--color-neutral-400)' }}>ออกจริงวันนี้ {v.activeCrew} คน</span>
         <span style={{ color: 'var(--color-neutral-400)' }}>จัดลงรถแล้ว {v.plannedStops} จุด</span>
         <span style={{ color: v.unassignedCount > 0 ? 'var(--st-warn-fg)' : 'var(--color-neutral-500)' }}>ยังไม่จัด {v.unassignedCount} จุด</span>
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button className="btn btn-secondary" onClick={v.openZones}><i className="ph ph-path" />ตั้งค่าโซน</button>
-          <button className="btn btn-secondary" onClick={v.openVehicles}><i className="ph ph-truck" />จัดการรถ</button>
-          <button className="btn btn-primary" onClick={v.suggestByZone} disabled={v.unassignedCount === 0}><i className="ph ph-magic-wand" />จัดอัตโนมัติตามโซน</button>
-          <button className="btn btn-secondary" onClick={v.clearAll} disabled={v.plannedStops === 0}><i className="ph ph-eraser" />ล้างแผน</button>
-        </div>
+        {v.canEdit && (
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button className="btn btn-secondary" onClick={v.openZones}><i className="ph ph-path" />ตั้งค่าโซน</button>
+            <button className="btn btn-secondary" onClick={v.openVehicles}><i className="ph ph-truck" />จัดการรถ</button>
+            <button className="btn btn-primary" onClick={v.suggestByZone} disabled={v.unassignedCount === 0}><i className="ph ph-magic-wand" />จัดอัตโนมัติตามโซน</button>
+            <button className="btn btn-secondary" onClick={v.clearAll} disabled={v.plannedStops === 0}><i className="ph ph-eraser" />ล้างแผน</button>
+          </div>
+        )}
       </div>
 
       {/* COD overview — collection status across every route going out */}
@@ -75,7 +77,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
       )}
 
       {/* zone editor */}
-      {v.configTab === 'zones' && (
+      {v.canEdit && v.configTab === 'zones' && (
         <div className="card elev-sm" style={{ marginBottom: 16, gap: 10 }}>
           <div style={{ fontWeight: 600, fontSize: 14 }}>โซนจัดส่ง — แก้ไข เพิ่ม หรือลบได้</div>
           <div style={{ fontSize: 11, color: 'var(--color-neutral-500)', lineHeight: 1.5 }}>
@@ -122,7 +124,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
       )}
 
       {/* vehicle editor */}
-      {v.configTab === 'vehicles' && (
+      {v.canEdit && v.configTab === 'vehicles' && (
         <div className="card elev-sm" style={{ marginBottom: 16, gap: 10 }}>
           <div style={{ fontWeight: 600, fontSize: 14 }}>รถจัดส่ง — เพิ่ม ลด และบันทึกจำนวนคน</div>
           <table className="table">
@@ -168,17 +170,17 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
               key={veh.id}
               className="card elev-sm"
               style={{ gap: 10, boxShadow: dragOverVehicleId === veh.id ? 'inset 0 0 0 2px var(--color-accent-700)' : undefined }}
-              onDragOver={(e) => {
+              onDragOver={v.canEdit ? (e) => {
                 e.preventDefault();
                 setDragOverVehicleId(veh.id);
-              }}
-              onDragLeave={() => setDragOverVehicleId((cur) => (cur === veh.id ? null : cur))}
-              onDrop={(e) => {
+              } : undefined}
+              onDragLeave={v.canEdit ? () => setDragOverVehicleId((cur) => (cur === veh.id ? null : cur)) : undefined}
+              onDrop={v.canEdit ? (e) => {
                 e.preventDefault();
                 setDragOverVehicleId(null);
                 const data = readDragPayload(e);
                 if (data) v.moveOrderToVehicle(data.orderNo, data.fromVehicleId, veh.id, null);
-              }}
+              } : undefined}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                 <span style={{ width: 34, height: 26, borderRadius: 6, background: 'var(--color-accent)', color: '#fff', display: 'grid', placeItems: 'center', fontWeight: 700, fontSize: 12 }}>{veh.loadPrefix}</span>
@@ -196,10 +198,14 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                       <span style={veh.codDiffStyle}>{veh.codDiffText}</span>
                     </span>
                   )}
-                  <button className="btn btn-secondary" style={{ minHeight: 30 }} onClick={veh.autoSequence} disabled={veh.stopCount < 2} title={veh.autoSequenceTitle}>
-                    <i className={veh.autoSequenceIcon} />{veh.autoSequenceLabel}
-                  </button>
-                  <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={veh.clear} disabled={veh.stopCount === 0}>เอาออกทั้งหมด</button>
+                  {v.canEdit && (
+                    <button className="btn btn-secondary" style={{ minHeight: 30 }} onClick={veh.autoSequence} disabled={veh.stopCount < 2} title={veh.autoSequenceTitle}>
+                      <i className={veh.autoSequenceIcon} />{veh.autoSequenceLabel}
+                    </button>
+                  )}
+                  {v.canEdit && (
+                    <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={veh.clear} disabled={veh.stopCount === 0}>เอาออกทั้งหมด</button>
+                  )}
                 </div>
               </div>
 
@@ -218,24 +224,24 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                     {veh.stops.map((s) => (
                       <tr
                         key={s.orderNo}
-                        draggable
-                        onDragStart={(e) => {
+                        draggable={v.canEdit}
+                        onDragStart={v.canEdit ? (e) => {
                           e.dataTransfer.setData(DRAG_MIME, JSON.stringify({ orderNo: s.orderNo, fromVehicleId: veh.id }));
                           e.dataTransfer.effectAllowed = 'move';
-                        }}
-                        onDragOver={(e) => {
+                        } : undefined}
+                        onDragOver={v.canEdit ? (e) => {
                           e.preventDefault();
                           e.stopPropagation();
                           setDragOverVehicleId(veh.id);
-                        }}
-                        onDrop={(e) => {
+                        } : undefined}
+                        onDrop={v.canEdit ? (e) => {
                           e.preventDefault();
                           e.stopPropagation();
                           setDragOverVehicleId(null);
                           const data = readDragPayload(e);
                           if (data) v.moveOrderToVehicle(data.orderNo, data.fromVehicleId, veh.id, s.seq - 1);
-                        }}
-                        style={{ cursor: 'grab' }}
+                        } : undefined}
+                        style={v.canEdit ? { cursor: 'grab' } : undefined}
                       >
                         <td style={{ textAlign: 'center', color: 'var(--color-neutral-600)' }}><i className="ph ph-dots-six-vertical" /></td>
                         <td style={{ textAlign: 'center', fontWeight: 600 }}>{s.seq}</td>
@@ -252,40 +258,48 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                         <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{s.amtText}</td>
                         <td>
                           {s.isCod ? (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                              <label className="seg-opt" style={{ fontSize: 10.5 }}>
-                                <input type="radio" checked={s.codMethod === 'cash'} onChange={s.setCodCash} />สด
-                              </label>
-                              <label className="seg-opt" style={{ fontSize: 10.5 }}>
-                                <input type="radio" checked={s.codMethod === 'transfer'} onChange={s.setCodTransfer} />โอน
-                              </label>
-                              {s.codMethod === 'cash' && (
-                                <input className="input" style={{ minHeight: 26, width: 70, fontSize: 11 }} inputMode="numeric" placeholder="เก็บได้" value={s.codCollected} onChange={(e) => s.onCodCollected(e.target.value)} />
-                              )}
-                            </div>
+                            v.canEdit ? (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                <label className="seg-opt" style={{ fontSize: 10.5 }}>
+                                  <input type="radio" checked={s.codMethod === 'cash'} onChange={s.setCodCash} />สด
+                                </label>
+                                <label className="seg-opt" style={{ fontSize: 10.5 }}>
+                                  <input type="radio" checked={s.codMethod === 'transfer'} onChange={s.setCodTransfer} />โอน
+                                </label>
+                                {s.codMethod === 'cash' && (
+                                  <input className="input" style={{ minHeight: 26, width: 70, fontSize: 11 }} inputMode="numeric" placeholder="เก็บได้" value={s.codCollected} onChange={(e) => s.onCodCollected(e.target.value)} />
+                                )}
+                              </div>
+                            ) : (
+                              <span style={{ fontSize: 11, color: 'var(--color-neutral-400)' }}>{s.codMethod === 'transfer' ? 'โอน' : `สด ${s.codCollected || 0}`}</span>
+                            )
                           ) : (
                             <span style={{ fontSize: 11, color: 'var(--color-neutral-600)' }}>—</span>
                           )}
                         </td>
                         <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums' }}>{s.distanceText}</td>
                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                          <button className="btn btn-icon btn-ghost" onClick={s.moveUp} title="เลื่อนขึ้น"><i className="ph ph-caret-up" style={{ fontSize: 12 }} /></button>
-                          <button className="btn btn-icon btn-ghost" onClick={s.moveDown} title="เลื่อนลง"><i className="ph ph-caret-down" style={{ fontSize: 12 }} /></button>
-                          <button className="btn btn-icon btn-ghost" onClick={s.remove} title="เอาออก"><i className="ph ph-x" style={{ fontSize: 12 }} /></button>
-                          <select
-                            className="input"
-                            style={{ minHeight: 26, fontSize: 10.5, width: 96, display: 'inline-block', marginLeft: 4 }}
-                            value=""
-                            onChange={(e) => {
-                              if (e.target.value) s.moveToVehicle(e.target.value);
-                            }}
-                            title="ย้ายไปรถคันอื่น"
-                          >
-                            <option value="">ย้ายไป...</option>
-                            {state.vehicles.filter((x) => x.id !== veh.id).map((x) => (
-                              <option key={x.id} value={x.id}>{x.name}</option>
-                            ))}
-                          </select>
+                          {v.canEdit && (
+                            <>
+                              <button className="btn btn-icon btn-ghost" onClick={s.moveUp} title="เลื่อนขึ้น"><i className="ph ph-caret-up" style={{ fontSize: 12 }} /></button>
+                              <button className="btn btn-icon btn-ghost" onClick={s.moveDown} title="เลื่อนลง"><i className="ph ph-caret-down" style={{ fontSize: 12 }} /></button>
+                              <button className="btn btn-icon btn-ghost" onClick={s.remove} title="เอาออก"><i className="ph ph-x" style={{ fontSize: 12 }} /></button>
+                              <select
+                                className="input"
+                                style={{ minHeight: 26, fontSize: 10.5, width: 96, display: 'inline-block', marginLeft: 4 }}
+                                value=""
+                                onChange={(e) => {
+                                  if (e.target.value) s.moveToVehicle(e.target.value);
+                                }}
+                                title="ย้ายไปรถคันอื่น"
+                              >
+                                <option value="">ย้ายไป...</option>
+                                {state.vehicles.filter((x) => x.id !== veh.id).map((x) => (
+                                  <option key={x.id} value={x.id}>{x.name}</option>
+                                ))}
+                              </select>
+                            </>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -296,6 +310,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
           ))}
 
           {/* unassigned pool */}
+          {v.canEdit && (
           <div className="card elev-sm" style={{ gap: 10 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
               <div style={{ fontWeight: 600, fontSize: 14 }}>ออเดอร์ที่ยังไม่จัดลงรถ ({v.unassignedCount})</div>
@@ -377,6 +392,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
               </table>
             )}
           </div>
+          )}
         </div>
 
         {/* map */}

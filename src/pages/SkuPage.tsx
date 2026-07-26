@@ -1,8 +1,10 @@
+import { canEditPage } from '../config/permissions';
 import { computeSku } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 
 export function SkuPage({ state, actions }: { state: AppState; actions: AppActions }) {
   const v = computeSku(state, actions);
+  const canEdit = state.session ? canEditPage(state.session.role, 'sku') : false;
 
   return (
     <div>
@@ -11,7 +13,7 @@ export function SkuPage({ state, actions }: { state: AppState; actions: AppActio
           <i className="ph ph-magnifying-glass" style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', fontSize: 15, color: 'var(--color-neutral-500)' }} />
           <input className="input" style={{ paddingLeft: 32 }} placeholder="ค้นหา SKU / บาร์โค้ด / ชื่อสินค้า" value={v.skuQ} onChange={(e) => v.onSkuSearch(e.target.value)} />
         </div>
-        <button className="btn btn-primary" style={{ marginLeft: 'auto' }} onClick={v.openAddSku}><i className="ph ph-plus" />เพิ่มสินค้าใหม่</button>
+        {canEdit && <button className="btn btn-primary" style={{ marginLeft: 'auto' }} onClick={v.openAddSku}><i className="ph ph-plus" />เพิ่มสินค้าใหม่</button>}
       </div>
 
       {v.skusLoading && (
@@ -42,7 +44,7 @@ export function SkuPage({ state, actions }: { state: AppState; actions: AppActio
                 <td style={{ color: 'var(--color-neutral-400)' }}>{s.unit}</td>
                 <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', ...s.stockStyle }}>{s.stockText}</td>
                 <td><span style={s.stStyle}>{s.stLabel}</span></td>
-                <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={s.edit}>แก้ไข</button></td>
+                <td style={{ textAlign: 'right' }}>{canEdit && <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={s.edit}>แก้ไข</button>}</td>
               </tr>
             ))}
           </tbody>

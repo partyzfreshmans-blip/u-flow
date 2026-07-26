@@ -1,8 +1,10 @@
+import { canEditPage } from '../config/permissions';
 import { computePromo } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 
 export function PromoPage({ state, actions }: { state: AppState; actions: AppActions }) {
   const v = computePromo(state, actions);
+  const canEdit = state.session ? canEditPage(state.session.role, 'promo') : false;
 
   return (
     <div>
@@ -11,7 +13,7 @@ export function PromoPage({ state, actions }: { state: AppState; actions: AppAct
           <i className="ph ph-magnifying-glass" style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', fontSize: 15, color: 'var(--color-neutral-500)' }} />
           <input className="input" style={{ paddingLeft: 32 }} placeholder="ค้นหาตาม SKU หรือชื่อสินค้า" value={v.promoQ} onChange={(e) => v.onPromoSearch(e.target.value)} />
         </div>
-        <button className="btn btn-primary" style={{ marginLeft: 'auto' }} onClick={v.openPromo}><i className="ph ph-plus" />สร้างโปรโมชั่น</button>
+        {canEdit && <button className="btn btn-primary" style={{ marginLeft: 'auto' }} onClick={v.openPromo}><i className="ph ph-plus" />สร้างโปรโมชั่น</button>}
       </div>
 
       <div className="card elev-sm" style={{ padding: '4px 14px 8px' }}>
@@ -41,7 +43,7 @@ export function PromoPage({ state, actions }: { state: AppState; actions: AppAct
                 </td>
                 <td style={{ fontSize: 12.5, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums' }}>{p.period}</td>
                 <td><span style={p.stStyle}>{p.stLabel}</span></td>
-                <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12 }}>แก้ไข</button></td>
+                <td style={{ textAlign: 'right' }}>{canEdit && <button className="btn btn-ghost" style={{ fontSize: 12 }}>แก้ไข</button>}</td>
               </tr>
             ))}
           </tbody>

@@ -1,3 +1,5 @@
+import { authHeaders, loadSession } from '../session';
+
 export interface RouteOrderUpdatePayload {
   orderNo: string;
   /** ISO YYYY-MM-DD — converted server-side to the sheet's own M/D/YYYY text. */
@@ -22,7 +24,7 @@ export async function updateRouteOrder(payload: RouteOrderUpdatePayload): Promis
   try {
     res = await fetch('/api/route-orders/update', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders(loadSession()) },
       body: JSON.stringify(payload),
     });
   } catch {

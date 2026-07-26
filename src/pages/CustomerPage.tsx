@@ -1,8 +1,10 @@
+import { canEditCustomerLatLng } from '../config/permissions';
 import { computeCustomer } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 
 export function CustomerPage({ state, actions }: { state: AppState; actions: AppActions }) {
   const v = computeCustomer(state, actions);
+  const canEditLatLng = state.session ? canEditCustomerLatLng(state.session.role) : false;
 
   return (
     <div>
@@ -48,7 +50,7 @@ export function CustomerPage({ state, actions }: { state: AppState; actions: App
                 </td>
                 <td style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{c.wantsTaxInvoice || '—'}</td>
                 <td style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', maxWidth: 160 }}>{c.note || '—'}</td>
-                <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={c.edit}>แก้พิกัด</button></td>
+                <td style={{ textAlign: 'right' }}>{canEditLatLng && <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={c.edit}>แก้พิกัด</button>}</td>
               </tr>
             ))}
           </tbody>

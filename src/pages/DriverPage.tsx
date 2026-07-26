@@ -5,9 +5,10 @@ import type { AppActions, AppState } from '../state/store';
  * Reuses computePlanner's per-vehicle stop derivation directly so it can
  * never drift from what the desktop planner shows for the same vehicle. */
 export function DriverPage({ state, actions }: { state: AppState; actions: AppActions }) {
-  const v = computePlanner(state, actions);
+  const v = computePlanner(state, actions); // vehicles is already scoped to just this driver's own vehicle when role === 'driver'
   const veh = v.vehicles.find((x) => x.id === state.driverVehicleId) ?? null;
   const pendingSyncCount = state.driverSyncQueue.length;
+  const isDriverRole = state.session?.role === 'driver';
 
   const connectionBanner = (!state.driverOnline || pendingSyncCount > 0) && (
     <div style={{ margin: '10px 12px 0', padding: '9px 12px', borderRadius: 10, background: 'var(--st-warn-bg)', color: 'var(--st-warn-fg)', fontSize: 12, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -26,10 +27,17 @@ export function DriverPage({ state, actions }: { state: AppState; actions: AppAc
     return (
       <div style={{ minHeight: '100vh', background: 'var(--color-bg)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '16px 16px 6px' }}>
-          <button className="btn btn-icon btn-secondary" onClick={() => actions.patch({ route: 'dashboard' })} title="กลับหน้าแอดมิน">
-            <i className="ph ph-arrow-left" />
-          </button>
-          <div style={{ fontWeight: 700, fontSize: 18 }}>เลือกคันรถ</div>
+          {!isDriverRole && (
+            <button className="btn btn-icon btn-secondary" onClick={() => actions.patch({ route: 'dashboard' })} title="กลับหน้าแอดมิน">
+              <i className="ph ph-arrow-left" />
+            </button>
+          )}
+          <div style={{ fontWeight: 700, fontSize: 18, flex: 1 }}>เลือกคันรถ</div>
+          {isDriverRole && (
+            <button className="btn btn-icon btn-secondary" onClick={() => actions.logout()} title="ออกจากระบบ">
+              <i className="ph ph-sign-out" />
+            </button>
+          )}
         </div>
         {connectionBanner}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: 16 }}>
@@ -59,16 +67,25 @@ export function DriverPage({ state, actions }: { state: AppState; actions: AppAc
     <div style={{ minHeight: '100vh', background: 'var(--color-bg)', paddingBottom: 40 }}>
       <div style={{ position: 'sticky', top: 0, zIndex: 5, background: 'var(--color-surface)', boxShadow: 'inset 0 -1px 0 var(--color-divider)', padding: '14px 16px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <button className="btn btn-icon btn-secondary" onClick={() => actions.setDriverVehicle(null)} title="เลือกคันอื่น">
-            <i className="ph ph-arrow-left" />
-          </button>
+          {!isDriverRole && (
+            <button className="btn btn-icon btn-secondary" onClick={() => actions.setDriverVehicle(null)} title="เลือกคันอื่น">
+              <i className="ph ph-arrow-left" />
+            </button>
+          )}
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontWeight: 700, fontSize: 16 }}>{veh.name}</div>
             <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)' }}>{veh.stopCount} จุด · {veh.totalText}</div>
           </div>
-          <button className="btn btn-icon btn-secondary" onClick={() => actions.patch({ route: 'dashboard' })} title="กลับหน้าแอดมิน">
-            <i className="ph ph-x" />
-          </button>
+          {!isDriverRole && (
+            <button className="btn btn-icon btn-secondary" onClick={() => actions.patch({ route: 'dashboard' })} title="กลับหน้าแอดมิน">
+              <i className="ph ph-x" />
+            </button>
+          )}
+          {isDriverRole && (
+            <button className="btn btn-icon btn-secondary" onClick={() => actions.logout()} title="ออกจากระบบ">
+              <i className="ph ph-sign-out" />
+            </button>
+          )}
         </div>
         {veh.codCount > 0 && (
           <div style={{ marginTop: 10, padding: '10px 12px', borderRadius: 10, background: 'var(--color-bg)', fontSize: 12.5, display: 'flex', gap: 12, flexWrap: 'wrap' }}>

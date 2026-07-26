@@ -27,7 +27,9 @@ import { loadLastSyncAt, saveLastSyncAt } from '../data/syncMeta';
 import { appendNotificationEvents, loadNotificationEvents, loadNotificationReadIds, saveNotificationReadIds, type NotificationEvent } from '../data/notifications';
 import { appendActivityLog, loadActivityLog, type ActivityLogEntry } from '../data/activityLog';
 import { loadSidebarCollapsed, saveSidebarCollapsed } from '../data/sidebarState';
-import { CURRENT_USER_NAME } from '../config/currentUser';
+import { clearSession, loadSession, saveSession, type Session } from '../data/session';
+import { createUser as apiCreateUser, fetchUsers as apiFetchUsers, login as apiLogin, updateUser as apiUpdateUser, type UserListRow } from '../data/sources/authApi';
+import { defaultRouteFor, type Role } from '../config/permissions';
 
 export interface OrderEditDraft {
   /** ISO YYYY-MM-DD, '' = not set. */
@@ -232,20 +234,47 @@ export interface AppState {
 
   // sidebar collapse (mobile-friendly + optional on desktop)
   sidebarCollapsed: boolean;
+
+  // authentication — null session = show the login page instead of the app
+  session: Session | null;
+  authLoading: boolean;
+  authError: string | null;
+
+  // user management (Administrator: full CRUD; Manager: read-only roster)
+  users: UserListRow[];
+  usersLoading: boolean;
+  usersError: string | null;
 }
 
 /** ?driver=<vehicleId> jumps straight into the mobile driver view for that
  * vehicle — the one bit of real browser-URL-based deep-linking this app
  * has, since the driver page is meant to be a link a driver can open
- * directly rather than something they navigate the whole admin app to find. */
+ * directly rather than something they navigate the whole admin app to find.
+ * Only takes effect for a signed-out visitor or a non-driver account — an
+ * authenticated driver always lands on their OWN assigned vehicle (see
+ * initialSession below), never whatever vehicleId a URL happens to name, so
+ * this link can't be reused to peek at someone else's route. */
 function initialRouteFromUrl(): Pick<AppState, 'route' | 'driverVehicleId'> {
   if (typeof window === 'undefined') return { route: 'dashboard', driverVehicleId: null };
   const vehicleId = new URLSearchParams(window.location.search).get('driver');
   return vehicleId ? { route: 'driver', driverVehicleId: vehicleId } : { route: 'dashboard', driverVehicleId: null };
 }
 
+/** Restores a still-valid session from localStorage synchronously at module
+ * load (a plain localStorage read, no need for an effect+flash of the login
+ * page) and, when one exists, routes straight to that role's default page —
+ * this is what actually enforces "a driver session always opens the driver
+ * view," overriding whatever the URL alone would have picked. */
+function initialSession(): Pick<AppState, 'session' | 'route' | 'driverVehicleId'> {
+  if (typeof window === 'undefined') return { session: null, route: 'dashboard', driverVehicleId: null };
+  const session = loadSession();
+  if (!session) return { session: null, route: 'dashboard', driverVehicleId: null };
+  return { session, route: defaultRouteFor(session.role), driverVehicleId: session.role === 'driver' ? session.driverVehicleId : null };
+}
+
 export const initialState: AppState = {
   ...initialRouteFromUrl(),
+  ...initialSession(),
 
   apiOrders: [],
   apiOrdersLoading: true,
@@ -369,6 +398,13 @@ export const initialState: AppState = {
   activityLogQ: '',
 
   sidebarCollapsed: false,
+
+  authLoading: false,
+  authError: null,
+
+  users: [],
+  usersLoading: false,
+  usersError: null,
 };
 
 export type Action =
@@ -555,9 +591,10 @@ export function useAppStore() {
    * meaningful (order edits, planner moves, pick-lot closes, lat/lng fixes,
    * receiving, attachments) — see each action below. */
   function logActivity(action: string, detail: string, orderNo?: string) {
+    const username = loadSession()?.username ?? 'ไม่ทราบผู้ใช้';
     dispatch({
       type: 'patch',
-      patch: { activityLog: appendActivityLog(loadActivityLog(), { user: CURRENT_USER_NAME, action, detail, orderNo }) },
+      patch: { activityLog: appendActivityLog(loadActivityLog(), { user: username, action, detail, orderNo }) },
     });
   }
 
@@ -1275,6 +1312,63 @@ export function useAppStore() {
         const next = !collapsed;
         saveSidebarCollapsed(next);
         dispatch({ type: 'patch', patch: { sidebarCollapsed: next } });
+      },
+
+      login: async (username: string, password: string) => {
+        dispatch({ type: 'patch', patch: { authLoading: true, authError: null } });
+        try {
+          const session = await apiLogin(username, password);
+          saveSession(session);
+          dispatch({
+            type: 'patch',
+            patch: {
+              authLoading: false,
+              authError: null,
+              session,
+              route: defaultRouteFor(session.role),
+              driverVehicleId: session.role === 'driver' ? session.driverVehicleId : null,
+            },
+          });
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : 'เข้าสู่ระบบไม่สำเร็จ';
+          dispatch({ type: 'patch', patch: { authLoading: false, authError: message } });
+        }
+      },
+      logout: () => {
+        clearSession();
+        // Full reload rather than just patching state to null — every page's
+        // in-memory data (routeOrders, apiOrders, etc.) belonged to whoever
+        // was logged in; a clean reload is the simplest way to guarantee none
+        // of it lingers on screen for the next person who logs in on this device.
+        window.location.href = window.location.pathname;
+      },
+      clearAuthError: () => dispatch({ type: 'patch', patch: { authError: null } }),
+
+      loadUsers: async () => {
+        const session = loadSession();
+        if (!session) return;
+        dispatch({ type: 'patch', patch: { usersLoading: true, usersError: null } });
+        try {
+          const users = await apiFetchUsers(session);
+          dispatch({ type: 'patch', patch: { users, usersLoading: false } });
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : 'โหลดรายชื่อผู้ใช้ไม่สำเร็จ';
+          dispatch({ type: 'patch', patch: { usersLoading: false, usersError: message } });
+        }
+      },
+      createUserAccount: async (input: { username: string; password: string; role: Role; driverVehicleId: string }) => {
+        const session = loadSession();
+        if (!session) throw new Error('ต้องเข้าสู่ระบบก่อน');
+        await apiCreateUser(session, input);
+        const users = await apiFetchUsers(session);
+        dispatch({ type: 'patch', patch: { users } });
+      },
+      updateUserAccount: async (input: { username: string; role?: Role; active?: boolean; driverVehicleId?: string; newPassword?: string }) => {
+        const session = loadSession();
+        if (!session) throw new Error('ต้องเข้าสู่ระบบก่อน');
+        await apiUpdateUser(session, input);
+        const users = await apiFetchUsers(session);
+        dispatch({ type: 'patch', patch: { users } });
       },
     }),
     [],

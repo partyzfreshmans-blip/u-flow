@@ -1,4 +1,4 @@
-import { handleUpdateRouteOrder } from '../../server/lib.js';
+import { handleUpdateUser } from '../../server/lib.js';
 import { bearerToken } from '../../server/session.js';
 import type { ApiRequest, ApiResponse } from '../_types.js';
 
@@ -7,6 +7,6 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     res.status(405).json({ error: 'Method not allowed' });
     return;
   }
-  const { status, body } = await handleUpdateRouteOrder(bearerToken(req.headers.authorization), req.body);
+  const { status, body } = await handleUpdateUser(bearerToken(req.headers.authorization), req.body);
   res.status(status).json(body);
 }

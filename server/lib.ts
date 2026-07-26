@@ -1,8 +1,10 @@
 import { google } from 'googleapis';
+import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { DRIVE_ROOT_FOLDER_ENV, driveFolderPath, isAllowedFile, type AttachmentScope } from '../src/config/drive.js';
 import { GEOCODE_MIN_INTERVAL_MS, NOMINATIM_REVERSE_URL, NOMINATIM_USER_AGENT } from '../src/config/geocoding.js';
 import { MAIN_SHEET_ID, SHEET_TABS } from '../src/config/sheets.js';
+import { createSessionToken, verifySessionToken } from './session.js';
 
 // Shared core for the backend that needs Google credentials: the CS Master
 // lat/lng write-back, order edit write-back, and Drive uploads. Framework
@@ -166,6 +168,236 @@ function phoneKey(v: string): string {
   return v.replace(/\D/g, '').slice(-9);
 }
 
+// ---------- Users / authentication ----------
+//
+// User accounts (username, hashed password, role) live in their own "Users"
+// tab on the main spreadsheet, created on first use. Unlike every other tab
+// this backend reads, it is NEVER exposed through a public CSV export URL —
+// the frontend only ever reaches it through these authenticated handlers, so
+// simply knowing the tab's gid can't leak a password hash the way it could
+// for a CSV-exported tab. The one residual risk this doesn't close: anyone
+// who already has direct "Viewer" access to the underlying Google Sheet
+// file itself (via Google's own sharing, not this app) could open it and
+// see the Users tab. That's a real trade-off of using a spreadsheet as the
+// user store instead of a dedicated database — acceptable for this app's
+// current scale, but worth knowing about.
+const USERS_TAB_TITLE = 'Users';
+const USERS_HEADER = ['username', 'passwordHash', 'role', 'active', 'driverVehicleId', 'createdAt'];
+export const VALID_ROLES = ['administrator', 'manager', 'admin_staff', 'checker', 'picker', 'driver'] as const;
+export type ValidRole = (typeof VALID_ROLES)[number];
+
+function hashPassword(password: string): string {
+  const salt = randomBytes(16).toString('hex');
+  const hash = scryptSync(password, salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+
+function verifyPassword(password: string, stored: string): boolean {
+  const [salt, hashHex] = stored.split(':');
+  if (!salt || !hashHex) return false;
+  const computed = scryptSync(password, salt, 64);
+  let storedHash: Buffer;
+  try {
+    storedHash = Buffer.from(hashHex, 'hex');
+  } catch {
+    return false;
+  }
+  return computed.length === storedHash.length && timingSafeEqual(computed, storedHash);
+}
+
+interface UserRecord {
+  rowIndex: number;
+  username: string;
+  passwordHash: string;
+  role: string;
+  active: boolean;
+  driverVehicleId: string;
+  createdAt: string;
+}
+
+type SheetsClient = Awaited<ReturnType<typeof getSheetsClient>>;
+
+/** Creates the Users tab (with header row) and seeds one throwaway test
+ * account per role the very first time anything touches it. Idempotent —
+ * a no-op once the tab already exists. */
+async function ensureUsersSheet(sheets: SheetsClient): Promise<void> {
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: MAIN_SHEET_ID });
+  const exists = meta.data.sheets?.some((s) => s.properties?.title === USERS_TAB_TITLE);
+  if (exists) return;
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: MAIN_SHEET_ID,
+    requestBody: { requests: [{ addSheet: { properties: { title: USERS_TAB_TITLE } } }] },
+  });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: MAIN_SHEET_ID,
+    range: `${USERS_TAB_TITLE}!A1:F1`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [USERS_HEADER] },
+  });
+
+  // One example account per role, so there's something to log in with
+  // immediately after this ships. These are throwaway testing credentials —
+  // rotate (or delete and recreate) them before relying on this for
+  // anything beyond a first smoke test.
+  const seeds: { username: string; password: string; role: ValidRole; driverVehicleId: string }[] = [
+    { username: 'admin', password: 'Admin#2026', role: 'administrator', driverVehicleId: '' },
+    { username: 'manager1', password: 'Manager#2026', role: 'manager', driverVehicleId: '' },
+    { username: 'staff1', password: 'Staff#2026', role: 'admin_staff', driverVehicleId: '' },
+    { username: 'checker1', password: 'Checker#2026', role: 'checker', driverVehicleId: '' },
+    { username: 'picker1', password: 'Picker#2026', role: 'picker', driverVehicleId: '' },
+    { username: 'driver1', password: 'Driver#2026', role: 'driver', driverVehicleId: 'veh-a' },
+  ];
+  const rows = seeds.map((s) => [s.username, hashPassword(s.password), s.role, 'TRUE', s.driverVehicleId, new Date().toISOString()]);
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: MAIN_SHEET_ID,
+    range: `${USERS_TAB_TITLE}!A:F`,
+    valueInputOption: 'RAW',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values: rows },
+  });
+}
+
+async function readUsers(sheets: SheetsClient): Promise<UserRecord[]> {
+  await ensureUsersSheet(sheets);
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${USERS_TAB_TITLE}!A:F` });
+  const rows = res.data.values ?? [];
+  const out: UserRecord[] = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i] ?? [];
+    const username = String(r[0] ?? '').trim();
+    if (!username) continue;
+    out.push({
+      rowIndex: i + 1,
+      username,
+      passwordHash: String(r[1] ?? ''),
+      role: String(r[2] ?? '').trim(),
+      active: String(r[3] ?? '').trim().toUpperCase() === 'TRUE',
+      driverVehicleId: String(r[4] ?? '').trim(),
+      createdAt: String(r[5] ?? '').trim(),
+    });
+  }
+  return out;
+}
+
+export async function handleLogin(body: unknown): Promise<ApiResult> {
+  const { username, password } = (body ?? {}) as Record<string, unknown>;
+  if (typeof username !== 'string' || !username.trim() || typeof password !== 'string' || !password) {
+    return { status: 400, body: { error: 'ต้องระบุ username และ password' } };
+  }
+  try {
+    const sheets = await getSheetsClient();
+    const users = await readUsers(sheets);
+    const user = users.find((u) => u.username.toLowerCase() === username.trim().toLowerCase());
+    if (!user || !user.active || !verifyPassword(password, user.passwordHash)) {
+      return { status: 401, body: { error: 'username หรือ password ไม่ถูกต้อง' } };
+    }
+    const token = createSessionToken(user.username, user.role, user.driverVehicleId || null);
+    return { status: 200, body: { token, username: user.username, role: user.role, driverVehicleId: user.driverVehicleId || null } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'เข้าสู่ระบบไม่สำเร็จ';
+    console.error('[auth/login]', message);
+    return { status: 500, body: { error: message } };
+  }
+}
+
+export function handleMe(token: string | null): ApiResult {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'session หมดอายุหรือไม่ถูกต้อง กรุณาเข้าสู่ระบบใหม่' } };
+  return { status: 200, body: { username: payload.username, role: payload.role, driverVehicleId: payload.driverVehicleId } };
+}
+
+export async function handleListUsers(token: string | null): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (payload.role !== 'administrator' && payload.role !== 'manager') {
+    return { status: 403, body: { error: 'ไม่มีสิทธิ์เข้าถึงหน้านี้' } };
+  }
+  try {
+    const sheets = await getSheetsClient();
+    const users = await readUsers(sheets);
+    return {
+      status: 200,
+      body: { users: users.map((u) => ({ username: u.username, role: u.role, active: u.active, driverVehicleId: u.driverVehicleId, createdAt: u.createdAt })) },
+    };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'โหลดรายชื่อผู้ใช้ไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
+}
+
+export async function handleCreateUser(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (payload.role !== 'administrator') return { status: 403, body: { error: 'เฉพาะ Administrator เท่านั้นที่สร้างผู้ใช้ได้' } };
+
+  const { username, password, role, driverVehicleId } = (body ?? {}) as Record<string, unknown>;
+  if (typeof username !== 'string' || !username.trim()) return { status: 400, body: { error: 'ต้องระบุ username' } };
+  if (typeof password !== 'string' || password.length < 8) return { status: 400, body: { error: 'password ต้องมีอย่างน้อย 8 ตัวอักษร' } };
+  if (typeof role !== 'string' || !(VALID_ROLES as readonly string[]).includes(role)) {
+    return { status: 400, body: { error: `role ต้องเป็นหนึ่งใน ${VALID_ROLES.join(', ')}` } };
+  }
+
+  try {
+    const sheets = await getSheetsClient();
+    const users = await readUsers(sheets);
+    if (users.some((u) => u.username.toLowerCase() === username.trim().toLowerCase())) {
+      return { status: 409, body: { error: `username "${username}" มีอยู่แล้ว` } };
+    }
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: MAIN_SHEET_ID,
+      range: `${USERS_TAB_TITLE}!A:F`,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: {
+        values: [[username.trim(), hashPassword(password), role, 'TRUE', typeof driverVehicleId === 'string' ? driverVehicleId : '', new Date().toISOString()]],
+      },
+    });
+    return { status: 200, body: { ok: true } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'สร้างผู้ใช้ไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
+}
+
+export async function handleUpdateUser(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (payload.role !== 'administrator') return { status: 403, body: { error: 'เฉพาะ Administrator เท่านั้นที่แก้ไขผู้ใช้ได้' } };
+
+  const { username, role, active, driverVehicleId, newPassword } = (body ?? {}) as Record<string, unknown>;
+  if (typeof username !== 'string' || !username.trim()) return { status: 400, body: { error: 'ต้องระบุ username' } };
+  if (role !== undefined && !(VALID_ROLES as readonly string[]).includes(role as string)) {
+    return { status: 400, body: { error: `role ต้องเป็นหนึ่งใน ${VALID_ROLES.join(', ')}` } };
+  }
+  if (newPassword !== undefined && (typeof newPassword !== 'string' || newPassword.length < 8)) {
+    return { status: 400, body: { error: 'password ใหม่ต้องมีอย่างน้อย 8 ตัวอักษร' } };
+  }
+
+  try {
+    const sheets = await getSheetsClient();
+    const users = await readUsers(sheets);
+    const user = users.find((u) => u.username.toLowerCase() === username.trim().toLowerCase());
+    if (!user) return { status: 404, body: { error: `ไม่พบผู้ใช้ "${username}"` } };
+
+    const nextRole = typeof role === 'string' ? role : user.role;
+    const nextActive = typeof active === 'boolean' ? active : user.active;
+    const nextDriverVehicleId = typeof driverVehicleId === 'string' ? driverVehicleId : user.driverVehicleId;
+    const nextPasswordHash = typeof newPassword === 'string' ? hashPassword(newPassword) : user.passwordHash;
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: MAIN_SHEET_ID,
+      range: `${USERS_TAB_TITLE}!A${user.rowIndex}:F${user.rowIndex}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [[user.username, nextPasswordHash, nextRole, nextActive ? 'TRUE' : 'FALSE', nextDriverVehicleId, user.createdAt]] },
+    });
+    return { status: 200, body: { ok: true } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'แก้ไขผู้ใช้ไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
+}
+
 export function handleHealth(): ApiResult {
   const configured = !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY?.trim();
   return {
@@ -179,7 +411,16 @@ export function handleHealth(): ApiResult {
   };
 }
 
-export async function handleUpdateCsMasterLocation(body: unknown): Promise<ApiResult> {
+export async function handleUpdateCsMasterLocation(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  // This endpoint only ever writes lat/lng, never any other customer field —
+  // which is exactly the narrower permission a driver has here, so allowing
+  // them through this specific endpoint is itself the field-level restriction.
+  if (!['administrator', 'manager', 'admin_staff', 'driver'].includes(payload.role)) {
+    return { status: 403, body: { error: 'ไม่มีสิทธิ์แก้ไขพิกัดลูกค้า' } };
+  }
+
   const { name, phone, lat, lng } = (body ?? {}) as Record<string, unknown>;
 
   if (typeof name !== 'string' || name.trim() === '') {
@@ -240,11 +481,30 @@ export async function handleUpdateCsMasterLocation(body: unknown): Promise<ApiRe
   }
 }
 
-export async function handleUpdateRouteOrder(body: unknown): Promise<ApiResult> {
+export async function handleUpdateRouteOrder(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+
   const { orderNo, plannedDeliveryDate, note, wantsTaxInvoice, markDelivered, status } = (body ?? {}) as Record<string, unknown>;
 
   if (typeof orderNo !== 'string' || orderNo.trim() === '') {
     return { status: 400, body: { error: 'ต้องระบุเลขคำสั่งซื้อ' } };
+  }
+  // Different fields on this one endpoint serve different features with
+  // different permission requirements: markDelivered is the driver's own
+  // action from Driver View; status is the batch-pick-lot close write
+  // (Checker's job, per the permission matrix); everything else is the
+  // Order Management edit form.
+  if (markDelivered === true) {
+    if (!['administrator', 'manager', 'driver'].includes(payload.role)) {
+      return { status: 403, body: { error: 'ไม่มีสิทธิ์ทำเครื่องหมายส่งสำเร็จ' } };
+    }
+  } else if (typeof status === 'string') {
+    if (!['administrator', 'manager', 'checker'].includes(payload.role)) {
+      return { status: 403, body: { error: 'ไม่มีสิทธิ์ปิดล็อตหยิบสินค้า' } };
+    }
+  } else if (!['administrator', 'manager', 'admin_staff'].includes(payload.role)) {
+    return { status: 403, body: { error: 'ไม่มีสิทธิ์แก้ไขออเดอร์' } };
   }
   if (plannedDeliveryDate === undefined && note === undefined && wantsTaxInvoice === undefined && markDelivered === undefined && status === undefined) {
     return { status: 400, body: { error: 'ไม่มีข้อมูลให้บันทึก' } };
@@ -477,10 +737,18 @@ export interface UploadFile {
   buffer: Buffer;
 }
 
-export async function handleDriveUpload(files: UploadFile[], scope: string, key: string): Promise<ApiResult> {
+export async function handleDriveUpload(token: string | null, files: UploadFile[], scope: string, key: string): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
   if (files.length === 0) return { status: 400, body: { error: 'ไม่พบไฟล์ที่จะอัปโหลด' } };
   if (scope !== 'order' && scope !== 'receiving') return { status: 400, body: { error: 'scope ต้องเป็น order หรือ receiving' } };
   if (!key) return { status: 400, body: { error: 'ต้องระบุ key (เลขออเดอร์ หรือ วันที่-ซัพพลายเออร์)' } };
+  // Order attachments follow Order Management's edit permission; receiving
+  // attachments also allow Checker, who can log goods receiving.
+  const allowedRoles = scope === 'order' ? ['administrator', 'manager', 'admin_staff'] : ['administrator', 'manager', 'admin_staff', 'checker'];
+  if (!allowedRoles.includes(payload.role)) {
+    return { status: 403, body: { error: 'ไม่มีสิทธิ์แนบไฟล์' } };
+  }
 
   const rejected = files.find((f) => !isAllowedFile(f.mimetype, f.originalname));
   if (rejected) {

@@ -1,7 +1,10 @@
+import { useEffect } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { NotificationBell } from './components/NotificationBell';
 import { formatDateTime, pageTitles } from './state/derive';
 import { useAppStore } from './state/store';
+import { canAccessPage, defaultRouteFor } from './config/permissions';
+import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { PlannerPage } from './pages/PlannerPage';
 import { DriverPage } from './pages/DriverPage';
@@ -13,10 +16,30 @@ import { ReceivingPage } from './pages/ReceivingPage';
 import { SkuPage } from './pages/SkuPage';
 import { CustomerPage } from './pages/CustomerPage';
 import { ActivityLogPage } from './pages/ActivityLogPage';
+import { UserManagementPage } from './pages/UserManagementPage';
 import { SettingsPage } from './pages/SettingsPage';
 
 function App() {
   const { state, actions } = useAppStore();
+  const { session } = state;
+
+  // RBAC route guard: whenever the current route stops being valid for this
+  // role (role changed, a stale ?driver= link, or any code path that ever
+  // sets an out-of-policy route), bounce to that role's default page instead
+  // of rendering the page — this is what "typing a URL directly to an
+  // unauthorized page" actually hits in an app with no server-rendered
+  // routes: the route guard runs on every relevant state change, not just
+  // on first load.
+  useEffect(() => {
+    if (session && !canAccessPage(session.role, state.route)) {
+      actions.patch({ route: defaultRouteFor(session.role) });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, state.route]);
+
+  if (!session) {
+    return <LoginPage state={state} actions={actions} />;
+  }
 
   // Full-screen mobile view for drivers — no admin sidebar/header chrome.
   if (state.route === 'driver') {
@@ -27,7 +50,7 @@ function App() {
 
   return (
     <div style={{ display: 'flex', minHeight: '100vh' }}>
-      {!state.sidebarCollapsed && <Sidebar route={state.route} actions={actions} />}
+      {!state.sidebarCollapsed && <Sidebar route={state.route} actions={actions} session={session} />}
 
       <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
         <header
@@ -76,6 +99,7 @@ function App() {
           {state.route === 'customer' && <CustomerPage state={state} actions={actions} />}
           {state.route === 'activity' && <ActivityLogPage state={state} actions={actions} />}
           {state.route === 'settings' && <SettingsPage state={state} actions={actions} />}
+          {state.route === 'users' && <UserManagementPage state={state} actions={actions} />}
         </div>
       </main>
     </div>

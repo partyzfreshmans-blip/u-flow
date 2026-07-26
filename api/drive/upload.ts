@@ -1,5 +1,6 @@
 import { MAX_UPLOAD_BYTES } from '../../src/config/drive.js';
 import { handleDriveUpload, type UploadFile } from '../../server/lib.js';
+import { bearerToken } from '../../server/session.js';
 import { runMiddleware, upload } from '../_multipart.js';
 import type { ApiRequest, ApiResponse } from '../_types.js';
 
@@ -30,6 +31,6 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   const scope = String(bodyFields.scope ?? '');
   const key = String(bodyFields.key ?? '').trim();
 
-  const { status, body } = await handleDriveUpload(files, scope, key);
+  const { status, body } = await handleDriveUpload(bearerToken(req.headers.authorization), files, scope, key);
   res.status(status).json(body);
 }

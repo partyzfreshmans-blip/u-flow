@@ -55,7 +55,7 @@ export function PickPage({ state, actions }: { state: AppState; actions: AppActi
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 16 }}>
           {v.pickItems.map((p) => (
-            <button key={p.sku} onClick={p.toggle} style={p.rowStyle} title={`แยกตามออเดอร์: ${p.perOrderText}`}>
+            <button key={p.sku} onClick={v.canWork ? p.toggle : undefined} disabled={!v.canWork} style={p.rowStyle} title={`แยกตามออเดอร์: ${p.perOrderText}`}>
               <span style={p.boxStyle}><i className="ph ph-check" style={{ fontSize: 19, ...p.checkVis }} /></span>
               <span style={{ width: 60, height: 46, flex: 'none', borderRadius: 10, background: 'var(--color-accent-900)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', lineHeight: 1.15 }}>
                 <span style={{ fontSize: 9, letterSpacing: '.04em', color: 'var(--color-accent-300)', opacity: 0.8 }}>ตำแหน่ง</span>
@@ -82,9 +82,11 @@ export function PickPage({ state, actions }: { state: AppState; actions: AppActi
             <span>ปิดล็อตเรียบร้อย — อัปเดตสถานะออเดอร์แล้ว</span>
           </div>
         )}
-        <button className="btn btn-primary btn-block" style={{ minHeight: 54, fontSize: 15, marginTop: 16 }} onClick={v.closePick} disabled={v.pickCloseDisabled}>
-          <i className="ph ph-package" />{v.pickBtnLabel}
-        </button>
+        {v.canClose && (
+          <button className="btn btn-primary btn-block" style={{ minHeight: 54, fontSize: 15, marginTop: 16 }} onClick={v.closePick} disabled={v.pickCloseDisabled}>
+            <i className="ph ph-package" />{v.pickBtnLabel}
+          </button>
+        )}
       </div>
     );
   }
@@ -158,9 +160,9 @@ export function PickPage({ state, actions }: { state: AppState; actions: AppActi
             </thead>
             <tbody>
               {v.rows.map((r) => (
-                <tr key={r.orderNo} onClick={r.toggle} style={{ cursor: 'pointer' }}>
+                <tr key={r.orderNo} onClick={v.canWork ? r.toggle : undefined} style={{ cursor: v.canWork ? 'pointer' : 'default' }}>
                   <td onClick={(e) => e.stopPropagation()}>
-                    <input type="checkbox" checked={r.checked} onChange={r.toggle} style={{ width: 17, height: 17, cursor: 'pointer' }} />
+                    {v.canWork && <input type="checkbox" checked={r.checked} onChange={r.toggle} style={{ width: 17, height: 17, cursor: 'pointer' }} />}
                   </td>
                   <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 500 }}>{r.orderNo}</td>
                   <td>{r.customer}</td>
@@ -178,20 +180,22 @@ export function PickPage({ state, actions }: { state: AppState; actions: AppActi
         )}
       </div>
 
-      <div style={{ position: 'fixed', bottom: 0, left: 236, right: 0, padding: '14px 26px', background: 'color-mix(in srgb, var(--color-bg) 92%, transparent)', backdropFilter: 'blur(8px)', boxShadow: 'inset 0 1px 0 var(--color-divider)', display: 'flex', alignItems: 'center', gap: 12, zIndex: 5 }}>
-        <span style={{ fontSize: 13, fontWeight: 600 }}>เลือกแล้ว {v.selectedCount} ออเดอร์</span>
-        {v.selectedCount > 0 && (
-          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={v.clearSelection}>ล้างที่เลือก</button>
-        )}
-        {v.createError && <span style={{ fontSize: 12, color: 'var(--st-bad-fg)' }}>{v.createError}</span>}
-        <button className="btn btn-primary" style={{ marginLeft: 'auto', minHeight: 44 }} onClick={v.createLot} disabled={v.selectedCount === 0 || v.creating}>
-          {v.creating ? (
-            <><i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังสร้างล็อต...</>
-          ) : (
-            <><i className="ph ph-package" />สร้างล็อตหยิบสินค้า</>
+      {v.canWork && (
+        <div style={{ position: 'fixed', bottom: 0, left: 236, right: 0, padding: '14px 26px', background: 'color-mix(in srgb, var(--color-bg) 92%, transparent)', backdropFilter: 'blur(8px)', boxShadow: 'inset 0 1px 0 var(--color-divider)', display: 'flex', alignItems: 'center', gap: 12, zIndex: 5 }}>
+          <span style={{ fontSize: 13, fontWeight: 600 }}>เลือกแล้ว {v.selectedCount} ออเดอร์</span>
+          {v.selectedCount > 0 && (
+            <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={v.clearSelection}>ล้างที่เลือก</button>
           )}
-        </button>
-      </div>
+          {v.createError && <span style={{ fontSize: 12, color: 'var(--st-bad-fg)' }}>{v.createError}</span>}
+          <button className="btn btn-primary" style={{ marginLeft: 'auto', minHeight: 44 }} onClick={v.createLot} disabled={v.selectedCount === 0 || v.creating}>
+            {v.creating ? (
+              <><i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังสร้างล็อต...</>
+            ) : (
+              <><i className="ph ph-package" />สร้างล็อตหยิบสินค้า</>
+            )}
+          </button>
+        </div>
+      )}
 
       <OrderDetailModal state={state} actions={actions} />
     </div>

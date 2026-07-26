@@ -1,4 +1,5 @@
 import { MAX_UPLOAD_BYTES, humanFileSize, isAllowedFile, type AttachmentScope } from '../../config/drive';
+import { authHeaders, loadSession } from '../session';
 
 // Uploads go through the backend (server/ locally, api/ on Vercel), which is
 // the only place the Service Account credential exists. Attachment metadata
@@ -69,7 +70,7 @@ export async function uploadToDrive(scope: AttachmentScope, key: string, files: 
 
   let res: Response;
   try {
-    res = await fetch('/api/drive/upload', { method: 'POST', body: form });
+    res = await fetch('/api/drive/upload', { method: 'POST', headers: authHeaders(loadSession()), body: form });
   } catch {
     // Network failure / backend not running — the most common case in the
     // field, so name it plainly instead of surfacing a raw fetch error.

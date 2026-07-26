@@ -1,3 +1,5 @@
+import { authHeaders, loadSession } from '../session';
+
 /**
  * Writes a corrected lat/lng back to the real CS Master Google Sheet via the
  * backend (server/ locally, api/ on Vercel), which holds the Service Account
@@ -9,7 +11,7 @@ export async function updateCsMasterLatLng(name: string, phone: string, lat: num
   try {
     res = await fetch('/api/cs-master/update-location', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders(loadSession()) },
       body: JSON.stringify({ name, phone, lat, lng }),
     });
   } catch {

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { OrderDetailModal } from '../components/OrderDetailModal';
+import { canEditOrder } from '../config/permissions';
 import { computeRoute } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 
@@ -9,21 +10,35 @@ const PAGE_SIZE = 30;
 
 /** Native date-picker onChange isn't reliable enough to save-on-change (some
  * browsers fire it mid-entry, before all three segments are filled) — so
- * this keeps the picked value local until an explicit "บันทึก" click, the
- * same proven pattern as the suggestion's "ยืนยัน" button. */
-function ManualDeliveryDateInput({ onSave }: { onSave: (iso: string) => void }) {
+ * this keeps the picked value local until an explicit "บันทึก" click.
+ * Clicking the suggestion's "ยืนยัน" doesn't save straight away either — it
+ * just fills this same box with the suggested date, so both paths always go
+ * through the one visible field and the one save action. */
+function DeliveryDateCell({ suggestedIso, suggestedText, onSave }: { suggestedIso: string | null; suggestedText: string | null; onSave: (iso: string) => void }) {
   const [value, setValue] = useState('');
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-      <input type="date" className="input" style={{ minHeight: 26, fontSize: 11, width: 130 }} value={value} onChange={(e) => setValue(e.target.value)} />
-      <button className="btn btn-ghost" style={{ fontSize: 10.5, padding: '2px 7px' }} disabled={!value} onClick={() => onSave(value)}>
-        <i className="ph ph-check" />บันทึก
-      </button>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 150 }}>
+      {suggestedIso && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, whiteSpace: 'nowrap' }}>
+          <span style={{ fontSize: 11, color: 'var(--st-warn-fg)' }} title="แนะนำตามเวลาสั่ง: ก่อน 16:00 ส่งวันถัดไป, หลัง 16:00 ส่งอีก 2 วัน">
+            แนะนำ {suggestedText}
+          </span>
+          <button className="btn btn-ghost" style={{ fontSize: 10.5, padding: '2px 7px' }} onClick={() => setValue(suggestedIso)}>
+            <i className="ph ph-check" />ยืนยัน
+          </button>
+        </div>
+      )}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+        <input type="date" className="input" style={{ minHeight: 26, fontSize: 11, width: 130 }} value={value} onChange={(e) => setValue(e.target.value)} />
+        <button className="btn btn-ghost" style={{ fontSize: 10.5, padding: '2px 7px' }} disabled={!value} onClick={() => onSave(value)}>
+          <i className="ph ph-check" />บันทึก
+        </button>
+      </div>
     </div>
   );
 }
 
-function OrderTable({ title, tone, rows, isEmpty }: { title: string; tone: 'warn' | 'neutral'; rows: OrderRow[]; isEmpty: boolean }) {
+function OrderTable({ title, tone, rows, isEmpty, canEdit }: { title: string; tone: 'warn' | 'neutral'; rows: OrderRow[]; isEmpty: boolean; canEdit: boolean }) {
   const [shown, setShown] = useState(PAGE_SIZE);
   const visible = rows.slice(0, shown);
   return (
@@ -68,22 +83,10 @@ function OrderTable({ title, tone, rows, isEmpty }: { title: string; tone: 'warn
               <td style={{ textAlign: 'center' }}>{r.itemCountText}</td>
               <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{r.orderedAtText}</td>
               <td style={{ fontSize: 12 }}>
-                {r.hasDeliveryDate ? (
-                  <span style={{ color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{r.plannedDeliveryDate}</span>
+                {r.hasDeliveryDate || !canEdit ? (
+                  <span style={{ color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{r.plannedDeliveryDate || '—'}</span>
                 ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 150 }}>
-                    {r.confirmSuggestedDeliveryDate && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 5, whiteSpace: 'nowrap' }}>
-                        <span style={{ fontSize: 11, color: 'var(--st-warn-fg)' }} title="แนะนำตามเวลาสั่ง: ก่อน 16:00 ส่งวันถัดไป, หลัง 16:00 ส่งอีก 2 วัน">
-                          แนะนำ {r.suggestedDeliveryDateText}
-                        </span>
-                        <button className="btn btn-ghost" style={{ fontSize: 10.5, padding: '2px 7px' }} onClick={r.confirmSuggestedDeliveryDate}>
-                          <i className="ph ph-check" />ยืนยัน
-                        </button>
-                      </div>
-                    )}
-                    <ManualDeliveryDateInput onSave={r.setDeliveryDate} />
-                  </div>
+                  <DeliveryDateCell suggestedIso={r.suggestedDeliveryDateIso} suggestedText={r.suggestedDeliveryDateText} onSave={r.setDeliveryDate} />
                 )}
               </td>
               <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', maxWidth: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={r.noteText}>
@@ -106,7 +109,7 @@ function OrderTable({ title, tone, rows, isEmpty }: { title: string; tone: 'warn
                 {r.saving && <i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite', marginRight: 6, color: 'var(--color-neutral-400)' }} title="กำลังบันทึก..." />}
                 {r.saved && <i className="ph ph-check-circle-fill" style={{ marginRight: 6, color: 'var(--st-ok-fg)' }} title="บันทึกสำเร็จ" />}
                 {r.saveError && <i className="ph ph-warning-fill" style={{ marginRight: 6, color: 'var(--st-bad-fg)' }} title={`บันทึกไม่สำเร็จ: ${r.saveError}`} />}
-                <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={r.edit}><i className="ph ph-pencil-simple" />แก้ไข</button>
+                {canEdit && <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={r.edit}><i className="ph ph-pencil-simple" />แก้ไข</button>}
                 <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={r.viewItems}>ดูสินค้า</button>
                 {r.mapLink && (
                   <a className="btn btn-ghost" style={{ fontSize: 12 }} href={r.mapLink} target="_blank" rel="noreferrer" title="เปิดแผนที่">
@@ -134,6 +137,7 @@ function OrderTable({ title, tone, rows, isEmpty }: { title: string; tone: 'warn
 
 export function OrderManagementPage({ state, actions }: { state: AppState; actions: AppActions }) {
   const v = computeRoute(state, actions);
+  const canEdit = state.session ? canEditOrder(state.session.role) : false;
   // Reset each table's "show more" cap whenever a filter narrows/widens the
   // result set, by remounting via key — otherwise narrowing to a handful of
   // matches could still look capped at 30 from a previous broad search.
@@ -183,8 +187,12 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
       </div>
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10, alignItems: 'center' }}>
-        <span style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginRight: 2 }}>โซน</span>
-        {v.routeTabs.map((t) => <button key={t.key} style={t.style} onClick={t.go}>{t.label}</button>)}
+        <span style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginRight: 2 }}>อำเภอ,จังหวัด</span>
+        <select className="input" style={{ minHeight: 32, maxWidth: 320, fontSize: 12.5 }} value={v.districtProvinceFilter} onChange={(e) => v.onDistrictProvinceFilter(e.target.value)}>
+          {v.districtProvinceOptions.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
       </div>
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12, alignItems: 'center' }}>
@@ -214,10 +222,10 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
       </div>
 
       {!v.isEmpty && (
-        <OrderTable key={`nodate-${filterSignature}`} title="ยังไม่ได้ใส่วันที่จัดส่ง" tone="warn" rows={v.rowsNoDate} isEmpty={v.isEmpty} />
+        <OrderTable key={`nodate-${filterSignature}`} title="ยังไม่ได้ใส่วันที่จัดส่ง" tone="warn" rows={v.rowsNoDate} isEmpty={v.isEmpty} canEdit={canEdit} />
       )}
       {!v.isEmpty && (
-        <OrderTable key={`dated-${filterSignature}`} title="ใส่วันที่จัดส่งแล้ว" tone="neutral" rows={v.rowsWithDate} isEmpty={v.isEmpty} />
+        <OrderTable key={`dated-${filterSignature}`} title="ใส่วันที่จัดส่งแล้ว" tone="neutral" rows={v.rowsWithDate} isEmpty={v.isEmpty} canEdit={canEdit} />
       )}
       {v.isEmpty && !v.routeOrdersLoading && (
         <div className="card elev-sm" style={{ padding: 26, textAlign: 'center', color: 'var(--color-neutral-500)', fontSize: 12.5 }}>ไม่พบคำสั่งซื้อที่ตรงกับตัวกรอง</div>

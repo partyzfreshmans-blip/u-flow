@@ -1,23 +1,48 @@
+import { useEffect } from 'react';
 import { computeCod } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 
+// This page still runs on the pre-Sheets mock driver/order data (documented
+// elsewhere as out of scope for the Sheets migration), which has no real
+// link between a login account and one of its two hardcoded driver names —
+// so a driver's own name is picked deterministically from their username
+// rather than a real identity mapping. Good enough to satisfy "a driver only
+// ever sees their own COD" for this mock page without a deeper rebuild.
+function lockedDriverNameFor(username: string, names: string[]): string {
+  let hash = 0;
+  for (let i = 0; i < username.length; i++) hash = (hash * 31 + username.charCodeAt(i)) | 0;
+  return names[Math.abs(hash) % names.length];
+}
+
 export function CodPage({ state, actions }: { state: AppState; actions: AppActions }) {
   const v = computeCod(state, actions);
+  const isDriverView = state.session?.role === 'driver';
+  const lockedDriverName = isDriverView && state.session ? lockedDriverNameFor(state.session.username, v.driverTabs.map((d) => d.name)) : null;
+
+  useEffect(() => {
+    if (lockedDriverName && state.codDriver !== lockedDriverName) actions.patch({ codDriver: lockedDriverName });
+    if (isDriverView && !state.codMobile) actions.patch({ codMobile: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lockedDriverName, isDriverView]);
 
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
-        <div className="seg">
-          {v.driverTabs.map((d) => (
-            <label key={d.name} className="seg-opt">
-              <input type="radio" name="cd" checked={d.active} onChange={d.go} /><i className="ph ph-truck" />{d.name}
-            </label>
-          ))}
-        </div>
-        <div className="seg" style={{ marginLeft: 'auto' }}>
-          <label className="seg-opt"><input type="radio" name="cv" checked={v.codDesktop} onChange={v.setCodDesktop} /><i className="ph ph-desktop" />Admin</label>
-          <label className="seg-opt"><input type="radio" name="cv" checked={v.codMobile} onChange={v.setCodMobile} /><i className="ph ph-device-mobile" />Driver</label>
-        </div>
+        {!isDriverView && (
+          <div className="seg">
+            {v.driverTabs.map((d) => (
+              <label key={d.name} className="seg-opt">
+                <input type="radio" name="cd" checked={d.active} onChange={d.go} /><i className="ph ph-truck" />{d.name}
+              </label>
+            ))}
+          </div>
+        )}
+        {!isDriverView && (
+          <div className="seg" style={{ marginLeft: 'auto' }}>
+            <label className="seg-opt"><input type="radio" name="cv" checked={v.codDesktop} onChange={v.setCodDesktop} /><i className="ph ph-desktop" />Admin</label>
+            <label className="seg-opt"><input type="radio" name="cv" checked={v.codMobile} onChange={v.setCodMobile} /><i className="ph ph-device-mobile" />Driver</label>
+          </div>
+        )}
       </div>
 
       {v.codDesktop && (

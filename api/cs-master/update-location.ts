@@ -1,4 +1,5 @@
 import { handleUpdateCsMasterLocation } from '../../server/lib.js';
+import { bearerToken } from '../../server/session.js';
 import type { ApiRequest, ApiResponse } from '../_types.js';
 
 export default async function handler(req: ApiRequest, res: ApiResponse) {
@@ -6,6 +7,6 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     res.status(405).json({ error: 'Method not allowed' });
     return;
   }
-  const { status, body } = await handleUpdateCsMasterLocation(req.body);
+  const { status, body } = await handleUpdateCsMasterLocation(bearerToken(req.headers.authorization), req.body);
   res.status(status).json(body);
 }

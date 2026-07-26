@@ -8,6 +8,7 @@ import { resolveZone, UNASSIGNED_COLOR } from '../data/zoneConfig';
 import { detectUnit } from '../data/sources/promotionsSheet';
 import { addDays, dayKey, dayKeyToDate, daysBetweenKeys, formatOrderedAt, formatThaiShortDate, formatThaiWeekdayDate, sheetDateTimeToMs, sheetDateToDayKey, suggestedDeliveryDayKey, todayDayKey } from '../data/dateUtils';
 import { badgeStyle, DELIVERY_DONE_STATUSES, fmt, sheetStatusStyle } from './helpers';
+import { canClosePickLot, canEditOrder, canEditPlan, canManageUsers, canPickWork, ROLES, ROLE_LABELS, seesAllActivityLog } from '../config/permissions';
 import type { AppActions, AppState } from './store';
 
 /** Delivery date, straight off the "คำสั่งซื้อ" sheet — edits go through
@@ -93,6 +94,7 @@ export const pageTitles: Record<AppState['route'], [string, string]> = {
   customer: ['ฐานข้อมูลลูกค้า (CS Master)', 'แก้ไขพิกัด lat/long แล้วบันทึกกลับเข้า Google Sheet จริง'],
   activity: ['บันทึกการเปลี่ยนแปลง (Activity Log)', 'ประวัติการแก้ไขทั้งหมดในระบบ · เก็บไว้ในเครื่องนี้'],
   settings: ['ตั้งค่า / API Key', 'จัดการการเชื่อมต่อระบบออเดอร์ภายนอก'],
+  users: ['จัดการผู้ใช้', 'สร้าง แก้ไข role และปิดใช้งานบัญชีผู้ใช้'],
 };
 
 // ---------- DASHBOARD ("API Import" tab) ----------
@@ -314,7 +316,10 @@ export function computeNotifications(state: AppState, actions: AppActions) {
 // ---------- ACTIVITY LOG (user-action audit trail — kept in-browser only) ----------
 export function computeActivityLog(state: AppState, actions: AppActions) {
   const q = state.activityLogQ.trim().toLowerCase();
-  const rows = state.activityLog
+  const role = state.session?.role;
+  const seesAll = role ? seesAllActivityLog(role) : false;
+  const scoped = seesAll ? state.activityLog : state.activityLog.filter((e) => e.user === state.session?.username);
+  const rows = scoped
     .filter((e) => !q || (e.orderNo ?? '').toLowerCase().includes(q) || e.action.toLowerCase().includes(q) || e.detail.toLowerCase().includes(q))
     .map((e) => ({
       id: e.id,
@@ -330,7 +335,34 @@ export function computeActivityLog(state: AppState, actions: AppActions) {
     onSearch: (v: string) => actions.setActivityLogQ(v),
     rows,
     isEmpty: rows.length === 0,
-    totalCount: state.activityLog.length,
+    totalCount: scoped.length,
+    seesAll,
+  };
+}
+
+// ---------- USER MANAGEMENT ----------
+export function computeUserManagement(state: AppState, actions: AppActions) {
+  const role = state.session?.role;
+  const canEdit = role ? canManageUsers(role) : false;
+
+  const rows = state.users.map((u) => ({
+    username: u.username,
+    roleLabel: ROLE_LABELS[u.role] ?? u.role,
+    active: u.active,
+    driverVehicleId: u.driverVehicleId,
+    vehicleName: u.driverVehicleId ? (state.vehicles.find((v) => v.id === u.driverVehicleId)?.name ?? u.driverVehicleId) : '—',
+    createdAt: u.createdAt,
+  }));
+
+  return {
+    canEdit,
+    loading: state.usersLoading,
+    error: state.usersError,
+    rows,
+    isEmpty: !state.usersLoading && rows.length === 0,
+    roleOptions: ROLES.map((r) => ({ value: r, label: ROLE_LABELS[r] })),
+    vehicleOptions: state.vehicles.map((v) => ({ value: v.id, label: v.name })),
+    reload: () => actions.loadUsers(),
   };
 }
 
@@ -353,6 +385,7 @@ export function computeOrderDetail(state: AppState, actions: AppActions) {
 
     // edit fields — write back to the real "คำสั่งซื้อ" sheet
     canEdit: state.orderEditAvailable,
+    canEditRole: state.session ? canEditOrder(state.session.role) : false,
     plannedDeliveryDate: draft.plannedDeliveryDate,
     onPlannedDeliveryDate: (v: string) => actions.setOrderEditDraft({ ...draft, plannedDeliveryDate: v }),
     note: draft.note,
@@ -383,13 +416,16 @@ export function routeZoneLetter(route: string): string {
 
 export function computeRoute(state: AppState, actions: AppActions) {
   const rq = state.routeQ.trim().toLowerCase();
-  const zoneLetters = Array.from(new Set(state.routeOrders.map((o) => routeZoneLetter(o.route)).filter(Boolean))).sort();
   const statusValues = Array.from(new Set(state.routeOrders.map((o) => o.status).filter(Boolean))).sort();
+  // อำเภอ,จังหวัด has far more distinct values than the old route-letter
+  // filter did — a dropdown, not a chip row, is what keeps that many options
+  // usable (chips only make sense for a handful of values).
+  const districtProvinceValues = Array.from(new Set(state.routeOrders.map((o) => o.districtProvince.trim()).filter(Boolean))).sort();
 
   const filtered = state.routeOrders.filter((o) => {
     if (state.routeFilterValue !== 'all') {
-      const letter = routeZoneLetter(o.route);
-      if (state.routeFilterValue === 'other' ? letter !== '' : letter !== state.routeFilterValue) return false;
+      const dp = o.districtProvince.trim();
+      if (state.routeFilterValue === 'other' ? dp !== '' : dp !== state.routeFilterValue) return false;
     }
     if (state.routeStatusFilter !== 'all' && o.status !== state.routeStatusFilter) return false;
     if (state.routeOrderDateFilter && sheetDateToDayKey(o.orderedDate) !== state.routeOrderDateFilter) return false;
@@ -413,19 +449,13 @@ export function computeRoute(state: AppState, actions: AppActions) {
       go: () => onSelect(v),
     }));
 
-  const countForLetter = (l: string) => state.routeOrders.filter((o) => routeZoneLetter(o.route) === l).length;
-  const noLetterCount = state.routeOrders.filter((o) => routeZoneLetter(o.route) === '').length;
-  const routeTabs = [
-    { key: 'all', label: `ทั้งหมด (${state.routeOrders.length})`, active: state.routeFilterValue === 'all' },
-    ...zoneLetters.map((l) => ({ key: l, label: `${l} (${countForLetter(l)})`, active: state.routeFilterValue === l })),
-    ...(noLetterCount > 0 ? [{ key: 'other', label: `ไม่ระบุโซน (${noLetterCount})`, active: state.routeFilterValue === 'other' }] : []),
-  ].map((t) => ({
-    ...t,
-    style: t.active
-      ? { ...chipBase, background: 'var(--color-accent)', color: '#fff' }
-      : { ...chipBase, background: 'var(--color-surface)', color: 'var(--color-neutral-300)', boxShadow: 'inset 0 0 0 1px var(--color-divider)' },
-    go: () => actions.patch({ routeFilterValue: t.key }),
-  }));
+  const countForDistrict = (dp: string) => state.routeOrders.filter((o) => o.districtProvince.trim() === dp).length;
+  const noDistrictCount = state.routeOrders.filter((o) => o.districtProvince.trim() === '').length;
+  const districtProvinceOptions = [
+    { value: 'all', label: `ทั้งหมด (${state.routeOrders.length})` },
+    ...districtProvinceValues.map((dp) => ({ value: dp, label: `${dp} (${countForDistrict(dp)})` })),
+    ...(noDistrictCount > 0 ? [{ value: 'other', label: `ไม่ระบุ (${noDistrictCount})` }] : []),
+  ];
 
   // Active promo SKUs (state.promos is already filtered to Active-only) cross
   // referenced against each order's line items, so staff can see at a glance
@@ -477,7 +507,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
       plannedDeliveryDate: o.plannedDeliveryDate || '—',
       hasDeliveryDate,
       suggestedDeliveryDateText: suggestedDate ? formatThaiShortDate(suggestedDate) : null,
-      confirmSuggestedDeliveryDate: suggestedIso ? () => setDeliveryDate(suggestedIso) : null,
+      suggestedDeliveryDateIso: suggestedIso,
       setDeliveryDate,
       wantsTaxInvoice: o.wantsTaxInvoice,
       noteText: o.note,
@@ -522,7 +552,9 @@ export function computeRoute(state: AppState, actions: AppActions) {
     onDeliveryDateFilter: (v: string) => actions.patch({ routeDeliveryDateFilter: v }),
     hasDateFilters: state.routeOrderDateFilter !== '' || state.routeDeliveryDateFilter !== '',
     clearDateFilters: () => actions.patch({ routeOrderDateFilter: '', routeDeliveryDateFilter: '' }),
-    routeTabs,
+    districtProvinceOptions,
+    districtProvinceFilter: state.routeFilterValue,
+    onDistrictProvinceFilter: (v: string) => actions.patch({ routeFilterValue: v }),
     statusTabs: makeTabs(statusValues, state.routeStatusFilter, (v) => actions.patch({ routeStatusFilter: v })),
     rowsNoDate,
     rowsWithDate,
@@ -575,6 +607,13 @@ export function rejectOutlierStops<T extends { lat: number; lng: number }>(stops
 
 // ---------- ROUTE PLANNER ----------
 export function computePlanner(state: AppState, actions: AppActions) {
+  const role = state.session?.role;
+  const canEdit = role ? canEditPlan(role) : false;
+  const isDriverView = role === 'driver';
+  // A driver only ever sees the route(s) on their own assigned vehicle — not
+  // the fleet, not the unassigned pool waiting to be routed.
+  const vehicleSource = isDriverView ? state.vehicles.filter((v) => v.id === state.session?.driverVehicleId) : state.vehicles;
+
   const wh = state.routeOrders.find((o) => o.whLat != null && o.whLng != null);
   const warehouse = wh && wh.whLat != null && wh.whLng != null ? { lat: wh.whLat, lng: wh.whLng } : null;
 
@@ -595,7 +634,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
     o.distanceFromWhKm ?? (warehouse && o.lat != null && o.lng != null ? haversineKm(warehouse.lat, warehouse.lng, o.lat, o.lng) : 0);
 
   const byOrderNo = new Map(state.routeOrders.map((o) => [o.orderNo, o]));
-  const vehicleNameById = new Map(state.vehicles.map((v) => [v.id, v.name]));
+  const vehicleNameById = new Map(vehicleSource.map((v) => [v.id, v.name]));
 
   /** Moves an order between vehicles (or reorders within one), splicing it
    * out of its source list and into the target at `toIndex` (end of list
@@ -627,7 +666,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
   const orderUnitQty = buildOrderUnitQtyMap(state.orderLineItems);
   const qtyTextFor = (orderNo: string) => qtyTextForOrder(orderUnitQty, orderNo);
 
-  const unassigned = candidates
+  const unassigned = (isDriverView ? [] : candidates)
     .filter((o) => !assignedTo.has(o.orderNo))
     .map((o) => {
       const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
@@ -685,7 +724,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
   const locationLngNum = Number(state.orderLocationLng);
   const locationPreviewValid = state.orderLocationLat.trim() !== '' && state.orderLocationLng.trim() !== '' && !Number.isNaN(locationLatNum) && !Number.isNaN(locationLngNum);
 
-  const vehicles = state.vehicles.map((v) => {
+  const vehicles = vehicleSource.map((v) => {
     const orderNos = state.routePlan[v.id] ?? [];
     const sortDirection = state.routeSortDirection[v.id] ?? 'far';
     const stops = orderNos
@@ -820,7 +859,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
   });
 
   const plannedStops = vehicles.reduce((a, v) => a + v.stopCount, 0);
-  const totalCrew = state.vehicles.reduce((a, v) => a + (Number.isFinite(v.crew) ? v.crew : 0), 0);
+  const totalCrew = vehicleSource.reduce((a, v) => a + (Number.isFinite(v.crew) ? v.crew : 0), 0);
   const activeCrew = vehicles.filter((v) => v.stopCount > 0).reduce((a, v) => a + v.crew, 0);
 
   // Unassigned orders are plotted too, as plain gray unlabeled dots, so the
@@ -879,6 +918,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
   return {
     loading: state.routeOrdersLoading,
     error: state.routeOrdersError,
+    canEdit,
     vehicles,
     unassigned,
     unassignedCount: unassigned.length,
@@ -1001,8 +1041,10 @@ function computePickOrderSelection(state: AppState, actions: AppActions) {
       view: () => actions.openPickLot(l.id),
     }));
 
+  const role = state.session?.role;
   return {
     mode: 'select' as const,
+    canWork: role ? canPickWork(role) : false,
     loading: state.routeOrdersLoading,
     error: state.routeOrdersError,
     q: state.pickOrderQ,
@@ -1046,8 +1088,11 @@ function computePickLotDetail(state: AppState, actions: AppActions, lot: PickLot
   const pickPct = total ? Math.round((pk / total) * 100) : 0;
   const complete = pk === total && total > 0;
 
+  const role = state.session?.role;
   return {
     mode: 'lot' as const,
+    canWork: role ? canPickWork(role) : false,
+    canClose: role ? canClosePickLot(role) : false,
     lotId: lot.id,
     orderNos: lot.orderNos,
     orderSummaries: lot.orderSummaries,
@@ -1057,7 +1102,7 @@ function computePickLotDetail(state: AppState, actions: AppActions, lot: PickLot
     pickItems,
     isEmpty: total === 0,
     pickClosed: lot.closed,
-    pickCloseDisabled: !complete || lot.closed,
+    pickCloseDisabled: !complete || lot.closed || !(role ? canClosePickLot(role) : false),
     pickBtnLabel: lot.closed ? 'ปิดล็อตแล้ว' : complete ? 'ปิดล็อต — อัปเดตสถานะออเดอร์' : 'หยิบให้ครบก่อนปิดล็อต',
     closePick: () => actions.closePickLot(lot.id, state.pickLots),
     back: () => actions.backToPickerHome(),

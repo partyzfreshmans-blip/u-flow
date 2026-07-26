@@ -62,7 +62,12 @@ export function OrderDetailModal({ state, actions }: { state: AppState; actions:
                 <i className="ph ph-info" style={{ marginRight: 4 }} />ไม่พบออเดอร์นี้ในชีท "คำสั่งซื้อ" — แก้ไขได้เมื่อออเดอร์ถูกจัดเข้าชีทนี้แล้ว
               </div>
             )}
-            {v.canEdit && (
+            {v.canEdit && !v.canEditRole && (
+              <div style={{ fontSize: 12, color: 'var(--color-neutral-500)' }}>
+                <i className="ph ph-eye" style={{ marginRight: 4 }} />สิทธิ์ของคุณดูได้อย่างเดียว
+              </div>
+            )}
+            {v.canEdit && v.canEditRole && (
               <>
                 <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
                   <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--color-neutral-400)' }}>
