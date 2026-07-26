@@ -1,15 +1,33 @@
+import { useState } from 'react';
 import { computePlanner } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 import { RouteMap } from './RouteMap';
 
+interface DragPayload {
+  orderNo: string;
+  fromVehicleId: string;
+}
+
+const DRAG_MIME = 'application/x-uflow-stop';
+
 export function PlannerPage({ state, actions }: { state: AppState; actions: AppActions }) {
   const v = computePlanner(state, actions);
+  const [dragOverVehicleId, setDragOverVehicleId] = useState<string | null>(null);
 
   const updateVehicle = (id: string, patch: Partial<(typeof state.vehicles)[number]>) =>
     actions.setVehicles(state.vehicles.map((x) => (x.id === id ? { ...x, ...patch } : x)));
 
   const updateZone = (id: string, patch: Partial<(typeof state.zoneRules)[number]>) =>
     actions.setZoneRules(state.zoneRules.map((z) => (z.id === id ? { ...z, ...patch } : z)));
+
+  const readDragPayload = (e: React.DragEvent): DragPayload | null => {
+    try {
+      const raw = e.dataTransfer.getData(DRAG_MIME);
+      return raw ? (JSON.parse(raw) as DragPayload) : null;
+    } catch {
+      return null;
+    }
+  };
 
   return (
     <div>
@@ -136,7 +154,22 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {/* per-vehicle plans */}
           {v.vehicles.map((veh) => (
-            <div key={veh.id} className="card elev-sm" style={{ gap: 10 }}>
+            <div
+              key={veh.id}
+              className="card elev-sm"
+              style={{ gap: 10, boxShadow: dragOverVehicleId === veh.id ? 'inset 0 0 0 2px var(--color-accent-700)' : undefined }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setDragOverVehicleId(veh.id);
+              }}
+              onDragLeave={() => setDragOverVehicleId((cur) => (cur === veh.id ? null : cur))}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDragOverVehicleId(null);
+                const data = readDragPayload(e);
+                if (data) v.moveOrderToVehicle(data.orderNo, data.fromVehicleId, veh.id, null);
+              }}
+            >
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                 <span style={{ width: 34, height: 26, borderRadius: 6, background: 'var(--color-accent)', color: '#fff', display: 'grid', placeItems: 'center', fontWeight: 700, fontSize: 12 }}>{veh.loadPrefix}</span>
                 <div style={{ lineHeight: 1.2 }}>
@@ -166,13 +199,35 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                 <table className="table">
                   <thead>
                     <tr>
+                      <th style={{ width: 24 }}></th>
                       <th style={{ width: 46, textAlign: 'center' }}>ลำดับ</th><th style={{ width: 70, textAlign: 'center' }}>ลำดับโหลด</th>
-                      <th>ลูกค้า</th><th>โซน</th><th style={{ textAlign: 'right' }}>ยอดเงิน</th><th style={{ width: 200 }}>COD</th><th style={{ textAlign: 'right' }}>ระยะ</th><th style={{ width: 80 }}></th>
+                      <th>ลูกค้า</th><th>โซน</th><th style={{ textAlign: 'right' }}>ยอดเงิน</th><th style={{ width: 200 }}>COD</th><th style={{ textAlign: 'right' }}>ระยะ</th><th style={{ width: 190 }}></th>
                     </tr>
                   </thead>
                   <tbody>
                     {veh.stops.map((s) => (
-                      <tr key={s.orderNo}>
+                      <tr
+                        key={s.orderNo}
+                        draggable
+                        onDragStart={(e) => {
+                          e.dataTransfer.setData(DRAG_MIME, JSON.stringify({ orderNo: s.orderNo, fromVehicleId: veh.id }));
+                          e.dataTransfer.effectAllowed = 'move';
+                        }}
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setDragOverVehicleId(veh.id);
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setDragOverVehicleId(null);
+                          const data = readDragPayload(e);
+                          if (data) v.moveOrderToVehicle(data.orderNo, data.fromVehicleId, veh.id, s.seq - 1);
+                        }}
+                        style={{ cursor: 'grab' }}
+                      >
+                        <td style={{ textAlign: 'center', color: 'var(--color-neutral-600)' }}><i className="ph ph-dots-six-vertical" /></td>
                         <td style={{ textAlign: 'center', fontWeight: 600 }}>{s.seq}</td>
                         <td style={{ textAlign: 'center', fontFamily: 'ui-monospace, monospace', fontSize: 12, color: 'var(--color-accent-200)' }}>{s.loadCode}</td>
                         <td>
@@ -207,6 +262,20 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                           <button className="btn btn-icon btn-ghost" onClick={s.moveUp} title="เลื่อนขึ้น"><i className="ph ph-caret-up" style={{ fontSize: 12 }} /></button>
                           <button className="btn btn-icon btn-ghost" onClick={s.moveDown} title="เลื่อนลง"><i className="ph ph-caret-down" style={{ fontSize: 12 }} /></button>
                           <button className="btn btn-icon btn-ghost" onClick={s.remove} title="เอาออก"><i className="ph ph-x" style={{ fontSize: 12 }} /></button>
+                          <select
+                            className="input"
+                            style={{ minHeight: 26, fontSize: 10.5, width: 96, display: 'inline-block', marginLeft: 4 }}
+                            value=""
+                            onChange={(e) => {
+                              if (e.target.value) s.moveToVehicle(e.target.value);
+                            }}
+                            title="ย้ายไปรถคันอื่น"
+                          >
+                            <option value="">ย้ายไป...</option>
+                            {state.vehicles.filter((x) => x.id !== veh.id).map((x) => (
+                              <option key={x.id} value={x.id}>{x.name}</option>
+                            ))}
+                          </select>
                         </td>
                       </tr>
                     ))}
@@ -229,15 +298,35 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
             ) : (
               <table className="table">
                 <thead>
-                  <tr><th>ลูกค้า</th><th>โซน</th><th style={{ textAlign: 'right' }}>ยอดเงิน</th><th style={{ textAlign: 'right' }}>ระยะ</th><th style={{ width: 150 }}>จัดลงรถ</th></tr>
+                  <tr>
+                    <th>ลูกค้า</th><th>อำเภอ/จังหวัด</th><th>เบอร์โทร</th><th>โซน</th><th style={{ textAlign: 'right' }}>ยอดเงิน</th>
+                    <th style={{ textAlign: 'right' }}>ระยะ</th><th style={{ width: 150 }}>จัดลงรถ</th>
+                  </tr>
                 </thead>
                 <tbody>
                   {v.unassigned.map((o) => (
                     <tr key={o.orderNo}>
                       <td>
-                        {o.customer}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          {o.customer}
+                          {o.wantsTaxInvoice && (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, padding: '2px 7px', borderRadius: 6, background: 'var(--st-info-bg)', color: 'var(--st-info-fg)', whiteSpace: 'nowrap' }}>
+                              <i className="ph ph-receipt" />ต้องการใบกำกับ
+                            </span>
+                          )}
+                          {o.hasNote && (
+                            <span
+                              title={o.note}
+                              style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, padding: '2px 7px', borderRadius: 6, background: 'var(--st-warn-bg)', color: 'var(--st-warn-fg)', whiteSpace: 'nowrap', cursor: 'help' }}
+                            >
+                              <i className="ph ph-note-pencil" />หมายเหตุ
+                            </span>
+                          )}
+                        </div>
                         <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', maxWidth: 260, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{o.orderNo} · {o.address}</div>
                       </td>
+                      <td style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{o.districtProvince}</td>
+                      <td style={{ fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.phone}</td>
                       <td>
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, whiteSpace: 'nowrap' }}>
                           <span style={{ width: 9, height: 9, borderRadius: '50%', background: o.zoneColor, flex: 'none' }} />{o.zoneName}

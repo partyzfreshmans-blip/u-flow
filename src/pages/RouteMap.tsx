@@ -11,11 +11,23 @@ interface Stop {
   /** Zone colour, so a glance at the map shows which zone each drop is in. */
   color: string;
   zoneName: string;
+  /** Short text shown on the pin itself, e.g. "A-3" (vehicle + sequence).
+   * null renders a plain small gray dot instead — used for orders not yet
+   * assigned to a vehicle, so they read as visually distinct at a glance. */
+  pinLabel: string | null;
 }
 
 interface Props {
   stops: Stop[];
   warehouse: { lat: number; lng: number } | null;
+}
+
+/** Leaflet inserts divIcon/tooltip content via innerHTML with no escaping of
+ * its own, and this text ultimately comes from sheet data (customer names,
+ * zone names, vehicle codes) that a user could type HTML into — escape it
+ * before interpolating so that can never execute as markup. */
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 export function RouteMap({ stops, warehouse }: Props) {
@@ -63,15 +75,29 @@ export function RouteMap({ stops, warehouse }: Props) {
     }
 
     for (const s of stops) {
-      L.circleMarker([s.lat, s.lng], {
-        radius: 6,
-        color: '#161826',
-        weight: 2,
-        fillColor: s.color,
-        fillOpacity: 0.95,
-      })
-        .bindTooltip(`${s.label} · ${s.zoneName}${s.status ? ` · ${s.status}` : ''}`)
-        .addTo(layer);
+      const tooltipText = `${escapeHtml(s.label)} · ${escapeHtml(s.zoneName)}${s.status ? ` · ${escapeHtml(s.status)}` : ''}`;
+      if (s.pinLabel) {
+        L.marker([s.lat, s.lng], {
+          icon: L.divIcon({
+            className: '',
+            html: `<div style="min-width:28px;height:20px;padding:0 6px;border-radius:10px;background:${escapeHtml(s.color)};color:#161826;display:grid;place-items:center;font-weight:800;font-size:10.5px;white-space:nowrap;border:1.5px solid #161826;box-shadow:0 2px 6px rgba(0,0,0,.5)">${escapeHtml(s.pinLabel)}</div>`,
+            iconSize: [40, 20],
+            iconAnchor: [20, 10],
+          }),
+        })
+          .bindTooltip(tooltipText)
+          .addTo(layer);
+      } else {
+        L.circleMarker([s.lat, s.lng], {
+          radius: 5,
+          color: '#3a3d49',
+          weight: 1.5,
+          fillColor: s.color,
+          fillOpacity: 0.6,
+        })
+          .bindTooltip(`${tooltipText} (ยังไม่จัดลงรถ)`)
+          .addTo(layer);
+      }
     }
 
     const points: L.LatLngExpression[] = stops.map((s) => [s.lat, s.lng]);

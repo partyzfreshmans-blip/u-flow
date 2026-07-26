@@ -14,6 +14,7 @@ import { DEFAULT_ZONE_RULES, loadZoneRules, saveZoneRules, type ZoneRule } from 
 import { loadRouteCodState, saveRouteCodState } from '../data/routeCod';
 import { isoToSheetDateText, sheetDateToDayKey, todayDayKey } from '../data/dateUtils';
 import { updateRouteOrder } from '../data/sources/routeOrdersWrite';
+import { loadDriverQueue, saveDriverQueue } from '../data/driverQueue';
 import type { AttachmentScope } from '../config/drive';
 import type { ApiImportOrder, CsMasterCustomer, Promo, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
 
@@ -89,6 +90,14 @@ export interface AppState {
   routeCodCollected: Record<string, string>;
   routeCodMethod: Record<string, 'cash' | 'transfer'>;
 
+  // mobile driver view — reuses routeOrders/routePlan/vehicles, only adds its
+  // own navigation + offline-sync state
+  /** null = vehicle picker screen. */
+  driverVehicleId: string | null;
+  /** orderNos marked delivered locally but not yet confirmed synced to the sheet. */
+  driverSyncQueue: string[];
+  driverOnline: boolean;
+
   // batch picking
   picked: Record<string, boolean>;
   pickClosed: boolean;
@@ -157,8 +166,18 @@ export interface AppState {
   keySaved: boolean;
 }
 
+/** ?driver=<vehicleId> jumps straight into the mobile driver view for that
+ * vehicle — the one bit of real browser-URL-based deep-linking this app
+ * has, since the driver page is meant to be a link a driver can open
+ * directly rather than something they navigate the whole admin app to find. */
+function initialRouteFromUrl(): Pick<AppState, 'route' | 'driverVehicleId'> {
+  if (typeof window === 'undefined') return { route: 'dashboard', driverVehicleId: null };
+  const vehicleId = new URLSearchParams(window.location.search).get('driver');
+  return vehicleId ? { route: 'driver', driverVehicleId: vehicleId } : { route: 'dashboard', driverVehicleId: null };
+}
+
 export const initialState: AppState = {
-  route: 'dashboard',
+  ...initialRouteFromUrl(),
 
   apiOrders: [],
   apiOrdersLoading: true,
@@ -194,6 +213,9 @@ export const initialState: AppState = {
   plannerDate: todayDayKey(),
   routeCodCollected: {},
   routeCodMethod: {},
+
+  driverSyncQueue: [],
+  driverOnline: typeof navigator === 'undefined' || navigator.onLine,
 
   picked: {},
   pickClosed: false,
@@ -256,7 +278,8 @@ export type Action =
   | { type: 'addPromo' }
   | { type: 'updateCustomerLatLng'; rowIndex: number; lat: number; lng: number }
   | { type: 'setOrderSaveStatus'; orderNo: string; status: OrderSaveStatus | null }
-  | { type: 'applyOrderEdit'; orderNo: string; plannedDeliveryDateSheetText: string | null; note: string | null; wantsTaxInvoice: boolean | null };
+  | { type: 'applyOrderEdit'; orderNo: string; plannedDeliveryDateSheetText: string | null; note: string | null; wantsTaxInvoice: boolean | null }
+  | { type: 'applyDeliveryMark'; orderNo: string; statusText: string; completedDateText: string };
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -350,6 +373,16 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, routeOrders, apiOrders };
     }
 
+    case 'applyDeliveryMark': {
+      // Optimistic — set immediately on tap, regardless of whether the sheet
+      // write has confirmed yet, so the driver's own screen and every other
+      // page sharing this same state (Order Management, Dashboard) reflect
+      // it instantly. Sync state is tracked separately in driverSyncQueue.
+      const routeOrders = state.routeOrders.map((o) => (o.orderNo === action.orderNo ? { ...o, status: action.statusText, completedDate: action.completedDateText } : o));
+      const apiOrders = state.apiOrders.map((o) => (o.orderUid === action.orderNo ? { ...o, status: action.statusText } : o));
+      return { ...state, routeOrders, apiOrders };
+    }
+
     default:
       return state;
   }
@@ -357,6 +390,26 @@ function reducer(state: AppState, action: Action): AppState {
 
 export function useAppStore() {
   const [state, dispatch] = useReducer(reducer, initialState);
+
+  // dispatch's identity is stable (useReducer guarantee), so this can be a
+  // plain closure rather than useCallback — it's referenced both by the
+  // online/retry effect below and by the markDelivered action.
+  function syncDriverQueue() {
+    const queue = loadDriverQueue();
+    if (queue.length === 0) return;
+    queue.forEach((orderNo) => {
+      updateRouteOrder({ orderNo, markDelivered: true })
+        .then(() => {
+          const next = loadDriverQueue().filter((n) => n !== orderNo);
+          saveDriverQueue(next);
+          dispatch({ type: 'patch', patch: { driverSyncQueue: next } });
+        })
+        .catch(() => {
+          /* leave it queued — the next online event, interval tick, or
+           * markDelivered call will retry it */
+        });
+    });
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -457,8 +510,31 @@ export function useAppStore() {
         receivingLog: loadReceivingLog(),
         routeCodCollected: routeCod.collected,
         routeCodMethod: routeCod.method,
+        driverSyncQueue: loadDriverQueue(),
       },
     });
+  }, []);
+
+  // Driver view offline support: retry any queued delivery marks whenever
+  // connectivity returns, and keep trying periodically in case a request
+  // failed for a reason other than being fully offline (e.g. a flaky signal).
+  useEffect(() => {
+    const goOnline = () => {
+      dispatch({ type: 'patch', patch: { driverOnline: true } });
+      syncDriverQueue();
+    };
+    const goOffline = () => dispatch({ type: 'patch', patch: { driverOnline: false } });
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
+    const interval = setInterval(() => {
+      if (loadDriverQueue().length > 0) syncDriverQueue();
+    }, 20000);
+    return () => {
+      window.removeEventListener('online', goOnline);
+      window.removeEventListener('offline', goOffline);
+      clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const actions = useMemo(
@@ -616,6 +692,26 @@ export function useAppStore() {
             dispatch({ type: 'patch', patch: { custEditSaving: false, custEditError: message } });
           });
       },
+
+      setDriverVehicle: (vehicleId: string | null) => dispatch({ type: 'patch', patch: { driverVehicleId: vehicleId } }),
+      /** Marks a stop delivered immediately in shared state (so every page
+       * sees it right away) and queues the sheet write — offline-safe: if
+       * the write fails or there's no connection at all, the orderNo stays
+       * in the persisted queue and is retried automatically, never dropped. */
+      markDelivered: (orderNo: string) => {
+        dispatch({
+          type: 'applyDeliveryMark',
+          orderNo,
+          statusText: 'ส่งสำเร็จ',
+          completedDateText: isoToSheetDateText(todayDayKey()),
+        });
+        const queue = loadDriverQueue();
+        const nextQueue = queue.includes(orderNo) ? queue : [...queue, orderNo];
+        saveDriverQueue(nextQueue);
+        dispatch({ type: 'patch', patch: { driverSyncQueue: nextQueue } });
+        syncDriverQueue();
+      },
+      retrySyncQueue: () => syncDriverQueue(),
     }),
     [],
   );

@@ -32,6 +32,11 @@ const NOTE_HEADER = 'หมายเหตุ';
 // delivers and would be corrupted by a manually-picked future date.
 const DELIVERY_DATE_HEADER = 'วันที่จะจัดส่ง';
 const TAX_INVOICE_HEADER = 'ขอใบกำกับภาษี';
+const STATUS_HEADER = 'Status';
+// "วันที่จัดส่ง" is the delivery-completion timestamp (see DELIVERY_DATE_HEADER
+// above) — exactly what should be stamped when a driver marks a stop done.
+const DELIVERED_TIMESTAMP_HEADER = 'วันที่จัดส่ง';
+const DELIVERED_STATUS_VALUE = 'ส่งสำเร็จ';
 // The real sheet has no dedicated boolean tax-invoice column — only a legacy
 // field ("ใบกำกับภาษี/หมายเหตุเดิม") that mixes it with old free-text notes
 // and already holds real note content on some rows, so it's not safe to
@@ -62,6 +67,12 @@ function isoToSheetDate(iso: string): string {
   const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) throw new Error('รูปแบบวันที่ไม่ถูกต้อง (ต้องเป็น YYYY-MM-DD)');
   return `${Number(m[2])}/${Number(m[3])}/${Number(m[1])}`;
+}
+
+/** Matches the sheet's own datetime text form, e.g. "7/24/2026 8:00:00". */
+function nowSheetDateTime(): string {
+  const d = new Date();
+  return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
 }
 
 function getServiceAccountCredentials(): { client_email: string; private_key: string } {
@@ -225,12 +236,12 @@ export async function handleUpdateCsMasterLocation(body: unknown): Promise<ApiRe
 }
 
 export async function handleUpdateRouteOrder(body: unknown): Promise<ApiResult> {
-  const { orderNo, plannedDeliveryDate, note, wantsTaxInvoice } = (body ?? {}) as Record<string, unknown>;
+  const { orderNo, plannedDeliveryDate, note, wantsTaxInvoice, markDelivered } = (body ?? {}) as Record<string, unknown>;
 
   if (typeof orderNo !== 'string' || orderNo.trim() === '') {
     return { status: 400, body: { error: 'ต้องระบุเลขคำสั่งซื้อ' } };
   }
-  if (plannedDeliveryDate === undefined && note === undefined && wantsTaxInvoice === undefined) {
+  if (plannedDeliveryDate === undefined && note === undefined && wantsTaxInvoice === undefined && markDelivered === undefined) {
     return { status: 400, body: { error: 'ไม่มีข้อมูลให้บันทึก' } };
   }
   if (plannedDeliveryDate !== undefined && typeof plannedDeliveryDate !== 'string') {
@@ -241,6 +252,9 @@ export async function handleUpdateRouteOrder(body: unknown): Promise<ApiResult> 
   }
   if (wantsTaxInvoice !== undefined && typeof wantsTaxInvoice !== 'boolean') {
     return { status: 400, body: { error: 'wantsTaxInvoice ต้องเป็น true/false' } };
+  }
+  if (markDelivered !== undefined && markDelivered !== true) {
+    return { status: 400, body: { error: 'markDelivered ต้องเป็น true เท่านั้น' } };
   }
 
   let sheetDate: string | null = null;
@@ -305,6 +319,14 @@ export async function handleUpdateRouteOrder(body: unknown): Promise<ApiResult> 
         taxInvoiceCol = TAX_INVOICE_FALLBACK_COLUMN_INDEX;
       }
     }
+    let statusCol = -1;
+    let deliveredTimestampCol = -1;
+    if (markDelivered === true) {
+      statusCol = headerAt(STATUS_HEADER);
+      if (statusCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STATUS_HEADER}" ในชีท` } };
+      deliveredTimestampCol = headerAt(DELIVERED_TIMESTAMP_HEADER);
+      if (deliveredTimestampCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${DELIVERED_TIMESTAMP_HEADER}" ในชีท` } };
+    }
 
     // Bootstrap the tax-invoice header the first time it's needed. Plain
     // values.update (not append) so it can never create a new row.
@@ -343,6 +365,20 @@ export async function handleUpdateRouteOrder(body: unknown): Promise<ApiResult> 
         range: `${title}!${columnLetter(taxInvoiceCol)}${targetRow}`,
         valueInputOption: 'RAW',
         requestBody: { values: [[wantsTaxInvoice ? 'ใช่' : '']] },
+      });
+    }
+    if (markDelivered === true) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: MAIN_SHEET_ID,
+        range: `${title}!${columnLetter(statusCol)}${targetRow}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[DELIVERED_STATUS_VALUE]] },
+      });
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: MAIN_SHEET_ID,
+        range: `${title}!${columnLetter(deliveredTimestampCol)}${targetRow}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: { values: [[nowSheetDateTime()]] },
       });
     }
 

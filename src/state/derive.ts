@@ -29,6 +29,9 @@ export const pageTitles: Record<AppState['route'], [string, string]> = {
   dashboard: ['แดชบอร์ด / ออเดอร์ใหม่', 'ออเดอร์ล่าสุดที่ยังไม่ได้จัดเส้นทาง · จาก Google Sheet (API Import)'],
   route: ['จัดการออเดอร์', 'ข้อมูลจริงจาก Google Sheet (คำสั่งซื้อ) · แก้ไขวันที่จัดส่ง/หมายเหตุ/ใบกำกับภาษีแล้วบันทึกกลับชีทได้'],
   planner: ['วางแผนจัดรูท', 'จัดออเดอร์ลงรถ · เรียงลำดับส่งจากไกลไปใกล้คลัง · ออกลำดับโหลด'],
+  // App.tsx renders DriverPage full-screen before this map is ever read for
+  // 'driver' — this entry only exists to satisfy the Record type.
+  driver: ['มุมมองคนขับ', 'ใบจัดรูทมือถือรายคัน'],
   pick: ['Batch picking / จัดล็อตหยิบสินค้า', 'รวมหลายออเดอร์เป็นล็อตเดียว หยิบสินค้าตามตำแหน่งเก็บ'],
   cod: ['เคลียร์เงินปลายทาง (COD)', 'เทียบยอดที่ควรเก็บกับยอดคืนจริงต่อ driver'],
   promo: ['โปรโมชั่น / ส่วนลด', 'โปรโมชั่นที่ Active จาก Google Sheet · สร้างโปรโมชั่นใหม่ได้ในเครื่องนี้'],
@@ -322,16 +325,6 @@ export function computeRoute(state: AppState, actions: AppActions) {
   };
 }
 
-export interface MapStop {
-  id: string;
-  lat: number;
-  lng: number;
-  label: string;
-  status: string;
-  color: string;
-  zoneName: string;
-}
-
 /** Radius (km) around the bulk of the delivery area beyond which a coordinate
  * is treated as bad data rather than a genuinely distant customer. Generous
  * enough to keep real cross-province drops, tight enough to exclude
@@ -393,6 +386,27 @@ export function computePlanner(state: AppState, actions: AppActions) {
 
   const byOrderNo = new Map(state.routeOrders.map((o) => [o.orderNo, o]));
 
+  /** Moves an order between vehicles (or reorders within one), splicing it
+   * out of its source list and into the target at `toIndex` (end of list
+   * when null). Powers both drag-and-drop and the "ย้ายไปรถคันอื่น" dropdown —
+   * stop sequence/load-code numbers fall out for free since they're derived
+   * directly from routePlan's array order. */
+  const moveOrderToVehicle = (orderNo: string, fromVehicleId: string, toVehicleId: string, toIndex: number | null) => {
+    const plan = { ...state.routePlan };
+    const fromList = [...(plan[fromVehicleId] ?? [])];
+    const srcIdx = fromList.indexOf(orderNo);
+    if (srcIdx === -1) return;
+    fromList.splice(srcIdx, 1);
+    plan[fromVehicleId] = fromList;
+
+    const toList = [...(fromVehicleId === toVehicleId ? fromList : (plan[toVehicleId] ?? []))];
+    const insertAt = toIndex === null ? toList.length : Math.max(0, Math.min(toIndex, toList.length));
+    toList.splice(insertAt, 0, orderNo);
+    plan[toVehicleId] = toList;
+
+    actions.setRoutePlan(plan);
+  };
+
   const unassigned = candidates
     .filter((o) => !assignedTo.has(o.orderNo))
     .map((o) => {
@@ -401,6 +415,8 @@ export function computePlanner(state: AppState, actions: AppActions) {
         orderNo: o.orderNo,
         customer: o.customer,
         address: o.addressFromUnii || o.districtProvince,
+        districtProvince: o.districtProvince || '—',
+        phone: o.phone || '—',
         amtText: fmt(o.totalAmount),
         itemCount: o.itemCount,
         zoneName: zone.zoneName,
@@ -408,6 +424,11 @@ export function computePlanner(state: AppState, actions: AppActions) {
         suggestedRoute: zone.route,
         distanceKm: distanceOf(o),
         distanceText: `${distanceOf(o).toFixed(1)} กม.`,
+        wantsTaxInvoice: o.wantsTaxInvoice,
+        note: o.note,
+        hasNote: o.note.trim() !== '',
+        lat: o.lat,
+        lng: o.lng,
         assignTo: (vehicleId: string) => {
           const plan = { ...state.routePlan };
           plan[vehicleId] = [...(plan[vehicleId] ?? []), o.orderNo];
@@ -440,12 +461,20 @@ export function computePlanner(state: AppState, actions: AppActions) {
           zoneColor: zone.color,
           distanceText: `${distanceOf(o).toFixed(1)} กม.`,
           mapLink: o.mapLink,
+          // Falls back to a plain Google Maps search link built from lat/lng
+          // when the sheet's own mapLink is blank, so the driver-view
+          // navigate button always has somewhere to go.
+          googleMapsUrl: o.mapLink || (o.lat != null && o.lng != null ? `https://www.google.com/maps/search/?api=1&query=${o.lat},${o.lng}` : ''),
           isCod: isCodPayment(o.paymentType),
           codMethod: state.routeCodMethod[o.orderNo] ?? 'cash',
           codCollected: state.routeCodCollected[o.orderNo] ?? '',
           setCodCash: () => actions.saveRouteCod(state.routeCodCollected, { ...state.routeCodMethod, [o.orderNo]: 'cash' }),
           setCodTransfer: () => actions.saveRouteCod(state.routeCodCollected, { ...state.routeCodMethod, [o.orderNo]: 'transfer' }),
           onCodCollected: (val: string) => actions.saveRouteCod({ ...state.routeCodCollected, [o.orderNo]: val.replace(/[^0-9]/g, '') }, state.routeCodMethod),
+          status: o.status,
+          stStyle: sheetStatusStyle(o.status),
+          isDelivered: DELIVERY_DONE_STATUSES.includes(o.status),
+          markDelivered: () => actions.markDelivered(o.orderNo),
           moveUp: () => {
             if (i === 0) return;
             const arr2 = [...orderNos];
@@ -461,6 +490,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
           remove: () => {
             actions.setRoutePlan({ ...state.routePlan, [v.id]: orderNos.filter((n) => n !== o.orderNo) });
           },
+          moveToVehicle: (toVehicleId: string) => moveOrderToVehicle(o.orderNo, v.id, toVehicleId, null),
         };
       });
 
@@ -518,7 +548,17 @@ export function computePlanner(state: AppState, actions: AppActions) {
         })
         .map((s) => {
           const o = byOrderNo.get(s.orderNo)!;
-          return { id: s.orderNo, lat: o.lat as number, lng: o.lng as number, label: `${s.seq}. ${s.customer}`, status: '', color: s.zoneColor, zoneName: s.zoneName };
+          return {
+            id: s.orderNo,
+            lat: o.lat as number,
+            lng: o.lng as number,
+            label: s.customer,
+            status: '',
+            color: s.zoneColor,
+            zoneName: s.zoneName,
+            // Short on-pin text: vehicle code + delivery sequence, e.g. "A-3".
+            pinLabel: `${v.loadPrefix}-${s.seq}`,
+          };
         }),
     };
   });
@@ -527,7 +567,22 @@ export function computePlanner(state: AppState, actions: AppActions) {
   const totalCrew = state.vehicles.reduce((a, v) => a + (Number.isFinite(v.crew) ? v.crew : 0), 0);
   const activeCrew = vehicles.filter((v) => v.stopCount > 0).reduce((a, v) => a + v.crew, 0);
 
-  const allStops = vehicles.flatMap((v) => v.mapStops);
+  // Unassigned orders are plotted too, as plain gray unlabeled dots, so the
+  // map still shows where the remaining work is before it's routed.
+  const unassignedMapStops = unassigned
+    .filter((o) => o.lat != null && o.lng != null)
+    .map((o) => ({
+      id: o.orderNo,
+      lat: o.lat as number,
+      lng: o.lng as number,
+      label: o.customer,
+      status: '',
+      color: UNASSIGNED_COLOR,
+      zoneName: 'ยังไม่จัดลงรถ',
+      pinLabel: null as string | null,
+    }));
+
+  const allStops = [...vehicles.flatMap((v) => v.mapStops), ...unassignedMapStops];
   const { kept: mapStops, excluded: excludedStopCount } = rejectOutlierStops(allStops, warehouse);
 
   const codCashExpectedTotal = vehicles.reduce((a, v) => a + v.codCashExpected, 0);
@@ -591,6 +646,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
     configTab: state.plannerConfigTab,
     openZones: () => actions.patch({ plannerConfigTab: state.plannerConfigTab === 'zones' ? null : 'zones' }),
     openVehicles: () => actions.patch({ plannerConfigTab: state.plannerConfigTab === 'vehicles' ? null : 'vehicles' }),
+    moveOrderToVehicle,
   };
 }
 

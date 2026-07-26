@@ -3,6 +3,7 @@ import { pageTitles } from './state/derive';
 import { useAppStore } from './state/store';
 import { DashboardPage } from './pages/DashboardPage';
 import { PlannerPage } from './pages/PlannerPage';
+import { DriverPage } from './pages/DriverPage';
 import { OrderManagementPage } from './pages/OrderManagementPage';
 import { PickPage } from './pages/PickPage';
 import { CodPage } from './pages/CodPage';
@@ -14,6 +15,12 @@ import { SettingsPage } from './pages/SettingsPage';
 
 function App() {
   const { state, actions } = useAppStore();
+
+  // Full-screen mobile view for drivers — no admin sidebar/header chrome.
+  if (state.route === 'driver') {
+    return <DriverPage state={state} actions={actions} />;
+  }
+
   const [pageTitle, pageSub] = pageTitles[state.route];
 
   return (

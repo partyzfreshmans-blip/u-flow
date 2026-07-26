@@ -4,6 +4,8 @@ export interface RouteOrderUpdatePayload {
   plannedDeliveryDate?: string;
   note?: string;
   wantsTaxInvoice?: boolean;
+  /** Stamps Status='ส่งสำเร็จ' and the delivery timestamp column with now(). */
+  markDelivered?: boolean;
 }
 
 /**

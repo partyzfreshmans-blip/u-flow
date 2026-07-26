@@ -6,6 +6,7 @@ const navDef: [RouteKey, string, string][] = [
   ['dashboard', 'แดชบอร์ด / ออเดอร์', 'ph ph-squares-four'],
   ['route', 'จัดการออเดอร์', 'ph ph-clipboard-text'],
   ['planner', 'วางแผนจัดรูท', 'ph ph-map-trifold'],
+  ['driver', 'มุมมองคนขับ (มือถือ)', 'ph ph-device-mobile-speaker'],
   ['pick', 'จัดล็อตหยิบสินค้า', 'ph ph-list-checks'],
   ['cod', 'เคลียร์เงิน COD', 'ph ph-wallet'],
   ['promo', 'โปรโมชั่น', 'ph ph-tag'],
