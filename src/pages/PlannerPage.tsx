@@ -72,8 +72,8 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                 <tr key={z.id}>
                   <td><input type="color" value={z.color} onChange={(e) => updateZone(z.id, { color: e.target.value })} style={{ width: 34, height: 28, background: 'none', border: 0, padding: 0, cursor: 'pointer' }} /></td>
                   <td><input className="input" style={{ minHeight: 30 }} value={z.name} onChange={(e) => updateZone(z.id, { name: e.target.value })} /></td>
-                  <td><input className="input" style={{ minHeight: 30, fontSize: 12 }} value={z.areaTerms.join(', ')} placeholder="เว้นว่าง = ทุกพื้นที่" onChange={(e) => updateZone(z.id, { areaTerms: e.target.value.split(',').map((t) => t.trim()).filter(Boolean) })} /></td>
-                  <td><input className="input" style={{ minHeight: 30, fontSize: 12 }} value={z.provinceTerms.join(', ')} placeholder="เว้นว่าง = ทุกจังหวัด" onChange={(e) => updateZone(z.id, { provinceTerms: e.target.value.split(',').map((t) => t.trim()).filter(Boolean) })} /></td>
+                  <td><input className="input" style={{ minHeight: 30, fontSize: 12 }} value={z.areaTerms.join(',')} placeholder="เว้นว่าง = ทุกพื้นที่" onChange={(e) => updateZone(z.id, { areaTerms: e.target.value.split(',') })} onBlur={(e) => updateZone(z.id, { areaTerms: e.target.value.split(',').map((t) => t.trim()).filter(Boolean) })} /></td>
+                  <td><input className="input" style={{ minHeight: 30, fontSize: 12 }} value={z.provinceTerms.join(',')} placeholder="เว้นว่าง = ทุกจังหวัด" onChange={(e) => updateZone(z.id, { provinceTerms: e.target.value.split(',') })} onBlur={(e) => updateZone(z.id, { provinceTerms: e.target.value.split(',').map((t) => t.trim()).filter(Boolean) })} /></td>
                   <td><input className="input" style={{ minHeight: 30, textAlign: 'center' }} value={z.route} onChange={(e) => updateZone(z.id, { route: e.target.value.toUpperCase() })} /></td>
                   <td style={{ whiteSpace: 'nowrap' }}>
                     <button className="btn btn-icon btn-ghost" disabled={i === 0} title="เลื่อนขึ้น" onClick={() => {
