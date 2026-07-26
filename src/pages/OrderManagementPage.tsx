@@ -15,7 +15,7 @@ function OrderTable({ title, tone, rows, isEmpty }: { title: string; tone: 'warn
         <thead>
           <tr>
             <th>Route</th><th style={{ textAlign: 'center' }}>โซนที่ควรเป็น</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th style={{ textAlign: 'right' }}>ยอดขาย</th>
-            <th style={{ textAlign: 'center' }}>รายการ</th><th>วันที่จะจัดส่ง</th><th>หมายเหตุ</th><th style={{ textAlign: 'center' }}>ใบกำกับภาษี</th><th>สถานะ</th><th></th>
+            <th style={{ textAlign: 'center' }}>รายการ</th><th>วันเวลาที่สั่ง</th><th style={{ minWidth: 168 }}>วันที่จะจัดส่ง</th><th>หมายเหตุ</th><th style={{ textAlign: 'center' }}>ใบกำกับภาษี</th><th>สถานะ</th><th></th>
           </tr>
         </thead>
         <tbody>
@@ -40,7 +40,32 @@ function OrderTable({ title, tone, rows, isEmpty }: { title: string; tone: 'warn
               </td>
               <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{r.amtText}</td>
               <td style={{ textAlign: 'center' }}>{r.itemCount}</td>
-              <td style={{ fontSize: 12, color: r.plannedDeliveryDate === '—' ? 'var(--st-warn-fg)' : 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{r.plannedDeliveryDate}</td>
+              <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{r.orderedAtText}</td>
+              <td style={{ fontSize: 12 }}>
+                {r.hasDeliveryDate ? (
+                  <span style={{ color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{r.plannedDeliveryDate}</span>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 150 }}>
+                    {r.confirmSuggestedDeliveryDate && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 5, whiteSpace: 'nowrap' }}>
+                        <span style={{ fontSize: 11, color: 'var(--st-warn-fg)' }} title="แนะนำตามเวลาสั่ง: ก่อน 16:00 ส่งวันถัดไป, หลัง 16:00 ส่งอีก 2 วัน">
+                          แนะนำ {r.suggestedDeliveryDateText}
+                        </span>
+                        <button className="btn btn-ghost" style={{ fontSize: 10.5, padding: '2px 7px' }} onClick={r.confirmSuggestedDeliveryDate}>
+                          <i className="ph ph-check" />ยืนยัน
+                        </button>
+                      </div>
+                    )}
+                    <input
+                      type="date"
+                      className="input"
+                      style={{ minHeight: 26, fontSize: 11, width: 140 }}
+                      defaultValue=""
+                      onChange={(e) => r.setDeliveryDate(e.target.value)}
+                    />
+                  </div>
+                )}
+              </td>
               <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', maxWidth: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={r.noteText}>
                 {r.noteText || '—'}
               </td>

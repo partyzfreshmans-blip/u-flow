@@ -64,6 +64,36 @@ export function isoToSheetDateText(iso: string): string {
   return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
 }
 
+/** Parses "M/D/YYYY H:MM:SS" (or a bare "M/D/YYYY"), returning the date plus
+ * the hour of day when a time component is present. */
+function parseSheetDateTime(raw: string): { date: Date; hour: number | null } | null {
+  const date = parseSheetDate(raw);
+  if (!date) return null;
+  const m = (raw ?? '').match(/(\d{1,2}):(\d{2})/);
+  return { date, hour: m ? Number(m[1]) : null };
+}
+
+/** "7/24/2026 8:00:00" -> "24 ก.ค. 2026 08:00"; falls back to the raw text
+ * (or "—") when it doesn't parse. */
+export function formatOrderedAt(raw: string): string {
+  const parsed = parseSheetDateTime(raw);
+  if (!parsed) return (raw ?? '').trim() || '—';
+  const timeMatch = (raw ?? '').match(/(\d{1,2}):(\d{2})/);
+  const timePart = timeMatch ? ` ${timeMatch[1].padStart(2, '0')}:${timeMatch[2]}` : '';
+  return `${formatThaiShortDate(parsed.date)}${timePart}`;
+}
+
+/** Suggested delivery day, per the warehouse's cutoff rule: ordered before
+ * 16:00 -> ship the next day; at/after 16:00 (or the order time is unknown)
+ * -> ship the day after that. Returns an ISO day key, or null if the order's
+ * date/time text doesn't parse at all. */
+export function suggestedDeliveryDayKey(orderedAtText: string): string | null {
+  const parsed = parseSheetDateTime(orderedAtText);
+  if (!parsed) return null;
+  const cutoffPassed = parsed.hour != null && parsed.hour >= 16;
+  return dayKey(addDays(parsed.date, cutoffPassed ? 2 : 1));
+}
+
 /** Whole-day difference b - a, in days (positive when b is later). */
 export function daysBetweenKeys(a: string, b: string): number {
   const da = dayKeyToDate(a);

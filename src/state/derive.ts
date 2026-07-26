@@ -4,7 +4,7 @@ import { PROMO_UNITS, type Order, type PromoStatus, type PromoUnit, type RouteOr
 import { lineDiff, lineNetTotal, receivingFolderKey, recordHasDiscrepancy, recordTotal, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { loadCode } from '../data/vehicles';
 import { matchZone, UNASSIGNED_COLOR } from '../data/zoneConfig';
-import { addDays, dayKey, dayKeyToDate, daysBetweenKeys, formatThaiWeekdayDate, sheetDateToDayKey, todayDayKey } from '../data/dateUtils';
+import { addDays, dayKey, dayKeyToDate, daysBetweenKeys, formatOrderedAt, formatThaiShortDate, formatThaiWeekdayDate, sheetDateToDayKey, suggestedDeliveryDayKey, todayDayKey } from '../data/dateUtils';
 import { badgeStyle, DELIVERY_DONE_STATUSES, fmt, sheetStatusStyle } from './helpers';
 import type { AppActions, AppState } from './store';
 
@@ -241,6 +241,13 @@ export function computeRoute(state: AppState, actions: AppActions) {
   const rows = filtered.map((o) => {
     const zone = matchZone(state.zoneRules, o.districtProvince, o.addressFromUnii);
     const saveStatus = state.orderSaveStatus[o.orderNo];
+    const hasDeliveryDate = sheetDateToDayKey(o.plannedDeliveryDate) != null;
+    // Warehouse cutoff rule: ordered before 16:00 -> ship the next day;
+    // 16:00 or later -> ship the day after that. Only offered while there's
+    // no delivery date yet — once one exists, editing goes through "แก้ไข".
+    const suggestedIso = hasDeliveryDate ? null : suggestedDeliveryDayKey(o.orderedAtText);
+    const suggestedDate = suggestedIso ? dayKeyToDate(suggestedIso) : null;
+    const setDeliveryDate = (iso: string) => actions.saveOrderEdit(o.orderNo, { plannedDeliveryDate: iso, note: o.note, wantsTaxInvoice: o.wantsTaxInvoice });
     return {
       route: routeZoneLetter(o.route) || '—',
       zoneName: zone.zoneName,
@@ -254,7 +261,12 @@ export function computeRoute(state: AppState, actions: AppActions) {
       amtText: fmt(o.totalAmount),
       itemCount: o.itemCount,
       paymentType: o.paymentType,
+      orderedAtText: formatOrderedAt(o.orderedAtText),
       plannedDeliveryDate: o.plannedDeliveryDate || '—',
+      hasDeliveryDate,
+      suggestedDeliveryDateText: suggestedDate ? formatThaiShortDate(suggestedDate) : null,
+      confirmSuggestedDeliveryDate: suggestedIso ? () => setDeliveryDate(suggestedIso) : null,
+      setDeliveryDate,
       wantsTaxInvoice: o.wantsTaxInvoice,
       noteText: o.note,
       saving: saveStatus?.state === 'saving',
