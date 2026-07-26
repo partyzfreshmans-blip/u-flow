@@ -1,10 +1,31 @@
+import { useState } from 'react';
 import { OrderDetailModal } from '../components/OrderDetailModal';
 import { computeRoute } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 
 type OrderRow = ReturnType<typeof computeRoute>['rowsWithDate'][number];
 
+const PAGE_SIZE = 30;
+
+/** Native date-picker onChange isn't reliable enough to save-on-change (some
+ * browsers fire it mid-entry, before all three segments are filled) — so
+ * this keeps the picked value local until an explicit "บันทึก" click, the
+ * same proven pattern as the suggestion's "ยืนยัน" button. */
+function ManualDeliveryDateInput({ onSave }: { onSave: (iso: string) => void }) {
+  const [value, setValue] = useState('');
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+      <input type="date" className="input" style={{ minHeight: 26, fontSize: 11, width: 130 }} value={value} onChange={(e) => setValue(e.target.value)} />
+      <button className="btn btn-ghost" style={{ fontSize: 10.5, padding: '2px 7px' }} disabled={!value} onClick={() => onSave(value)}>
+        <i className="ph ph-check" />บันทึก
+      </button>
+    </div>
+  );
+}
+
 function OrderTable({ title, tone, rows, isEmpty }: { title: string; tone: 'warn' | 'neutral'; rows: OrderRow[]; isEmpty: boolean }) {
+  const [shown, setShown] = useState(PAGE_SIZE);
+  const visible = rows.slice(0, shown);
   return (
     <div className="card elev-sm" style={{ padding: '4px 14px 8px', marginBottom: 18 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 2px 8px', fontWeight: 600, fontSize: 13.5, color: tone === 'warn' ? 'var(--st-warn-fg)' : 'var(--color-neutral-200)' }}>
@@ -19,7 +40,7 @@ function OrderTable({ title, tone, rows, isEmpty }: { title: string; tone: 'warn
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => (
+          {visible.map((r) => (
             <tr key={r.orderNo}>
               <td><span style={{ display: 'inline-flex', fontSize: 11, padding: '2px 8px', borderRadius: 5, background: 'var(--color-neutral-800)', color: 'var(--color-neutral-200)' }}>{r.route}</span></td>
               <td style={{ textAlign: 'center' }} title={r.zoneReason}>
@@ -56,13 +77,7 @@ function OrderTable({ title, tone, rows, isEmpty }: { title: string; tone: 'warn
                         </button>
                       </div>
                     )}
-                    <input
-                      type="date"
-                      className="input"
-                      style={{ minHeight: 26, fontSize: 11, width: 140 }}
-                      defaultValue=""
-                      onChange={(e) => r.setDeliveryDate(e.target.value)}
-                    />
+                    <ManualDeliveryDateInput onSave={r.setDeliveryDate} />
                   </div>
                 )}
               </td>
@@ -92,12 +107,23 @@ function OrderTable({ title, tone, rows, isEmpty }: { title: string; tone: 'warn
       {rows.length === 0 && !isEmpty && (
         <div style={{ padding: 18, textAlign: 'center', color: 'var(--color-neutral-500)', fontSize: 12 }}>— ไม่มี —</div>
       )}
+      {rows.length > shown && (
+        <div style={{ padding: 14, textAlign: 'center' }}>
+          <button className="btn btn-ghost" style={{ fontSize: 12.5 }} onClick={() => setShown(shown + PAGE_SIZE)}>
+            แสดงเพิ่ม (เหลืออีก {rows.length - shown})
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
 export function OrderManagementPage({ state, actions }: { state: AppState; actions: AppActions }) {
   const v = computeRoute(state, actions);
+  // Reset each table's "show more" cap whenever a filter narrows/widens the
+  // result set, by remounting via key — otherwise narrowing to a handful of
+  // matches could still look capped at 30 from a previous broad search.
+  const filterSignature = [state.routeFilterValue, state.routeStatusFilter, state.routeQ, state.routeOrderDateFilter, state.routeDeliveryDateFilter].join('|');
 
   return (
     <div>
@@ -168,10 +194,10 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
       </div>
 
       {!v.isEmpty && (
-        <OrderTable title="ยังไม่ได้ใส่วันที่จัดส่ง" tone="warn" rows={v.rowsNoDate} isEmpty={v.isEmpty} />
+        <OrderTable key={`nodate-${filterSignature}`} title="ยังไม่ได้ใส่วันที่จัดส่ง" tone="warn" rows={v.rowsNoDate} isEmpty={v.isEmpty} />
       )}
       {!v.isEmpty && (
-        <OrderTable title="ใส่วันที่จัดส่งแล้ว" tone="neutral" rows={v.rowsWithDate} isEmpty={v.isEmpty} />
+        <OrderTable key={`dated-${filterSignature}`} title="ใส่วันที่จัดส่งแล้ว" tone="neutral" rows={v.rowsWithDate} isEmpty={v.isEmpty} />
       )}
       {v.isEmpty && !v.routeOrdersLoading && (
         <div className="card elev-sm" style={{ padding: 26, textAlign: 'center', color: 'var(--color-neutral-500)', fontSize: 12.5 }}>ไม่พบคำสั่งซื้อที่ตรงกับตัวกรอง</div>
