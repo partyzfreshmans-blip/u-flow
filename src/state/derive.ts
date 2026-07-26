@@ -1,11 +1,34 @@
 import type { CSSProperties } from 'react';
 import { orders, pickBatch } from '../data/mockData';
-import { PROMO_UNITS, type Order, type PromoStatus, type PromoUnit } from '../data/types';
+import { PROMO_UNITS, type Order, type PromoStatus, type PromoUnit, type RouteOrder } from '../data/types';
 import { lineDiff, lineNetTotal, receivingFolderKey, recordHasDiscrepancy, recordTotal, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { loadCode } from '../data/vehicles';
 import { matchZone, UNASSIGNED_COLOR } from '../data/zoneConfig';
-import { badgeStyle, fmt, sheetStatusStyle } from './helpers';
+import type { DeliveryOverrides } from '../data/deliveryOverrides';
+import { addDays, dayKey, dayKeyToDate, daysBetweenKeys, formatThaiShortDate, formatThaiWeekdayDate, sheetDateToDayKey, todayDayKey } from '../data/dateUtils';
+import { badgeStyle, DELIVERY_DONE_STATUSES, fmt, sheetStatusStyle } from './helpers';
 import type { AppActions, AppState } from './store';
+
+/** Delivery date after any local override — the sheet's own date column is
+ * read-only, so a rescheduled/dropped case is only ever corrected here. */
+function effectiveDeliveryDayKey(o: RouteOrder, overrides: DeliveryOverrides): string | null {
+  return overrides[o.orderNo] ?? sheetDateToDayKey(o.plannedDeliveryDate);
+}
+
+function effectiveDeliveryDisplay(o: RouteOrder, overrides: DeliveryOverrides): { text: string; overridden: boolean } {
+  const override = overrides[o.orderNo];
+  if (override) {
+    const d = dayKeyToDate(override);
+    return { text: d ? formatThaiShortDate(d) : override, overridden: true };
+  }
+  return { text: o.plannedDeliveryDate || '—', overridden: false };
+}
+
+/** True when the sheet's payment-type text indicates a cash-on-delivery order. */
+function isCodPayment(paymentType: string): boolean {
+  const p = paymentType.toLowerCase();
+  return p.includes('cash on delivery') || p.includes('cod') || paymentType.includes('เก็บเงินปลายทาง') || paymentType.includes('ปลายทาง');
+}
 
 // COD clearing is still local/mock (out of scope for the sheets migration).
 export const orderById: Record<string, Order> = {};
@@ -73,6 +96,52 @@ export function computeDashboard(state: AppState, actions: AppActions) {
     { label: 'มูลค่ารวม', value: fmt(totalValue), sub: 'ออเดอร์ที่แสดงทั้งหมด', icon: 'ph ph-wallet', iconColor: 'var(--st-ok-fg)' },
   ];
 
+  // ---- 7-day delivery forecast (from routeOrders — the tab with delivery dates) ----
+  const today = todayDayKey();
+  const assignedOrderNos = new Set(Object.values(state.routePlan).flat());
+  const forecastStatusOptions = Array.from(new Set(state.routeOrders.map((o) => o.status).filter(Boolean))).sort();
+
+  const forecastDays = Array.from({ length: 7 }, (_, i) => {
+    const d = addDays(dayKeyToDate(today)!, i);
+    const key = dayKey(d);
+    const ordersOnDay = state.routeOrders.filter((o) => {
+      if (state.forecastStatusFilter !== 'all' && o.status !== state.forecastStatusFilter) return false;
+      return effectiveDeliveryDayKey(o, state.deliveryOverrides) === key;
+    });
+    const routedCount = ordersOnDay.filter((o) => assignedOrderNos.has(o.orderNo)).length;
+    const notRoutedCount = ordersOnDay.length - routedCount;
+    return {
+      dayKey: key,
+      label: formatThaiWeekdayDate(d),
+      isToday: key === today,
+      count: ordersOnDay.length,
+      routedCount,
+      notRoutedCount,
+      fullyRouted: ordersOnDay.length > 0 && notRoutedCount === 0,
+    };
+  });
+
+  // ---- stuck orders: delivery date already passed, but never reached a done status ----
+  const stuckOrders = state.routeOrders
+    .filter((o) => {
+      const key = effectiveDeliveryDayKey(o, state.deliveryOverrides);
+      if (!key || key >= today) return false;
+      return !DELIVERY_DONE_STATUSES.includes(o.status);
+    })
+    .map((o) => {
+      const key = effectiveDeliveryDayKey(o, state.deliveryOverrides)!;
+      return {
+        orderNo: o.orderNo,
+        customer: o.customer,
+        plannedDeliveryDate: o.plannedDeliveryDate,
+        daysLate: Math.abs(daysBetweenKeys(key, today)),
+        stLabel: o.status || '—',
+        stStyle: sheetStatusStyle(o.status),
+        viewItems: () => actions.openOrderDetail(o.orderNo, o.customer),
+      };
+    })
+    .sort((a, b) => b.daysLate - a.daysLate);
+
   return {
     apiOrdersLoading: state.apiOrdersLoading,
     apiOrdersError: state.apiOrdersError,
@@ -83,6 +152,12 @@ export function computeDashboard(state: AppState, actions: AppActions) {
     orders: rows,
     stats,
     statusChips,
+    forecastDays,
+    forecastStatusFilter: state.forecastStatusFilter,
+    forecastStatusOptions,
+    onForecastStatusFilter: (v: string) => actions.patch({ forecastStatusFilter: v }),
+    stuckOrders,
+    stuckCount: stuckOrders.length,
   };
 }
 
@@ -117,12 +192,16 @@ export function computeRoute(state: AppState, actions: AppActions) {
   const zoneLetters = Array.from(new Set(state.routeOrders.map((o) => routeZoneLetter(o.route)).filter(Boolean))).sort();
   const statusValues = Array.from(new Set(state.routeOrders.map((o) => o.status).filter(Boolean))).sort();
 
+  const overrides = state.deliveryOverrides;
+
   const filtered = state.routeOrders.filter((o) => {
     if (state.routeFilterValue !== 'all') {
       const letter = routeZoneLetter(o.route);
       if (state.routeFilterValue === 'other' ? letter !== '' : letter !== state.routeFilterValue) return false;
     }
     if (state.routeStatusFilter !== 'all' && o.status !== state.routeStatusFilter) return false;
+    if (state.routeOrderDateFilter && sheetDateToDayKey(o.orderedDate) !== state.routeOrderDateFilter) return false;
+    if (state.routeDeliveryDateFilter && effectiveDeliveryDayKey(o, overrides) !== state.routeDeliveryDateFilter) return false;
     if (rq && !(o.customer.toLowerCase().includes(rq) || o.orderNo.toLowerCase().includes(rq))) return false;
     return true;
   });
@@ -155,6 +234,8 @@ export function computeRoute(state: AppState, actions: AppActions) {
 
   const rows = filtered.map((o) => {
     const zone = matchZone(state.zoneRules, o.districtProvince, o.addressFromUnii);
+    const delivery = effectiveDeliveryDisplay(o, overrides);
+    const currentIso = overrides[o.orderNo] ?? sheetDateToDayKey(o.plannedDeliveryDate) ?? '';
     return {
       route: routeZoneLetter(o.route) || '—',
       zoneName: zone.zoneName,
@@ -168,7 +249,22 @@ export function computeRoute(state: AppState, actions: AppActions) {
       amtText: fmt(o.totalAmount),
       itemCount: o.itemCount,
       paymentType: o.paymentType,
-      plannedDeliveryDate: o.plannedDeliveryDate,
+      plannedDeliveryDate: delivery.text,
+      deliveryOverridden: delivery.overridden,
+      isEditingDelivery: state.editDeliveryDateOrderNo === o.orderNo,
+      editDeliveryValue: state.editDeliveryDateValue,
+      onEditDeliveryValue: (v: string) => actions.patch({ editDeliveryDateValue: v }),
+      startEditDelivery: () => actions.patch({ editDeliveryDateOrderNo: o.orderNo, editDeliveryDateValue: currentIso }),
+      cancelEditDelivery: () => actions.patch({ editDeliveryDateOrderNo: null }),
+      saveEditDelivery: () => {
+        if (!state.editDeliveryDateValue) return;
+        actions.setDeliveryOverrides({ ...overrides, [o.orderNo]: state.editDeliveryDateValue });
+      },
+      clearDeliveryOverride: () => {
+        const next = { ...overrides };
+        delete next[o.orderNo];
+        actions.setDeliveryOverrides(next);
+      },
       completedDate: o.completedDate || '—',
       distanceText: o.distanceFromWhKm != null ? `${o.distanceFromWhKm.toFixed(1)} กม.` : '—',
       address: o.addressFromUnii || o.districtProvince,
@@ -210,6 +306,12 @@ export function computeRoute(state: AppState, actions: AppActions) {
     routeOrdersError: state.routeOrdersError,
     routeQ: state.routeQ,
     onRouteSearch: (v: string) => actions.patch({ routeQ: v }),
+    orderDateFilter: state.routeOrderDateFilter,
+    onOrderDateFilter: (v: string) => actions.patch({ routeOrderDateFilter: v }),
+    deliveryDateFilter: state.routeDeliveryDateFilter,
+    onDeliveryDateFilter: (v: string) => actions.patch({ routeDeliveryDateFilter: v }),
+    hasDateFilters: state.routeOrderDateFilter !== '' || state.routeDeliveryDateFilter !== '',
+    clearDateFilters: () => actions.patch({ routeOrderDateFilter: '', routeDeliveryDateFilter: '' }),
     routeTabs,
     statusTabs: makeTabs(statusValues, state.routeStatusFilter, (v) => actions.patch({ routeStatusFilter: v })),
     rows,
@@ -278,9 +380,14 @@ export function computePlanner(state: AppState, actions: AppActions) {
   const wh = state.routeOrders.find((o) => o.whLat != null && o.whLng != null);
   const warehouse = wh && wh.whLat != null && wh.whLng != null ? { lat: wh.whLat, lng: wh.whLng } : null;
 
-  // Plan today's outstanding work: anything not yet delivered or cancelled.
-  const DONE = ['ส่งสำเร็จ', 'ได้รับแล้ว', 'ยกเลิก'];
-  const candidates = state.routeOrders.filter((o) => !DONE.includes(o.status));
+  // Plan the selected day's outstanding work: anything not yet delivered or
+  // cancelled, scoped to the chosen delivery date when one is picked.
+  const overrides = state.deliveryOverrides;
+  const candidates = state.routeOrders.filter((o) => {
+    if (DELIVERY_DONE_STATUSES.includes(o.status)) return false;
+    if (state.plannerDate && effectiveDeliveryDayKey(o, overrides) !== state.plannerDate) return false;
+    return true;
+  });
 
   const assignedTo = new Map<string, string>();
   for (const [vehicleId, orderNos] of Object.entries(state.routePlan)) {
@@ -339,6 +446,12 @@ export function computePlanner(state: AppState, actions: AppActions) {
           zoneColor: zone.color,
           distanceText: `${distanceOf(o).toFixed(1)} กม.`,
           mapLink: o.mapLink,
+          isCod: isCodPayment(o.paymentType),
+          codMethod: state.routeCodMethod[o.orderNo] ?? 'cash',
+          codCollected: state.routeCodCollected[o.orderNo] ?? '',
+          setCodCash: () => actions.saveRouteCod(state.routeCodCollected, { ...state.routeCodMethod, [o.orderNo]: 'cash' }),
+          setCodTransfer: () => actions.saveRouteCod(state.routeCodCollected, { ...state.routeCodMethod, [o.orderNo]: 'transfer' }),
+          onCodCollected: (val: string) => actions.saveRouteCod({ ...state.routeCodCollected, [o.orderNo]: val.replace(/[^0-9]/g, '') }, state.routeCodMethod),
           moveUp: () => {
             if (i === 0) return;
             const arr2 = [...orderNos];
@@ -357,6 +470,22 @@ export function computePlanner(state: AppState, actions: AppActions) {
         };
       });
 
+    // COD tracking for this route: cash owed back at clearing excludes
+    // transfers, which are already settled — same split as the COD page.
+    const codStops = stops.filter((s) => s.isCod);
+    let codCashExpected = 0;
+    let codCashCollected = 0;
+    let codTransferTotal = 0;
+    for (const s of codStops) {
+      if (s.codMethod === 'transfer') {
+        codTransferTotal += s.amount;
+      } else {
+        codCashExpected += s.amount;
+        codCashCollected += Number(s.codCollected || 0);
+      }
+    }
+    const codDiff = codCashCollected - codCashExpected;
+
     return {
       id: v.id,
       name: v.name,
@@ -366,6 +495,17 @@ export function computePlanner(state: AppState, actions: AppActions) {
       stops,
       stopCount: stops.length,
       totalText: fmt(stops.reduce((a, s) => a + s.amount, 0)),
+      codCount: codStops.length,
+      codCashExpected,
+      codCashCollected,
+      codCashExpectedText: fmt(codCashExpected),
+      codCashCollectedText: fmt(codCashCollected),
+      codTransferTotal,
+      codTransferText: fmt(codTransferTotal),
+      hasCodTransfer: codTransferTotal > 0,
+      codDiffText: codDiff === 0 ? 'ยอดตรง' : (codDiff > 0 ? 'เกิน +' : 'ขาด −') + fmt(Math.abs(codDiff)),
+      codDiffStyle: codDiff === 0 ? badgeStyle('ok') : badgeStyle('bad'),
+      codMismatch: codCashExpected > 0 && codDiff !== 0,
       // Farthest drop first, working back toward the warehouse — the order the
       // ops sheet uses.
       autoSequence: () => {
@@ -395,6 +535,12 @@ export function computePlanner(state: AppState, actions: AppActions) {
 
   const allStops = vehicles.flatMap((v) => v.mapStops);
   const { kept: mapStops, excluded: excludedStopCount } = rejectOutlierStops(allStops, warehouse);
+
+  const codCashExpectedTotal = vehicles.reduce((a, v) => a + v.codCashExpected, 0);
+  const codCashCollectedTotal = vehicles.reduce((a, v) => a + v.codCashCollected, 0);
+  const codTransferGrandTotal = vehicles.reduce((a, v) => a + v.codTransferTotal, 0);
+  const codRouteCount = vehicles.filter((v) => v.codCount > 0).length;
+  const codGrandDiff = codCashCollectedTotal - codCashExpectedTotal;
 
   const suggestByZone = () => {
     const plan: RoutePlanShape = { ...state.routePlan };
@@ -434,6 +580,16 @@ export function computePlanner(state: AppState, actions: AppActions) {
     mapStops,
     excludedStopCount,
     warehouse,
+    plannerDate: state.plannerDate,
+    onPlannerDate: (v: string) => actions.patch({ plannerDate: v }),
+    clearPlannerDate: () => actions.patch({ plannerDate: '' }),
+    codRouteCount,
+    codCashExpectedText: fmt(codCashExpectedTotal),
+    codCashCollectedText: fmt(codCashCollectedTotal),
+    codTransferText: fmt(codTransferGrandTotal),
+    hasCodTransfer: codTransferGrandTotal > 0,
+    codGrandDiffText: codGrandDiff === 0 ? 'ยอดตรง' : (codGrandDiff > 0 ? 'เกิน +' : 'ขาด −') + fmt(Math.abs(codGrandDiff)),
+    codGrandDiffStyle: codGrandDiff === 0 ? badgeStyle('ok') : badgeStyle('bad'),
     suggestByZone,
     clearAll: () => actions.setRoutePlan({}),
     zoneLegend: state.zoneRules.map((z) => ({ id: z.id, name: z.name, color: z.color })),

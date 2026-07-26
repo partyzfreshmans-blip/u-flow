@@ -27,6 +27,22 @@ export function RoutePage({ state, actions }: { state: AppState; actions: AppAct
         <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-neutral-500)' }}>{v.resultCount} รายการ</div>
       </div>
 
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', marginBottom: 12 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, color: 'var(--color-neutral-400)' }}>
+          วันที่สั่ง
+          <input type="date" className="input" style={{ minHeight: 32, width: 155 }} value={v.orderDateFilter} onChange={(e) => v.onOrderDateFilter(e.target.value)} />
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, color: 'var(--color-neutral-400)' }}>
+          วันที่จะจัดส่ง
+          <input type="date" className="input" style={{ minHeight: 32, width: 155 }} value={v.deliveryDateFilter} onChange={(e) => v.onDeliveryDateFilter(e.target.value)} />
+        </label>
+        {v.hasDateFilters && (
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={v.clearDateFilters}>
+            <i className="ph ph-x" />ล้างตัวกรองวันที่
+          </button>
+        )}
+      </div>
+
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10, alignItems: 'center' }}>
         <span style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginRight: 2 }}>โซน</span>
         {v.routeTabs.map((t) => <button key={t.key} style={t.style} onClick={t.go}>{t.label}</button>)}
@@ -89,7 +105,32 @@ export function RoutePage({ state, actions }: { state: AppState; actions: AppAct
                   </td>
                   <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{r.amtText}</td>
                   <td style={{ textAlign: 'center' }}>{r.itemCount}</td>
-                  <td style={{ fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums' }}>{r.plannedDeliveryDate}</td>
+                  <td style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>
+                    {r.isEditingDelivery ? (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
+                        <input type="date" className="input" style={{ minHeight: 28, width: 140, fontSize: 12 }} value={r.editDeliveryValue} onChange={(e) => r.onEditDeliveryValue(e.target.value)} />
+                        <button className="btn btn-icon btn-ghost" title="บันทึก" onClick={r.saveEditDelivery}><i className="ph ph-check" style={{ fontSize: 13 }} /></button>
+                        <button className="btn btn-icon btn-ghost" title="ยกเลิก" onClick={r.cancelEditDelivery}><i className="ph ph-x" style={{ fontSize: 13 }} /></button>
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 5, whiteSpace: 'nowrap' }}>
+                        <span style={{ fontVariantNumeric: 'tabular-nums' }}>{r.plannedDeliveryDate}</span>
+                        {r.deliveryOverridden && (
+                          <span title="แก้ไขวันที่จัดส่งในเครื่องนี้ (ไม่ได้เขียนกลับชีท)" style={{ color: 'var(--st-warn-fg)' }}>
+                            <i className="ph ph-pencil-simple-line" style={{ fontSize: 12 }} />
+                          </span>
+                        )}
+                        <button className="btn btn-icon btn-ghost" title="แก้ไขวันที่จัดส่ง (เผื่อตกหล่น/เลื่อนวัน)" onClick={r.startEditDelivery}>
+                          <i className="ph ph-calendar-blank" style={{ fontSize: 12 }} />
+                        </button>
+                        {r.deliveryOverridden && (
+                          <button className="btn btn-icon btn-ghost" title="ยกเลิกการแก้ไข กลับไปใช้วันที่จากชีท" onClick={r.clearDeliveryOverride}>
+                            <i className="ph ph-arrow-counter-clockwise" style={{ fontSize: 12 }} />
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </td>
                   <td style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', color: 'var(--color-neutral-400)' }}>{r.distanceText}</td>
                   <td><span style={r.stStyle}>{r.stLabel}</span></td>
                   <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>

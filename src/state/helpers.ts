@@ -85,3 +85,7 @@ const badgeKindHex: Record<BadgeKind, string> = {
 export function sheetStatusColor(status: string): string {
   return badgeKindHex[sheetStatusKind[status] ?? 'neutral'];
 }
+
+/** Statuses that mean an order is done moving — delivered, received, or
+ * cancelled. Anything else with a delivery date in the past is a stuck order. */
+export const DELIVERY_DONE_STATUSES = ['ส่งสำเร็จ', 'ได้รับแล้ว', 'ยกเลิก'];

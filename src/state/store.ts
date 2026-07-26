@@ -11,6 +11,9 @@ import { attachmentKey, loadAttachments, saveAttachments, uploadToDrive, type At
 import { emptyLine, loadReceivingLog, receivingFolderKey, saveReceivingLog, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { DEFAULT_VEHICLES, loadRoutePlan, loadVehicles, saveRoutePlan, saveVehicles, type RoutePlan, type Vehicle } from '../data/vehicles';
 import { DEFAULT_ZONE_RULES, loadZoneRules, saveZoneRules, type ZoneRule } from '../data/zoneConfig';
+import { loadDeliveryOverrides, saveDeliveryOverrides, type DeliveryOverrides } from '../data/deliveryOverrides';
+import { loadRouteCodState, saveRouteCodState } from '../data/routeCod';
+import { todayDayKey } from '../data/dateUtils';
 import type { AttachmentScope } from '../config/drive';
 import type { ApiImportOrder, CsMasterCustomer, Promo, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
 
@@ -36,6 +39,9 @@ export interface AppState {
   q: string;
   statusFilter: string;
 
+  // 7-day delivery forecast (built from routeOrders, shown on the dashboard)
+  forecastStatusFilter: string;
+
   // order line-items modal (shared by dashboard's "ดู" button — "SKU Detail" tab)
   orderDetailOpen: boolean;
   orderDetailOrderNo: string;
@@ -51,12 +57,25 @@ export interface AppState {
   routeFilterValue: string;
   routeStatusFilter: string;
   routeQ: string;
+  /** ISO date (YYYY-MM-DD) filters; '' = no filter. */
+  routeOrderDateFilter: string;
+  routeDeliveryDateFilter: string;
+  /** Local override of a delivery date, keyed by orderNo — the sheet itself
+   * is read-only, so a rescheduled/missed case is corrected only here. */
+  deliveryOverrides: DeliveryOverrides;
+  editDeliveryDateOrderNo: string | null;
+  editDeliveryDateValue: string;
 
   // route planner (zones + vehicles are user-editable and persisted locally)
   zoneRules: ZoneRule[];
   vehicles: Vehicle[];
   routePlan: RoutePlan;
   plannerConfigTab: 'zones' | 'vehicles' | null;
+  /** Which day's deliveries the planner pool is scoped to (ISO date); '' = all. */
+  plannerDate: string;
+  /** COD tracking per order, route-by-route (which vehicle is implied by routePlan). */
+  routeCodCollected: Record<string, string>;
+  routeCodMethod: Record<string, 'cash' | 'transfer'>;
 
   // batch picking
   picked: Record<string, boolean>;
@@ -135,6 +154,8 @@ export const initialState: AppState = {
   q: '',
   statusFilter: 'all',
 
+  forecastStatusFilter: 'all',
+
   orderDetailOpen: false,
   orderDetailOrderNo: '',
   orderDetailCustomer: '',
@@ -148,11 +169,19 @@ export const initialState: AppState = {
   routeFilterValue: 'all',
   routeStatusFilter: 'all',
   routeQ: '',
+  routeOrderDateFilter: '',
+  routeDeliveryDateFilter: '',
+  deliveryOverrides: {},
+  editDeliveryDateOrderNo: null,
+  editDeliveryDateValue: '',
 
   zoneRules: DEFAULT_ZONE_RULES,
   vehicles: DEFAULT_VEHICLES,
   routePlan: {},
   plannerConfigTab: null,
+  plannerDate: todayDayKey(),
+  routeCodCollected: {},
+  routeCodMethod: {},
 
   picked: {},
   pickClosed: false,
@@ -374,6 +403,7 @@ export function useAppStore() {
   // Zones, vehicles and the current plan live in localStorage, so they survive
   // a reload without needing the sheet or a backend.
   useEffect(() => {
+    const routeCod = loadRouteCodState();
     dispatch({
       type: 'patch',
       patch: {
@@ -382,6 +412,9 @@ export function useAppStore() {
         routePlan: loadRoutePlan(),
         attachments: loadAttachments(),
         receivingLog: loadReceivingLog(),
+        deliveryOverrides: loadDeliveryOverrides(),
+        routeCodCollected: routeCod.collected,
+        routeCodMethod: routeCod.method,
       },
     });
   }, []);
@@ -400,6 +433,14 @@ export function useAppStore() {
       setRoutePlan: (plan: RoutePlan) => {
         dispatch({ type: 'patch', patch: { routePlan: plan } });
         saveRoutePlan(plan);
+      },
+      setDeliveryOverrides: (overrides: DeliveryOverrides) => {
+        saveDeliveryOverrides(overrides);
+        dispatch({ type: 'patch', patch: { deliveryOverrides: overrides, editDeliveryDateOrderNo: null } });
+      },
+      saveRouteCod: (collected: Record<string, string>, method: Record<string, 'cash' | 'transfer'>) => {
+        saveRouteCodState({ collected, method });
+        dispatch({ type: 'patch', patch: { routeCodCollected: collected, routeCodMethod: method } });
       },
 
       /** Upload to Drive via the backend, then record the returned metadata.

@@ -26,6 +26,13 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
 
       {/* summary + actions */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', padding: '11px 15px', marginBottom: 14, borderRadius: 10, background: 'var(--color-surface)', boxShadow: 'var(--shadow-sm)', fontSize: 12.5 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          <i className="ph ph-calendar-blank" style={{ color: 'var(--color-accent-300)' }} />วางแผนวันที่
+          <input type="date" className="input" style={{ minHeight: 30, width: 150 }} value={v.plannerDate} onChange={(e) => v.onPlannerDate(e.target.value)} />
+        </label>
+        {v.plannerDate && (
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={v.clearPlannerDate} title="แสดงออเดอร์ค้างส่งทุกวัน">ดูทุกวัน</button>
+        )}
         <span style={{ fontWeight: 600 }}><i className="ph ph-truck" style={{ marginRight: 6, color: 'var(--color-accent-300)' }} />รถ {state.vehicles.length} คัน · คนไปส่งรวม {v.totalCrew} คน</span>
         <span style={{ color: 'var(--color-neutral-400)' }}>ออกจริงวันนี้ {v.activeCrew} คน</span>
         <span style={{ color: 'var(--color-neutral-400)' }}>จัดลงรถแล้ว {v.plannedStops} จุด</span>
@@ -37,6 +44,17 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
           <button className="btn btn-secondary" onClick={v.clearAll} disabled={v.plannedStops === 0}><i className="ph ph-eraser" />ล้างแผน</button>
         </div>
       </div>
+
+      {/* COD overview — collection status across every route going out */}
+      {v.codRouteCount > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', padding: '10px 15px', marginBottom: 14, borderRadius: 10, background: 'var(--color-surface)', boxShadow: 'var(--shadow-sm)', fontSize: 12.5 }}>
+          <span style={{ fontWeight: 600 }}><i className="ph ph-money" style={{ marginRight: 6, color: 'var(--color-accent-300)' }} />COD {v.codRouteCount} รูท</span>
+          <span>ต้องเก็บสด {v.codCashExpectedText}</span>
+          <span>เก็บมาแล้ว {v.codCashCollectedText}</span>
+          {v.hasCodTransfer && <span style={{ color: 'var(--color-neutral-400)' }}>โอนแล้ว {v.codTransferText}</span>}
+          <span style={v.codGrandDiffStyle}>{v.codGrandDiffText}</span>
+        </div>
+      )}
 
       {/* zone editor */}
       {v.configTab === 'zones' && (
@@ -129,6 +147,12 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                 </div>
                 <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                   <span style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{veh.stopCount} จุด · {veh.totalText}</span>
+                  {veh.codCount > 0 && (
+                    <span style={{ fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      <i className="ph ph-money" style={{ color: 'var(--color-accent-300)' }} />COD {veh.codCashCollectedText} / {veh.codCashExpectedText}
+                      <span style={veh.codDiffStyle}>{veh.codDiffText}</span>
+                    </span>
+                  )}
                   <button className="btn btn-secondary" style={{ minHeight: 30 }} onClick={veh.autoSequence} disabled={veh.stopCount < 2} title="เรียงจากจุดไกลคลังที่สุดไปใกล้ที่สุด">
                     <i className="ph ph-sort-descending" />เรียงไกล→ใกล้
                   </button>
@@ -143,7 +167,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                   <thead>
                     <tr>
                       <th style={{ width: 46, textAlign: 'center' }}>ลำดับ</th><th style={{ width: 70, textAlign: 'center' }}>ลำดับโหลด</th>
-                      <th>ลูกค้า</th><th>โซน</th><th style={{ textAlign: 'right' }}>ยอดเงิน</th><th style={{ textAlign: 'right' }}>ระยะ</th><th style={{ width: 80 }}></th>
+                      <th>ลูกค้า</th><th>โซน</th><th style={{ textAlign: 'right' }}>ยอดเงิน</th><th style={{ width: 200 }}>COD</th><th style={{ textAlign: 'right' }}>ระยะ</th><th style={{ width: 80 }}></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -161,6 +185,23 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                           </span>
                         </td>
                         <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{s.amtText}</td>
+                        <td>
+                          {s.isCod ? (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <label className="seg-opt" style={{ fontSize: 10.5 }}>
+                                <input type="radio" checked={s.codMethod === 'cash'} onChange={s.setCodCash} />สด
+                              </label>
+                              <label className="seg-opt" style={{ fontSize: 10.5 }}>
+                                <input type="radio" checked={s.codMethod === 'transfer'} onChange={s.setCodTransfer} />โอน
+                              </label>
+                              {s.codMethod === 'cash' && (
+                                <input className="input" style={{ minHeight: 26, width: 70, fontSize: 11 }} inputMode="numeric" placeholder="เก็บได้" value={s.codCollected} onChange={(e) => s.onCodCollected(e.target.value)} />
+                              )}
+                            </div>
+                          ) : (
+                            <span style={{ fontSize: 11, color: 'var(--color-neutral-600)' }}>—</span>
+                          )}
+                        </td>
                         <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums' }}>{s.distanceText}</td>
                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                           <button className="btn btn-icon btn-ghost" onClick={s.moveUp} title="เลื่อนขึ้น"><i className="ph ph-caret-up" style={{ fontSize: 12 }} /></button>
