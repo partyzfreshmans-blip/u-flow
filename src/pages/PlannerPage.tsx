@@ -297,9 +297,20 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
 
           {/* unassigned pool */}
           <div className="card elev-sm" style={{ gap: 10 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
               <div style={{ fontWeight: 600, fontSize: 14 }}>ออเดอร์ที่ยังไม่จัดลงรถ ({v.unassignedCount})</div>
-              <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--color-neutral-500)' }}>เรียงจากไกลคลังที่สุด</span>
+              {v.selectedCount > 0 ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 12, color: 'var(--color-accent-300)', fontWeight: 500 }}>เลือกแล้ว {v.selectedCount} รายการ</span>
+                  <select className="input" style={{ minHeight: 30, fontSize: 12 }} value="" onChange={(e) => e.target.value && v.assignSelectedTo(e.target.value)}>
+                    <option value="">จัดลงรถ…</option>
+                    {state.vehicles.map((veh) => <option key={veh.id} value={veh.id}>{veh.name}</option>)}
+                  </select>
+                  <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={v.clearSelection}><i className="ph ph-x" />ล้างที่เลือก</button>
+                </div>
+              ) : (
+                <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--color-neutral-500)' }}>เรียงจากไกลคลังที่สุด</span>
+              )}
             </div>
             {v.unassignedCount === 0 ? (
               <div style={{ padding: 18, textAlign: 'center', color: 'var(--st-ok-fg)', fontSize: 12.5 }}>
@@ -309,13 +320,17 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
               <table className="table">
                 <thead>
                   <tr>
-                    <th>ลูกค้า</th><th>อำเภอ/จังหวัด</th><th>เบอร์โทร</th><th>โซน</th><th style={{ textAlign: 'right' }}>ยอดเงิน</th>
-                    <th style={{ textAlign: 'right' }}>ระยะ</th><th style={{ width: 150 }}>จัดลงรถ</th>
+                    <th style={{ width: 30 }}>
+                      <input type="checkbox" checked={v.allUnassignedSelected} onChange={v.toggleSelectAllUnassigned} />
+                    </th>
+                    <th>ลูกค้า / ที่อยู่</th><th>เบอร์โทร</th><th>โซน</th><th>จำนวน</th><th style={{ textAlign: 'right' }}>ยอดเงิน</th>
+                    <th style={{ textAlign: 'right' }}>ระยะ</th><th style={{ width: 150 }}>จัดลงรถ</th><th></th>
                   </tr>
                 </thead>
                 <tbody>
                   {v.unassigned.map((o) => (
                     <tr key={o.orderNo}>
+                      <td><input type="checkbox" checked={o.selected} onChange={o.toggleSelect} /></td>
                       <td>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                           {o.customer}
@@ -333,15 +348,16 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                             </span>
                           )}
                         </div>
-                        <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', maxWidth: 260, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{o.orderNo} · {o.address}</div>
+                        <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', marginTop: 1 }}>{o.orderNo}</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-neutral-400)', maxWidth: 320, whiteSpace: 'normal', wordBreak: 'break-word' }}>{o.address}{o.districtProvince !== '—' ? ` · ${o.districtProvince}` : ''}</div>
                       </td>
-                      <td style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{o.districtProvince}</td>
                       <td style={{ fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.phone}</td>
                       <td>
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, whiteSpace: 'nowrap' }}>
                           <span style={{ width: 9, height: 9, borderRadius: '50%', background: o.zoneColor, flex: 'none' }} />{o.zoneName}
                         </span>
                       </td>
+                      <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>{o.qtyText}</td>
                       <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{o.amtText}</td>
                       <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums' }}>{o.distanceText}</td>
                       <td>
@@ -349,6 +365,11 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                           <option value="">เลือกรถ…</option>
                           {state.vehicles.map((veh) => <option key={veh.id} value={veh.id}>{veh.name}</option>)}
                         </select>
+                      </td>
+                      <td>
+                        <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={o.editLocation} title="ตรวจสอบ/แก้ไขโลเคชั่นบนแผนที่">
+                          <i className="ph ph-map-pin-line" />
+                        </button>
                       </td>
                     </tr>
                   ))}
@@ -378,6 +399,52 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
           </div>
         </div>
       </div>
+
+      {v.locationModalOpen && (
+        <div className="dialog-backdrop" onClick={v.closeLocationModal}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 480 }}>
+            <div className="dialog-title">ตรวจสอบ/แก้ไขโลเคชั่น</div>
+            <div className="dialog-body" style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
+              <div style={{ fontSize: 13.5 }}>
+                <b>{v.locationCustomer}</b>
+                <div style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{v.locationOrderNo}</div>
+                <div style={{ fontSize: 12, color: 'var(--color-neutral-500)', marginTop: 4 }}>{v.locationAddress}</div>
+              </div>
+              <div style={{ height: 220, borderRadius: 10, overflow: 'hidden', position: 'relative', background: 'var(--color-bg)' }}>
+                {v.locationPreviewLat != null && v.locationPreviewLng != null ? (
+                  <RouteMap
+                    stops={[{ id: v.locationOrderNo, lat: v.locationPreviewLat, lng: v.locationPreviewLng, label: v.locationCustomer, status: '', color: '#e5484d', zoneName: '', pinLabel: null }]}
+                    warehouse={null}
+                  />
+                ) : (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', fontSize: 12, color: 'var(--color-neutral-500)' }}>ยังไม่มีพิกัด</div>
+                )}
+              </div>
+              <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)' }}>
+                พิกัดปัจจุบันในชีท: <span style={{ fontVariantNumeric: 'tabular-nums' }}>{v.locationOriginalText}</span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 11 }}>
+                <div className="field"><label>Latitude (ละ)</label><input className="input" value={v.locationLat} onChange={(e) => v.onLocationLat(e.target.value)} disabled={v.locationSaving} /></div>
+                <div className="field"><label>Longitude (ลอง)</label><input className="input" value={v.locationLng} onChange={(e) => v.onLocationLng(e.target.value)} disabled={v.locationSaving} /></div>
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--color-neutral-500)' }}>
+                <i className="ph ph-info" style={{ marginRight: 4 }} />บันทึกแล้วจะเขียนทับพิกัดของลูกค้ารายนี้ใน Google Sheet (CS Master) โดยตรง
+              </div>
+              {v.locationError && (
+                <div style={{ display: 'flex', gap: 9, padding: 11, borderRadius: 9, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 12.5 }}>
+                  <i className="ph ph-warning-fill" style={{ flex: 'none' }} />{v.locationError}
+                </div>
+              )}
+            </div>
+            <div className="dialog-actions">
+              <button className="btn btn-secondary" onClick={v.closeLocationModal} disabled={v.locationSaving}>ยกเลิก</button>
+              <button className="btn btn-primary" onClick={v.saveLocation} disabled={v.locationSaving}>
+                {v.locationSaving ? <><i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังบันทึก...</> : <><i className="ph ph-floppy-disk" />บันทึกลงชีท</>}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

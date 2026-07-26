@@ -5,6 +5,7 @@ import { PROMO_UNITS, type Order, type PromoStatus, type PromoUnit, type RouteOr
 import { lineDiff, lineNetTotal, receivingFolderKey, recordHasDiscrepancy, recordTotal, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { loadCode } from '../data/vehicles';
 import { resolveZone, UNASSIGNED_COLOR } from '../data/zoneConfig';
+import { detectUnit } from '../data/sources/promotionsSheet';
 import { addDays, dayKey, dayKeyToDate, daysBetweenKeys, formatOrderedAt, formatThaiShortDate, formatThaiWeekdayDate, sheetDateTimeToMs, sheetDateToDayKey, suggestedDeliveryDayKey, todayDayKey } from '../data/dateUtils';
 import { badgeStyle, DELIVERY_DONE_STATUSES, fmt, sheetStatusStyle } from './helpers';
 import type { AppActions, AppState } from './store';
@@ -430,6 +431,25 @@ export function computePlanner(state: AppState, actions: AppActions) {
     actions.setRoutePlan(plan);
   };
 
+  // Per-order quantity broken down into the three units warehouse staff
+  // actually load by (ชิ้น/แพ็ค/ลัง) — หีบ and คู่ fold into ลัง/ชิ้น
+  // respectively since they're the same real-world unit under a different
+  // sheet spelling (see detectUnit's own regexes for why).
+  const orderUnitQty = new Map<string, Partial<Record<'ชิ้น' | 'แพ็ค' | 'ลัง', number>>>();
+  for (const li of state.orderLineItems) {
+    const detected = detectUnit(li.unit);
+    const bucket = detected === 'หีบ' ? 'ลัง' : detected === 'คู่' ? 'ชิ้น' : detected;
+    const m = orderUnitQty.get(li.orderNo) ?? {};
+    m[bucket] = (m[bucket] ?? 0) + li.qty;
+    orderUnitQty.set(li.orderNo, m);
+  }
+  const qtyTextFor = (orderNo: string): string => {
+    const m = orderUnitQty.get(orderNo);
+    if (!m) return '—';
+    const parts = (['ชิ้น', 'แพ็ค', 'ลัง'] as const).map((u) => (m[u] ? `${m[u]!.toLocaleString('en-US')} ${u}` : null)).filter((s): s is string => s !== null);
+    return parts.length > 0 ? parts.join(' · ') : '—';
+  };
+
   const unassigned = candidates
     .filter((o) => !assignedTo.has(o.orderNo))
     .map((o) => {
@@ -442,6 +462,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
         phone: o.phone || '—',
         amtText: fmt(o.totalAmount),
         itemCount: o.itemCount,
+        qtyText: qtyTextFor(o.orderNo),
         zoneName: zone.zoneName,
         zoneColor: zone.color,
         suggestedRoute: zone.route,
@@ -452,6 +473,9 @@ export function computePlanner(state: AppState, actions: AppActions) {
         hasNote: o.note.trim() !== '',
         lat: o.lat,
         lng: o.lng,
+        selected: state.plannerSelectedOrderNos.includes(o.orderNo),
+        toggleSelect: () => actions.togglePlannerSelect(o.orderNo, state.plannerSelectedOrderNos),
+        editLocation: () => actions.openEditOrderLocation(o),
         assignTo: (vehicleId: string) => {
           const plan = { ...state.routePlan };
           plan[vehicleId] = [...(plan[vehicleId] ?? []), o.orderNo];
@@ -460,6 +484,24 @@ export function computePlanner(state: AppState, actions: AppActions) {
       };
     })
     .sort((a, b) => b.distanceKm - a.distanceKm);
+
+  const unassignedOrderNos = unassigned.map((u) => u.orderNo);
+  const selectedInUnassigned = state.plannerSelectedOrderNos.filter((no) => unassignedOrderNos.includes(no));
+  const allUnassignedSelected = unassignedOrderNos.length > 0 && selectedInUnassigned.length === unassignedOrderNos.length;
+  const toggleSelectAllUnassigned = () => actions.setPlannerSelection(allUnassignedSelected ? [] : unassignedOrderNos);
+  const assignSelectedTo = (vehicleId: string) => {
+    if (selectedInUnassigned.length === 0) return;
+    const plan = { ...state.routePlan };
+    plan[vehicleId] = [...(plan[vehicleId] ?? []), ...selectedInUnassigned];
+    actions.setRoutePlan(plan);
+    actions.setPlannerSelection([]);
+  };
+  const clearSelection = () => actions.setPlannerSelection([]);
+
+  const locationEditing = state.orderLocationOrderNo ? (byOrderNo.get(state.orderLocationOrderNo) ?? null) : null;
+  const locationLatNum = Number(state.orderLocationLat);
+  const locationLngNum = Number(state.orderLocationLng);
+  const locationPreviewValid = state.orderLocationLat.trim() !== '' && state.orderLocationLng.trim() !== '' && !Number.isNaN(locationLatNum) && !Number.isNaN(locationLngNum);
 
   const vehicles = state.vehicles.map((v) => {
     const orderNos = state.routePlan[v.id] ?? [];
@@ -655,6 +697,33 @@ export function computePlanner(state: AppState, actions: AppActions) {
     vehicles,
     unassigned,
     unassignedCount: unassigned.length,
+    allUnassignedSelected,
+    toggleSelectAllUnassigned,
+    selectedCount: selectedInUnassigned.length,
+    assignSelectedTo,
+    clearSelection,
+    locationModalOpen: locationEditing !== null,
+    locationOrderNo: locationEditing?.orderNo ?? '',
+    locationCustomer: locationEditing?.customer ?? '',
+    locationAddress: locationEditing ? locationEditing.addressFromUnii || locationEditing.districtProvince : '',
+    locationOriginalText: locationEditing && locationEditing.lat != null && locationEditing.lng != null ? `${locationEditing.lat.toFixed(5)}, ${locationEditing.lng.toFixed(5)}` : 'ไม่มีข้อมูล',
+    locationLat: state.orderLocationLat,
+    locationLng: state.orderLocationLng,
+    locationSaving: state.orderLocationSaving,
+    locationError: state.orderLocationError,
+    onLocationLat: (v: string) => actions.patch({ orderLocationLat: v.replace(/[^0-9.\-]/g, '') }),
+    onLocationLng: (v: string) => actions.patch({ orderLocationLng: v.replace(/[^0-9.\-]/g, '') }),
+    closeLocationModal: () => actions.closeEditOrderLocation(),
+    locationPreviewLat: locationPreviewValid ? locationLatNum : (locationEditing?.lat ?? null),
+    locationPreviewLng: locationPreviewValid ? locationLngNum : (locationEditing?.lng ?? null),
+    saveLocation: () => {
+      if (!locationEditing) return;
+      if (!locationPreviewValid) {
+        actions.patch({ orderLocationError: 'กรุณากรอกพิกัดให้ถูกต้อง (ตัวเลขเท่านั้น)' });
+        return;
+      }
+      actions.saveOrderLocation(locationEditing.orderNo, locationEditing.customer, locationEditing.phone, locationLatNum, locationLngNum);
+    },
     plannedStops,
     totalCrew,
     activeCrew,

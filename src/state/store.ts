@@ -104,6 +104,15 @@ export interface AppState {
   /** Direction the "เรียงไกล→ใกล้" button will apply next, per vehicle —
    * toggles each click. Missing = 'far' (the original default). */
   routeSortDirection: Record<string, 'far' | 'near'>;
+  /** Multi-select on the planner's unassigned-orders pool, for bulk
+   * "จัดลงรถ" assignment. */
+  plannerSelectedOrderNos: string[];
+  /** orderNo whose "ตรวจสอบ/แก้ไขโลเคชั่น" modal is open; null = closed. */
+  orderLocationOrderNo: string | null;
+  orderLocationLat: string;
+  orderLocationLng: string;
+  orderLocationSaving: boolean;
+  orderLocationError: string | null;
 
   // mobile driver view — reuses routeOrders/routePlan/vehicles, only adds its
   // own navigation + offline-sync state
@@ -242,6 +251,12 @@ export const initialState: AppState = {
   routeCodCollected: {},
   routeCodMethod: {},
   routeSortDirection: {},
+  plannerSelectedOrderNos: [],
+  orderLocationOrderNo: null,
+  orderLocationLat: '',
+  orderLocationLng: '',
+  orderLocationSaving: false,
+  orderLocationError: null,
 
   driverSyncQueue: [],
   driverOnline: typeof navigator === 'undefined' || navigator.onLine,
@@ -314,6 +329,7 @@ export type Action =
   | { type: 'saveSku' }
   | { type: 'addPromo' }
   | { type: 'updateCustomerLatLng'; rowIndex: number; lat: number; lng: number }
+  | { type: 'updateOrderLocation'; orderNo: string; lat: number; lng: number }
   | { type: 'setOrderSaveStatus'; orderNo: string; status: OrderSaveStatus | null }
   | { type: 'applyOrderEdit'; orderNo: string; plannedDeliveryDateSheetText: string | null; note: string | null; wantsTaxInvoice: boolean | null }
   | { type: 'applyDeliveryMark'; orderNo: string; statusText: string; completedDateText: string }
@@ -382,6 +398,11 @@ function reducer(state: AppState, action: Action): AppState {
     case 'updateCustomerLatLng': {
       const arr = state.customers.map((c) => (c.rowIndex === action.rowIndex ? { ...c, lat: action.lat, lng: action.lng } : c));
       return { ...state, customers: arr };
+    }
+
+    case 'updateOrderLocation': {
+      const routeOrders = state.routeOrders.map((o) => (o.orderNo === action.orderNo ? { ...o, lat: action.lat, lng: action.lng } : o));
+      return { ...state, routeOrders };
     }
 
     case 'setOrderSaveStatus': {
@@ -827,6 +848,52 @@ export function useAppStore() {
           .catch((err: unknown) => {
             const message = err instanceof Error ? err.message : 'บันทึกพิกัดไม่สำเร็จ';
             dispatch({ type: 'patch', patch: { custEditSaving: false, custEditError: message } });
+          });
+      },
+
+      togglePlannerSelect: (orderNo: string, selected: string[]) => {
+        const next = selected.includes(orderNo) ? selected.filter((n) => n !== orderNo) : [...selected, orderNo];
+        dispatch({ type: 'patch', patch: { plannerSelectedOrderNos: next } });
+      },
+      setPlannerSelection: (orderNos: string[]) => dispatch({ type: 'patch', patch: { plannerSelectedOrderNos: orderNos } }),
+
+      openEditOrderLocation: (o: RouteOrder) => {
+        dispatch({
+          type: 'patch',
+          patch: {
+            orderLocationOrderNo: o.orderNo,
+            orderLocationLat: o.lat != null ? String(o.lat) : '',
+            orderLocationLng: o.lng != null ? String(o.lng) : '',
+            orderLocationError: null,
+          },
+        });
+      },
+      closeEditOrderLocation: () => dispatch({ type: 'patch', patch: { orderLocationOrderNo: null, orderLocationError: null } }),
+      /** Writes the corrected coordinate to CS Master (matched by name+phone,
+       * the same backend endpoint the Customer page's own lat/lng editor
+       * uses) rather than inventing a new write to the คำสั่งซื้อ sheet's own
+       * CS_Lat/CS_Long columns — those are populated by a lookup from CS
+       * Master, so fixing the source there is the correct place to edit. */
+      saveOrderLocation: (orderNo: string, name: string, phone: string, lat: number, lng: number) => {
+        dispatch({ type: 'patch', patch: { orderLocationSaving: true, orderLocationError: null } });
+        updateCsMasterLatLng(name, phone, lat, lng)
+          .then(async () => {
+            invalidateSheetCache(CS_MASTER_CSV_URL);
+            dispatch({ type: 'updateOrderLocation', orderNo, lat, lng });
+            dispatch({ type: 'patch', patch: { orderLocationSaving: false, orderLocationOrderNo: null } });
+            // Eagerly geocode the corrected coordinate so the zone badge
+            // reflects the fix immediately, instead of waiting for the next
+            // full page load to pick it up via the background batch.
+            const result = await reverseGeocode(lat, lng);
+            if (result) {
+              const cache: GeocodeCache = { ...loadGeocodeCache(), [coordKey(lat, lng)]: { ...result, fetchedAt: Date.now() } };
+              saveGeocodeCache(cache);
+              dispatch({ type: 'patch', patch: { geocodeCache: cache } });
+            }
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'บันทึกพิกัดไม่สำเร็จ';
+            dispatch({ type: 'patch', patch: { orderLocationSaving: false, orderLocationError: message } });
           });
       },
 
