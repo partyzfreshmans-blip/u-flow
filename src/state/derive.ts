@@ -4,6 +4,7 @@ import type { PickLot } from '../data/pickLots';
 import { PROMO_UNITS, type ApiImportOrder, type Order, type OrderLineItem, type PromoStatus, type PromoUnit, type RouteOrder } from '../data/types';
 import { lineDiff, lineNetTotal, receivingFolderKey, recordHasDiscrepancy, recordTotal, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { loadCode } from '../data/vehicles';
+import { nextBatchId, type BatchRoute } from '../data/batchRoutes';
 import { resolveZone, UNASSIGNED_COLOR } from '../data/zoneConfig';
 import { detectUnit } from '../data/sources/promotionsSheet';
 import { addDays, dayKey, dayKeyToDate, daysBetweenKeys, formatOrderedAt, formatThaiShortDate, formatThaiWeekdayDate, sheetDateTimeToMs, sheetDateToDayKey, suggestedDeliveryDayKey, todayDayKey } from '../data/dateUtils';
@@ -613,6 +614,36 @@ export function computePlanner(state: AppState, actions: AppActions) {
   // A driver only ever sees the route(s) on their own assigned vehicle — not
   // the fleet, not the unassigned pool waiting to be routed.
   const vehicleSource = isDriverView ? state.vehicles.filter((v) => v.id === state.session?.driverVehicleId) : state.vehicles;
+  const username = state.session?.username ?? '';
+
+  // Batch Route locking — a vehicle with a locked, not-currently-unlocked
+  // batch for the day being planned can't have its sequence/membership
+  // touched until someone explicitly unlocks it (see unlockBatch below).
+  // "Active" batch per vehicle = the most recently created one for this
+  // exact delivery date (a vehicle can accumulate more than one batch across
+  // a day — e.g. a second trip — each keeping its own frozen order list).
+  const batchesForDate = state.plannerDate ? state.batchRoutes.filter((b) => b.deliveryDate === state.plannerDate) : [];
+  const activeBatchByVehicle = new Map<string, BatchRoute>();
+  for (const b of batchesForDate) {
+    const cur = activeBatchByVehicle.get(b.vehicleId);
+    if (!cur || b.createdAt > cur.createdAt) activeBatchByVehicle.set(b.vehicleId, b);
+  }
+  const isVehicleLocked = (vehicleId: string) => {
+    const b = activeBatchByVehicle.get(vehicleId);
+    return !!b && b.locked && !state.batchRouteUnlocked[b.id];
+  };
+  /** Mirrors a routePlan edit into that vehicle's active (unlocked) batch, if
+   * any, and records it in the Activity Log — this is what "แก้ไข batch
+   * ทีหลังได้ ... ต้องบันทึกลง Activity Log" actually wires up to. A no-op
+   * when the vehicle has no active batch (ordinary pre-assign editing). */
+  const syncBatchAfterEdit = (vehicleId: string, newOrderNos: string[], desc: string) => {
+    const b = activeBatchByVehicle.get(vehicleId);
+    if (!b) return;
+    const now = new Date().toISOString();
+    const updated: BatchRoute = { ...b, orderNos: newOrderNos, updatedAt: now, updatedBy: username };
+    actions.setBatchRoutes(state.batchRoutes.map((x) => (x.id === b.id ? updated : x)));
+    actions.logActivity('แก้ไข Batch Route', `${b.id} · ${desc}`);
+  };
 
   const wh = state.routeOrders.find((o) => o.whLat != null && o.whLng != null);
   const warehouse = wh && wh.whLat != null && wh.whLng != null ? { lat: wh.whLat, lng: wh.whLng } : null;
@@ -642,6 +673,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
    * stop sequence/load-code numbers fall out for free since they're derived
    * directly from routePlan's array order. */
   const moveOrderToVehicle = (orderNo: string, fromVehicleId: string, toVehicleId: string, toIndex: number | null) => {
+    if (isVehicleLocked(fromVehicleId) || isVehicleLocked(toVehicleId)) return;
     const plan = { ...state.routePlan };
     const fromList = [...(plan[fromVehicleId] ?? [])];
     const srcIdx = fromList.indexOf(orderNo);
@@ -655,16 +687,33 @@ export function computePlanner(state: AppState, actions: AppActions) {
     plan[toVehicleId] = toList;
 
     actions.setRoutePlan(plan);
+    if (fromVehicleId === toVehicleId) {
+      syncBatchAfterEdit(fromVehicleId, plan[fromVehicleId] ?? [], `เรียงลำดับใหม่ (${orderNo})`);
+      return;
+    }
     // Only a genuine cross-vehicle move is worth a log entry — reordering
     // stops within the same vehicle's own list happens too often (every
     // drag) to be a meaningful audit event.
-    if (fromVehicleId !== toVehicleId) {
-      actions.logActivity('ย้ายออเดอร์ (วางแผนจัดรูท)', `จาก ${vehicleNameById.get(fromVehicleId) ?? fromVehicleId} → ${vehicleNameById.get(toVehicleId) ?? toVehicleId}`, orderNo);
-    }
+    actions.logActivity('ย้ายออเดอร์ (วางแผนจัดรูท)', `จาก ${vehicleNameById.get(fromVehicleId) ?? fromVehicleId} → ${vehicleNameById.get(toVehicleId) ?? toVehicleId}`, orderNo);
+    syncBatchAfterEdit(fromVehicleId, plan[fromVehicleId] ?? [], `ย้าย ${orderNo} ออกไป ${vehicleNameById.get(toVehicleId) ?? toVehicleId}`);
+    syncBatchAfterEdit(toVehicleId, plan[toVehicleId] ?? [], `ย้าย ${orderNo} เข้าจาก ${vehicleNameById.get(fromVehicleId) ?? fromVehicleId}`);
   };
 
   const orderUnitQty = buildOrderUnitQtyMap(state.orderLineItems);
   const qtyTextFor = (orderNo: string) => qtyTextForOrder(orderUnitQty, orderNo);
+
+  // "ผู้จัด" — who closed the pick lot that packed this order, if any. Reuses
+  // the pick-lot/user data already wired up (no separate packer system) —
+  // when an order was ever included in more than one closed lot, the most
+  // recently closed one wins.
+  const packedByOrderNo = new Map<string, { name: string; closedAt: string }>();
+  for (const lot of state.pickLots) {
+    if (!lot.closed || !lot.closedBy) continue;
+    for (const orderNo of lot.orderNos) {
+      const cur = packedByOrderNo.get(orderNo);
+      if (!cur || lot.createdAt > cur.closedAt) packedByOrderNo.set(orderNo, { name: lot.closedBy, closedAt: lot.createdAt });
+    }
+  }
 
   const unassigned = (isDriverView ? [] : candidates)
     .filter((o) => !assignedTo.has(o.orderNo))
@@ -676,6 +725,8 @@ export function computePlanner(state: AppState, actions: AppActions) {
         address: o.addressFromUnii || o.districtProvince,
         districtProvince: o.districtProvince || '—',
         phone: o.phone || '—',
+        packedBy: packedByOrderNo.get(o.orderNo)?.name || 'ยังไม่จัด',
+        plannedDeliveryDateText: o.plannedDeliveryDate || '—',
         amtText: fmt(o.totalAmount),
         itemCount: o.itemCount,
         qtyText: qtyTextFor(o.orderNo),
@@ -693,10 +744,12 @@ export function computePlanner(state: AppState, actions: AppActions) {
         toggleSelect: () => actions.togglePlannerSelect(o.orderNo, state.plannerSelectedOrderNos),
         editLocation: () => actions.openEditOrderLocation(o),
         assignTo: (vehicleId: string) => {
+          if (isVehicleLocked(vehicleId)) return;
           const plan = { ...state.routePlan };
           plan[vehicleId] = [...(plan[vehicleId] ?? []), o.orderNo];
           actions.setRoutePlan(plan);
           actions.logActivity('จัดออเดอร์ลงรถ (วางแผนจัดรูท)', `${vehicleNameById.get(vehicleId) ?? vehicleId}`, o.orderNo);
+          syncBatchAfterEdit(vehicleId, plan[vehicleId], `เพิ่ม ${o.orderNo}`);
         },
       };
     })
@@ -707,7 +760,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
   const allUnassignedSelected = unassignedOrderNos.length > 0 && selectedInUnassigned.length === unassignedOrderNos.length;
   const toggleSelectAllUnassigned = () => actions.setPlannerSelection(allUnassignedSelected ? [] : unassignedOrderNos);
   const assignSelectedTo = (vehicleId: string) => {
-    if (selectedInUnassigned.length === 0) return;
+    if (selectedInUnassigned.length === 0 || isVehicleLocked(vehicleId)) return;
     const plan = { ...state.routePlan };
     plan[vehicleId] = [...(plan[vehicleId] ?? []), ...selectedInUnassigned];
     actions.setRoutePlan(plan);
@@ -716,6 +769,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
       'จัดออเดอร์ลงรถ (วางแผนจัดรูท, เลือกหลายรายการ)',
       `${vehicleNameById.get(vehicleId) ?? vehicleId} · ${selectedInUnassigned.length} ออเดอร์ (${selectedInUnassigned.join(', ')})`,
     );
+    syncBatchAfterEdit(vehicleId, plan[vehicleId], `เพิ่ม ${selectedInUnassigned.length} ออเดอร์ (${selectedInUnassigned.join(', ')})`);
   };
   const clearSelection = () => actions.setPlannerSelection([]);
 
@@ -763,19 +817,24 @@ export function computePlanner(state: AppState, actions: AppActions) {
           isDelivered: DELIVERY_DONE_STATUSES.includes(o.status),
           markDelivered: () => actions.markDelivered(o.orderNo),
           moveUp: () => {
-            if (i === 0) return;
+            if (i === 0 || isVehicleLocked(v.id)) return;
             const arr2 = [...orderNos];
             [arr2[i - 1], arr2[i]] = [arr2[i], arr2[i - 1]];
             actions.setRoutePlan({ ...state.routePlan, [v.id]: arr2 });
+            syncBatchAfterEdit(v.id, arr2, `เลื่อนลำดับ ${o.orderNo} ขึ้น`);
           },
           moveDown: () => {
-            if (i === orderNos.length - 1) return;
+            if (i === orderNos.length - 1 || isVehicleLocked(v.id)) return;
             const arr2 = [...orderNos];
             [arr2[i + 1], arr2[i]] = [arr2[i], arr2[i + 1]];
             actions.setRoutePlan({ ...state.routePlan, [v.id]: arr2 });
+            syncBatchAfterEdit(v.id, arr2, `เลื่อนลำดับ ${o.orderNo} ลง`);
           },
           remove: () => {
-            actions.setRoutePlan({ ...state.routePlan, [v.id]: orderNos.filter((n) => n !== o.orderNo) });
+            if (isVehicleLocked(v.id)) return;
+            const next = orderNos.filter((n) => n !== o.orderNo);
+            actions.setRoutePlan({ ...state.routePlan, [v.id]: next });
+            syncBatchAfterEdit(v.id, next, `เอาออก ${o.orderNo}`);
           },
           moveToVehicle: (toVehicleId: string) => moveOrderToVehicle(o.orderNo, v.id, toVehicleId, null),
         };
@@ -825,6 +884,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
       autoSequenceIcon: sortDirection === 'far' ? 'ph ph-sort-descending' : 'ph ph-sort-ascending',
       autoSequenceTitle: sortDirection === 'far' ? 'เรียงจากจุดไกลคลังที่สุดไปใกล้ที่สุด' : 'เรียงจากจุดใกล้คลังที่สุดไปไกลที่สุด',
       autoSequence: () => {
+        if (isVehicleLocked(v.id)) return;
         const sorted = [...orderNos].sort((a, b) => {
           const oa = byOrderNo.get(a);
           const ob = byOrderNo.get(b);
@@ -834,8 +894,28 @@ export function computePlanner(state: AppState, actions: AppActions) {
         });
         actions.setRoutePlan({ ...state.routePlan, [v.id]: sorted });
         actions.patch({ routeSortDirection: { ...state.routeSortDirection, [v.id]: sortDirection === 'far' ? 'near' : 'far' } });
+        syncBatchAfterEdit(v.id, sorted, 'เรียงลำดับอัตโนมัติ');
       },
-      clear: () => actions.setRoutePlan({ ...state.routePlan, [v.id]: [] }),
+      clear: () => {
+        if (isVehicleLocked(v.id)) return;
+        actions.setRoutePlan({ ...state.routePlan, [v.id]: [] });
+        syncBatchAfterEdit(v.id, [], `ล้างแผน (ลบ ${orderNos.length} ออเดอร์)`);
+      },
+      batchId: activeBatchByVehicle.get(v.id)?.id ?? null,
+      batchLocked: isVehicleLocked(v.id),
+      batchUnlocked: !!activeBatchByVehicle.get(v.id) && !!state.batchRouteUnlocked[activeBatchByVehicle.get(v.id)!.id],
+      unlockBatch: () => {
+        const b = activeBatchByVehicle.get(v.id);
+        if (!b) return;
+        actions.patch({ batchRouteUnlocked: { ...state.batchRouteUnlocked, [b.id]: true } });
+      },
+      relockBatch: () => {
+        const b = activeBatchByVehicle.get(v.id);
+        if (!b) return;
+        const next = { ...state.batchRouteUnlocked };
+        delete next[b.id];
+        actions.patch({ batchRouteUnlocked: next });
+      },
       mapStops: stops
         .filter((s) => {
           const o = byOrderNo.get(s.orderNo);
@@ -889,6 +969,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
   const suggestByZone = () => {
     const plan: RoutePlanShape = { ...state.routePlan };
     let assignedCount = 0;
+    const touchedVehicleIds = new Set<string>();
     for (const o of candidates.filter((x) => !assignedTo.has(x.orderNo))) {
       const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
       if (zone.route === '—') continue;
@@ -899,12 +980,14 @@ export function computePlanner(state: AppState, actions: AppActions) {
         state.vehicles.find((v) => v.zoneNote.trim() !== '' && zone.zoneName.includes(v.zoneNote.trim())) ??
         state.vehicles.find((v) => v.zoneNote.trim() !== '' && v.zoneNote.includes(zone.zoneName)) ??
         state.vehicles.find((v) => v.loadPrefix.toUpperCase() === zone.route.toUpperCase());
-      if (!target) continue;
+      if (!target || isVehicleLocked(target.id)) continue;
       plan[target.id] = [...(plan[target.id] ?? []), o.orderNo];
       assignedCount++;
+      touchedVehicleIds.add(target.id);
     }
-    // Keep each vehicle in farthest-first order after bulk assignment.
-    for (const id of Object.keys(plan)) {
+    // Keep each touched vehicle in farthest-first order after bulk
+    // assignment — locked vehicles are left untouched entirely, batch or not.
+    for (const id of touchedVehicleIds) {
       plan[id] = [...plan[id]].sort((a, b) => {
         const oa = byOrderNo.get(a);
         const ob = byOrderNo.get(b);
@@ -913,6 +996,43 @@ export function computePlanner(state: AppState, actions: AppActions) {
     }
     actions.setRoutePlan(plan);
     if (assignedCount > 0) actions.logActivity('จัดอัตโนมัติตามโซน (วางแผนจัดรูท)', `จัดลงรถอัตโนมัติ ${assignedCount} ออเดอร์`);
+    for (const id of touchedVehicleIds) {
+      syncBatchAfterEdit(id, plan[id], 'จัดอัตโนมัติตามโซน');
+    }
+  };
+
+  // "Assign" / "ยืนยันรูท" — turns a vehicle's current (unlocked) stop list
+  // into a permanent Batch Route. Requires a concrete plannerDate since the
+  // batch code is date-based and a vehicle's stops shown with no date filter
+  // can span multiple delivery days.
+  const assignableVehicles = vehicles.filter((v) => v.stopCount > 0 && !v.batchLocked);
+  const confirmAssign = (vehicleIds: string[]) => {
+    if (!canEdit || !state.plannerDate || vehicleIds.length === 0) return;
+    let nextBatches = [...state.batchRoutes];
+    const now = new Date().toISOString();
+    for (const vehicleId of vehicleIds) {
+      if (isVehicleLocked(vehicleId)) continue;
+      const veh = state.vehicles.find((x) => x.id === vehicleId);
+      const vehicleOrderNos = state.routePlan[vehicleId] ?? [];
+      if (!veh || vehicleOrderNos.length === 0) continue;
+      const id = nextBatchId(nextBatches, state.plannerDate, veh.loadPrefix);
+      const batch: BatchRoute = {
+        id,
+        vehicleId,
+        vehicleName: veh.name,
+        deliveryDate: state.plannerDate,
+        orderNos: [...vehicleOrderNos],
+        createdAt: now,
+        createdBy: username,
+        updatedAt: now,
+        updatedBy: username,
+        locked: true,
+      };
+      nextBatches = [...nextBatches, batch];
+      actions.logActivity('ยืนยันรูท (สร้าง Batch Route)', `${id} · ${veh.name} · ${vehicleOrderNos.length} ออเดอร์ (${vehicleOrderNos.join(', ')})`);
+    }
+    actions.setBatchRoutes(nextBatches);
+    actions.patch({ assignDialogOpen: false, assignSelectedVehicleIds: [] });
   };
 
   return {
@@ -966,17 +1086,121 @@ export function computePlanner(state: AppState, actions: AppActions) {
     codGrandDiffText: codGrandDiff === 0 ? 'ยอดตรง' : (codGrandDiff > 0 ? 'เกิน +' : 'ขาด −') + fmt(Math.abs(codGrandDiff)),
     codGrandDiffStyle: codGrandDiff === 0 ? badgeStyle('ok') : badgeStyle('bad'),
     suggestByZone,
-    clearAll: () => actions.setRoutePlan({}),
+    clearAll: () => {
+      const plan: RoutePlanShape = { ...state.routePlan };
+      for (const v of state.vehicles) {
+        if (isVehicleLocked(v.id)) continue;
+        const cleared = plan[v.id] ?? [];
+        if (cleared.length === 0) continue;
+        plan[v.id] = [];
+        syncBatchAfterEdit(v.id, [], `ล้างแผนทั้งหมด (ลบ ${cleared.length} ออเดอร์)`);
+      }
+      actions.setRoutePlan(plan);
+    },
     zoneLegend: state.zoneRules.map((z) => ({ id: z.id, name: z.name, color: z.color })),
     unassignedColor: UNASSIGNED_COLOR,
     configTab: state.plannerConfigTab,
     openZones: () => actions.patch({ plannerConfigTab: state.plannerConfigTab === 'zones' ? null : 'zones' }),
     openVehicles: () => actions.patch({ plannerConfigTab: state.plannerConfigTab === 'vehicles' ? null : 'vehicles' }),
     moveOrderToVehicle,
+
+    // Batch Route — "Assign"/"ยืนยันรูท" confirmation step
+    plannerTab: state.plannerTab,
+    setPlannerTab: (tab: 'plan' | 'history') => actions.patch({ plannerTab: tab }),
+    canAssign: canEdit && !!state.plannerDate,
+    assignDialogOpen: state.assignDialogOpen,
+    assignableVehicles: assignableVehicles.map((v) => ({ id: v.id, name: v.name, stopCount: v.stopCount, totalText: v.totalText })),
+    assignSelectedVehicleIds: state.assignSelectedVehicleIds,
+    openAssignDialog: () => actions.patch({ assignDialogOpen: true, assignSelectedVehicleIds: assignableVehicles.map((v) => v.id) }),
+    closeAssignDialog: () => actions.patch({ assignDialogOpen: false }),
+    toggleAssignVehicle: (vehicleId: string) => {
+      const cur = state.assignSelectedVehicleIds;
+      actions.patch({ assignSelectedVehicleIds: cur.includes(vehicleId) ? cur.filter((id) => id !== vehicleId) : [...cur, vehicleId] });
+    },
+    toggleAssignAll: () => {
+      const allIds = assignableVehicles.map((v) => v.id);
+      const allSelected = allIds.length > 0 && allIds.every((id) => state.assignSelectedVehicleIds.includes(id));
+      actions.patch({ assignSelectedVehicleIds: allSelected ? [] : allIds });
+    },
+    confirmAssign,
   };
 }
 
 type RoutePlanShape = Record<string, string[]>;
+
+// ---------- BATCH ROUTE HISTORY ----------
+/** Read-only audit view of every Batch Route ever assigned — reuses the same
+ * routeOrders/routeCod state the Planner and COD pages already read, rather
+ * than tracking its own copy of sales/COD figures (so it can never drift
+ * from what "เคลียร์เงิน COD" shows for the same orders). */
+export function computeBatchRouteHistory(state: AppState, actions: AppActions) {
+  const byOrderNo = new Map(state.routeOrders.map((o) => [o.orderNo, o]));
+  const q = state.batchRouteQ.trim().toLowerCase();
+
+  const rows = state.batchRoutes
+    .filter((b) => !q || b.id.toLowerCase().includes(q) || b.deliveryDate.includes(q) || b.vehicleName.toLowerCase().includes(q))
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
+    .map((b) => {
+      const orders = b.orderNos.map((no) => byOrderNo.get(no)).filter((o): o is RouteOrder => o != null);
+      const totalAmount = orders.reduce((a, o) => a + o.totalAmount, 0);
+      let codCashExpected = 0;
+      let codCashCollected = 0;
+      let codTransferTotal = 0;
+      for (const o of orders) {
+        if (!isCodPayment(o.paymentType)) continue;
+        const method = state.routeCodMethod[o.orderNo] ?? 'cash';
+        if (method === 'transfer') {
+          codTransferTotal += o.totalAmount;
+        } else {
+          codCashExpected += o.totalAmount;
+          codCashCollected += Number(state.routeCodCollected[o.orderNo] || 0);
+        }
+      }
+      const deliveredCount = orders.filter((o) => DELIVERY_DONE_STATUSES.includes(o.status)).length;
+      const missingOrderNos = b.orderNos.filter((no) => !byOrderNo.has(no));
+
+      return {
+        id: b.id,
+        vehicleName: b.vehicleName,
+        deliveryDate: b.deliveryDate,
+        deliveryDateText: (() => {
+          const d = dayKeyToDate(b.deliveryDate);
+          return d ? formatThaiShortDate(d) : b.deliveryDate;
+        })(),
+        orderCount: b.orderNos.length,
+        totalText: fmt(totalAmount),
+        codCashExpectedText: fmt(codCashExpected),
+        codCashCollectedText: fmt(codCashCollected),
+        codDiffText: codCashCollected - codCashExpected === 0 ? 'ยอดตรง' : fmt(codCashCollected - codCashExpected),
+        codTransferText: fmt(codTransferTotal),
+        hasCodTransfer: codTransferTotal > 0,
+        deliveredCount,
+        deliveredText: `${deliveredCount}/${orders.length}`,
+        locked: b.locked,
+        createdBy: b.createdBy,
+        createdAtText: formatDateTime(new Date(b.createdAt).getTime()),
+        updatedBy: b.updatedBy,
+        updatedAtText: formatDateTime(new Date(b.updatedAt).getTime()),
+        edited: b.updatedAt !== b.createdAt,
+        missingCount: missingOrderNos.length,
+        stops: orders.map((o) => ({
+          orderNo: o.orderNo,
+          customer: o.customer,
+          amtText: fmt(o.totalAmount),
+          status: o.status,
+          stStyle: sheetStatusStyle(o.status),
+        })),
+      };
+    });
+
+  return {
+    q: state.batchRouteQ,
+    onSearch: (v: string) => actions.patch({ batchRouteQ: v }),
+    rows,
+    isEmpty: rows.length === 0,
+    totalCount: state.batchRoutes.length,
+  };
+}
 
 // ---------- BATCH PICKING ("คำสั่งซื้อ" tab — status = "กำลังดำเนินการ") ----------
 const PICK_ROW_BASE: CSSProperties = { display: 'flex', alignItems: 'center', gap: 13, width: '100%', padding: '12px 14px', border: 0, cursor: 'pointer', fontFamily: 'var(--font-body)', borderRadius: 12, background: 'var(--color-surface)', boxShadow: 'var(--shadow-sm)', transition: 'box-shadow .12s' };

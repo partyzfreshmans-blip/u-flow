@@ -37,6 +37,9 @@ export interface PickLot {
   ordersWithNoLines: string[];
   /** Order numbers whose post-close status write-back hasn't succeeded yet. */
   statusSyncPending: string[];
+  /** Username that closed this lot — the "ผู้จัด" (packer) shown elsewhere.
+   * '' for lots that predate this field or aren't closed yet. */
+  closedBy: string;
 }
 
 const STORAGE_KEY = 'warehouse-ops.pickLots.v1';

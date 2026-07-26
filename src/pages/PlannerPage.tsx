@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { computePlanner } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
+import { BatchRouteHistoryPanel } from './BatchRouteHistoryPanel';
 import { RouteMap } from './RouteMap';
 
 interface DragPayload {
@@ -42,6 +43,21 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
         </div>
       )}
 
+      {v.canEdit && (
+        <div className="seg" style={{ marginBottom: 14, width: 'fit-content' }}>
+          <label className="seg-opt">
+            <input type="radio" name="plannerTab" checked={v.plannerTab === 'plan'} onChange={() => v.setPlannerTab('plan')} /><i className="ph ph-map-trifold" />แผนวันนี้
+          </label>
+          <label className="seg-opt">
+            <input type="radio" name="plannerTab" checked={v.plannerTab === 'history'} onChange={() => v.setPlannerTab('history')} /><i className="ph ph-clock-counter-clockwise" />ประวัติ Batch Route
+          </label>
+        </div>
+      )}
+
+      {v.plannerTab === 'history' && v.canEdit ? (
+        <BatchRouteHistoryPanel state={state} actions={actions} />
+      ) : (
+        <>
       {/* summary + actions */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', padding: '11px 15px', marginBottom: 14, borderRadius: 10, background: 'var(--color-surface)', boxShadow: 'var(--shadow-sm)', fontSize: 12.5 }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
@@ -170,12 +186,12 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
               key={veh.id}
               className="card elev-sm"
               style={{ gap: 10, boxShadow: dragOverVehicleId === veh.id ? 'inset 0 0 0 2px var(--color-accent-700)' : undefined }}
-              onDragOver={v.canEdit ? (e) => {
+              onDragOver={v.canEdit && !veh.batchLocked ? (e) => {
                 e.preventDefault();
                 setDragOverVehicleId(veh.id);
               } : undefined}
-              onDragLeave={v.canEdit ? () => setDragOverVehicleId((cur) => (cur === veh.id ? null : cur)) : undefined}
-              onDrop={v.canEdit ? (e) => {
+              onDragLeave={v.canEdit && !veh.batchLocked ? () => setDragOverVehicleId((cur) => (cur === veh.id ? null : cur)) : undefined}
+              onDrop={v.canEdit && !veh.batchLocked ? (e) => {
                 e.preventDefault();
                 setDragOverVehicleId(null);
                 const data = readDragPayload(e);
@@ -185,7 +201,17 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                 <span style={{ width: 34, height: 26, borderRadius: 6, background: 'var(--color-accent)', color: '#fff', display: 'grid', placeItems: 'center', fontWeight: 700, fontSize: 12 }}>{veh.loadPrefix}</span>
                 <div style={{ lineHeight: 1.2 }}>
-                  <div style={{ fontWeight: 600, fontSize: 14.5 }}>{veh.name}</div>
+                  <div style={{ fontWeight: 600, fontSize: 14.5, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    {veh.name}
+                    {veh.batchId && (
+                      <span
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10.5, fontWeight: 600, padding: '2px 8px', borderRadius: 6, background: veh.batchLocked ? 'var(--color-neutral-800)' : 'var(--st-warn-bg)', color: veh.batchLocked ? 'var(--color-neutral-300)' : 'var(--st-warn-fg)' }}
+                        title={veh.batchLocked ? 'ลำดับ/รายการถูกล็อกแล้ว' : 'ปลดล็อกชั่วคราว — แก้ไขได้'}
+                      >
+                        <i className={veh.batchLocked ? 'ph ph-lock-simple' : 'ph ph-lock-simple-open'} />{veh.batchId}
+                      </span>
+                    )}
+                  </div>
                   <div style={{ fontSize: 11, color: 'var(--color-neutral-500)' }}>
                     <i className="ph ph-users" style={{ marginRight: 3 }} />{veh.crew} คน{veh.zoneNote ? ` · ${veh.zoneNote}` : ''}
                   </div>
@@ -198,12 +224,19 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                       <span style={veh.codDiffStyle}>{veh.codDiffText}</span>
                     </span>
                   )}
-                  {v.canEdit && (
+                  {v.canEdit && veh.batchId && (
+                    veh.batchLocked ? (
+                      <button className="btn btn-secondary" style={{ fontSize: 12 }} onClick={veh.unlockBatch}><i className="ph ph-lock-simple-open" />แก้ไข batch</button>
+                    ) : (
+                      <button className="btn btn-secondary" style={{ fontSize: 12 }} onClick={veh.relockBatch}><i className="ph ph-lock-simple" />ล็อกอีกครั้ง</button>
+                    )
+                  )}
+                  {v.canEdit && !veh.batchLocked && (
                     <button className="btn btn-secondary" style={{ minHeight: 30 }} onClick={veh.autoSequence} disabled={veh.stopCount < 2} title={veh.autoSequenceTitle}>
                       <i className={veh.autoSequenceIcon} />{veh.autoSequenceLabel}
                     </button>
                   )}
-                  {v.canEdit && (
+                  {v.canEdit && !veh.batchLocked && (
                     <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={veh.clear} disabled={veh.stopCount === 0}>เอาออกทั้งหมด</button>
                   )}
                 </div>
@@ -224,24 +257,24 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                     {veh.stops.map((s) => (
                       <tr
                         key={s.orderNo}
-                        draggable={v.canEdit}
-                        onDragStart={v.canEdit ? (e) => {
+                        draggable={v.canEdit && !veh.batchLocked}
+                        onDragStart={v.canEdit && !veh.batchLocked ? (e) => {
                           e.dataTransfer.setData(DRAG_MIME, JSON.stringify({ orderNo: s.orderNo, fromVehicleId: veh.id }));
                           e.dataTransfer.effectAllowed = 'move';
                         } : undefined}
-                        onDragOver={v.canEdit ? (e) => {
+                        onDragOver={v.canEdit && !veh.batchLocked ? (e) => {
                           e.preventDefault();
                           e.stopPropagation();
                           setDragOverVehicleId(veh.id);
                         } : undefined}
-                        onDrop={v.canEdit ? (e) => {
+                        onDrop={v.canEdit && !veh.batchLocked ? (e) => {
                           e.preventDefault();
                           e.stopPropagation();
                           setDragOverVehicleId(null);
                           const data = readDragPayload(e);
                           if (data) v.moveOrderToVehicle(data.orderNo, data.fromVehicleId, veh.id, s.seq - 1);
                         } : undefined}
-                        style={v.canEdit ? { cursor: 'grab' } : undefined}
+                        style={v.canEdit && !veh.batchLocked ? { cursor: 'grab' } : undefined}
                       >
                         <td style={{ textAlign: 'center', color: 'var(--color-neutral-600)' }}><i className="ph ph-dots-six-vertical" /></td>
                         <td style={{ textAlign: 'center', fontWeight: 600 }}>{s.seq}</td>
@@ -279,7 +312,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                         </td>
                         <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums' }}>{s.distanceText}</td>
                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                          {v.canEdit && (
+                          {v.canEdit && !veh.batchLocked && (
                             <>
                               <button className="btn btn-icon btn-ghost" onClick={s.moveUp} title="เลื่อนขึ้น"><i className="ph ph-caret-up" style={{ fontSize: 12 }} /></button>
                               <button className="btn btn-icon btn-ghost" onClick={s.moveDown} title="เลื่อนลง"><i className="ph ph-caret-down" style={{ fontSize: 12 }} /></button>
@@ -294,7 +327,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                                 title="ย้ายไปรถคันอื่น"
                               >
                                 <option value="">ย้ายไป...</option>
-                                {state.vehicles.filter((x) => x.id !== veh.id).map((x) => (
+                                {v.vehicles.filter((x) => x.id !== veh.id && !x.batchLocked).map((x) => (
                                   <option key={x.id} value={x.id}>{x.name}</option>
                                 ))}
                               </select>
@@ -319,7 +352,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                   <span style={{ fontSize: 12, color: 'var(--color-accent-300)', fontWeight: 500 }}>เลือกแล้ว {v.selectedCount} รายการ</span>
                   <select className="input" style={{ minHeight: 30, fontSize: 12 }} value="" onChange={(e) => e.target.value && v.assignSelectedTo(e.target.value)}>
                     <option value="">จัดลงรถ…</option>
-                    {state.vehicles.map((veh) => <option key={veh.id} value={veh.id}>{veh.name}</option>)}
+                    {v.vehicles.filter((veh) => !veh.batchLocked).map((veh) => <option key={veh.id} value={veh.id}>{veh.name}</option>)}
                   </select>
                   <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={v.clearSelection}><i className="ph ph-x" />ล้างที่เลือก</button>
                 </div>
@@ -338,7 +371,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                     <th style={{ width: 30 }}>
                       <input type="checkbox" checked={v.allUnassignedSelected} onChange={v.toggleSelectAllUnassigned} />
                     </th>
-                    <th>ลูกค้า / ที่อยู่</th><th>เบอร์โทร</th><th>โซน</th><th>จำนวน</th><th style={{ textAlign: 'right' }}>ยอดเงิน</th>
+                    <th>ลูกค้า / ที่อยู่</th><th>อำเภอ, จังหวัด</th><th>เบอร์โทร</th><th>ผู้จัด</th><th>วันที่จะจัดส่ง</th><th>โซน</th><th>จำนวน</th><th style={{ textAlign: 'right' }}>ยอดเงิน</th>
                     <th style={{ textAlign: 'right' }}>ระยะ</th><th style={{ width: 150 }}>จัดลงรถ</th><th></th>
                   </tr>
                 </thead>
@@ -364,9 +397,12 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                           )}
                         </div>
                         <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', marginTop: 1 }}>{o.orderNo}</div>
-                        <div style={{ fontSize: 11, color: 'var(--color-neutral-400)', maxWidth: 320, whiteSpace: 'normal', wordBreak: 'break-word' }}>{o.address}{o.districtProvince !== '—' ? ` · ${o.districtProvince}` : ''}</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-neutral-400)', maxWidth: 320, whiteSpace: 'normal', wordBreak: 'break-word' }}>{o.address}</div>
                       </td>
+                      <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>{o.districtProvince}</td>
                       <td style={{ fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.phone}</td>
+                      <td style={{ fontSize: 11.5, color: o.packedBy === 'ยังไม่จัด' ? 'var(--color-neutral-600)' : 'var(--color-neutral-300)', whiteSpace: 'nowrap' }}>{o.packedBy}</td>
+                      <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>{o.plannedDeliveryDateText}</td>
                       <td>
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, whiteSpace: 'nowrap' }}>
                           <span style={{ width: 9, height: 9, borderRadius: '50%', background: o.zoneColor, flex: 'none' }} />{o.zoneName}
@@ -378,7 +414,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                       <td>
                         <select className="input" style={{ minHeight: 30, fontSize: 12 }} value="" onChange={(e) => e.target.value && o.assignTo(e.target.value)}>
                           <option value="">เลือกรถ…</option>
-                          {state.vehicles.map((veh) => <option key={veh.id} value={veh.id}>{veh.name}</option>)}
+                          {v.vehicles.filter((veh) => !veh.batchLocked).map((veh) => <option key={veh.id} value={veh.id}>{veh.name}</option>)}
                         </select>
                       </td>
                       <td>
@@ -413,10 +449,65 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
               <span style={{ color: 'var(--st-warn-fg)' }}><i className="ph ph-warning" style={{ marginRight: 3 }} />ซ่อนพิกัดผิดปกติ {v.excludedStopCount} จุด</span>
             )}
           </div>
+          {v.canEdit && (
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button
+                className="btn btn-primary"
+                onClick={v.openAssignDialog}
+                disabled={!v.canAssign || v.assignableVehicles.length === 0}
+                title={!v.plannerDate ? 'เลือกวันที่จัดส่งก่อนจึงจะยืนยันรูทได้' : v.assignableVehicles.length === 0 ? 'ยังไม่มีรถที่จัดจุดส่งพร้อมยืนยัน' : undefined}
+              >
+                <i className="ph ph-seal-check" />ยืนยันรูท (Assign)
+              </button>
+            </div>
+          )}
         </div>
       </div>
+        </>
+      )}
 
-      {v.locationModalOpen && (
+      {v.assignDialogOpen && (
+        <div className="dialog-backdrop" onClick={v.closeAssignDialog}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()} style={{ width: 'min(440px, 100%)' }}>
+            <div className="dialog-title">ยืนยันรูท — สร้าง Batch Route</div>
+            <div className="dialog-body" style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
+              <div style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>
+                เลือกคันรถที่จัดจุดส่งเสร็จแล้ว — ระบบจะสร้างรหัส Batch Route ถาวรและล็อกลำดับจุดส่งของแต่ละคันไว้ (วันที่จัดส่ง {v.plannerDate || '—'})
+              </div>
+              {v.assignableVehicles.length === 0 ? (
+                <div style={{ fontSize: 12.5, color: 'var(--color-neutral-500)' }}>ไม่มีรถที่พร้อมยืนยัน (ต้องมีจุดส่งอย่างน้อย 1 จุด และยังไม่ถูกล็อก)</div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 12.5, fontWeight: 600 }}>
+                    <input
+                      type="checkbox"
+                      checked={v.assignableVehicles.length > 0 && v.assignableVehicles.every((x) => v.assignSelectedVehicleIds.includes(x.id))}
+                      onChange={v.toggleAssignAll}
+                    />
+                    เลือกทั้งหมด
+                  </label>
+                  <div className="hr" style={{ margin: '2px 0' }} />
+                  {v.assignableVehicles.map((x) => (
+                    <label key={x.id} style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 13 }}>
+                      <input type="checkbox" checked={v.assignSelectedVehicleIds.includes(x.id)} onChange={() => v.toggleAssignVehicle(x.id)} />
+                      <span style={{ flex: 1 }}>{x.name}</span>
+                      <span style={{ fontSize: 11.5, color: 'var(--color-neutral-500)' }}>{x.stopCount} จุด · {x.totalText}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="dialog-actions">
+              <button className="btn btn-secondary" onClick={v.closeAssignDialog}>ยกเลิก</button>
+              <button className="btn btn-primary" disabled={v.assignSelectedVehicleIds.length === 0} onClick={() => v.confirmAssign(v.assignSelectedVehicleIds)}>
+                <i className="ph ph-check" />ยืนยัน ({v.assignSelectedVehicleIds.length})
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {v.plannerTab === 'plan' && v.locationModalOpen && (
         <div className="dialog-backdrop" onClick={v.closeLocationModal}>
           <div className="dialog" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 480 }}>
             <div className="dialog-title">ตรวจสอบ/แก้ไขโลเคชั่น</div>

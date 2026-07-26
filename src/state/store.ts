@@ -19,6 +19,7 @@ import { isoToSheetDateText, sheetDateToDayKey, todayDayKey } from '../data/date
 import { updateRouteOrder } from '../data/sources/routeOrdersWrite';
 import { loadDriverQueue, saveDriverQueue } from '../data/driverQueue';
 import { loadPickLots, savePickLots, type PickLot, type PickLotLine } from '../data/pickLots';
+import { loadBatchRoutes, saveBatchRoutes, type BatchRoute } from '../data/batchRoutes';
 import { PICK_CLOSED_STATUS } from './helpers';
 import type { AttachmentScope } from '../config/drive';
 import type { ApiImportOrder, CsMasterCustomer, OrderLineItem, Promo, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
@@ -119,6 +120,19 @@ export interface AppState {
   /** Multi-select on the planner's unassigned-orders pool, for bulk
    * "จัดลงรถ" assignment. */
   plannerSelectedOrderNos: string[];
+
+  // batch routes — permanent per-vehicle "confirmed run" records created by
+  // the Planner's "Assign" step (see src/data/batchRoutes.ts)
+  batchRoutes: BatchRoute[];
+  /** batchId -> true while that batch's locked sequence/membership is
+   * temporarily unlocked for editing. Deliberately not persisted — a reload
+   * re-locks everything, which is the safer default. */
+  batchRouteUnlocked: Record<string, boolean>;
+  batchRouteQ: string;
+  /** Sub-tab on the Planner page: the live plan, or the Batch Route history. */
+  plannerTab: 'plan' | 'history';
+  assignDialogOpen: boolean;
+  assignSelectedVehicleIds: string[];
   /** orderNo whose "ตรวจสอบ/แก้ไขโลเคชั่น" modal is open; null = closed. */
   orderLocationOrderNo: string | null;
   orderLocationLat: string;
@@ -315,6 +329,12 @@ export const initialState: AppState = {
   routeCodMethod: {},
   routeSortDirection: {},
   plannerSelectedOrderNos: [],
+  batchRoutes: [],
+  batchRouteUnlocked: {},
+  batchRouteQ: '',
+  plannerTab: 'plan',
+  assignDialogOpen: false,
+  assignSelectedVehicleIds: [],
   orderLocationOrderNo: null,
   orderLocationLat: '',
   orderLocationLng: '',
@@ -791,6 +811,7 @@ export function useAppStore() {
         routeCodMethod: routeCod.method,
         driverSyncQueue: loadDriverQueue(),
         pickLots: loadPickLots(),
+        batchRoutes: loadBatchRoutes(),
         lastSyncAt: loadLastSyncAt(),
         notificationEvents: loadNotificationEvents(),
         notificationReadIds: loadNotificationReadIds(),
@@ -884,6 +905,10 @@ export function useAppStore() {
       setRoutePlan: (plan: RoutePlan) => {
         dispatch({ type: 'patch', patch: { routePlan: plan } });
         saveRoutePlan(plan);
+      },
+      setBatchRoutes: (list: BatchRoute[]) => {
+        dispatch({ type: 'patch', patch: { batchRoutes: list } });
+        saveBatchRoutes(list);
       },
       saveRouteCod: (collected: Record<string, string>, method: Record<string, 'cash' | 'transfer'>) => {
         saveRouteCodState({ collected, method });
@@ -1167,6 +1192,7 @@ export function useAppStore() {
             closed: false,
             ordersWithNoLines,
             statusSyncPending: [],
+            closedBy: '',
           };
 
           const nextLots = [lot, ...lots];
@@ -1191,7 +1217,8 @@ export function useAppStore() {
       closePickLot: (lotId: string, lots: PickLot[]) => {
         const lot = lots.find((l) => l.id === lotId);
         if (!lot || lot.closed) return;
-        const next = lots.map((l) => (l.id === lotId ? { ...l, closed: true, statusSyncPending: [...l.orderNos] } : l));
+        const closedBy = loadSession()?.username ?? '';
+        const next = lots.map((l) => (l.id === lotId ? { ...l, closed: true, statusSyncPending: [...l.orderNos], closedBy } : l));
         savePickLots(next);
         dispatch({ type: 'patch', patch: { pickLots: next } });
         syncPickLotStatus(lot.orderNos);
