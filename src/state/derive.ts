@@ -280,6 +280,12 @@ export function computeRoute(state: AppState, actions: AppActions) {
   const unzonedCount = filtered.filter((o) => matchZone(state.zoneRules, o.districtProvince, o.addressFromUnii).zoneId === null).length;
   const mismatchCount = rows.filter((r) => r.zoneMismatch).length;
 
+  // Split into two groups so warehouse staff can see at a glance which
+  // orders still need a delivery date scheduled, separate from ones already
+  // scheduled.
+  const rowsNoDate = rows.filter((r) => r.plannedDeliveryDate === '—');
+  const rowsWithDate = rows.filter((r) => r.plannedDeliveryDate !== '—');
+
   return {
     routeOrdersLoading: state.routeOrdersLoading,
     routeOrdersError: state.routeOrdersError,
@@ -293,7 +299,8 @@ export function computeRoute(state: AppState, actions: AppActions) {
     clearDateFilters: () => actions.patch({ routeOrderDateFilter: '', routeDeliveryDateFilter: '' }),
     routeTabs,
     statusTabs: makeTabs(statusValues, state.routeStatusFilter, (v) => actions.patch({ routeStatusFilter: v })),
-    rows,
+    rowsNoDate,
+    rowsWithDate,
     resultCount: filtered.length,
     isEmpty: filtered.length === 0,
     zoneLegend,

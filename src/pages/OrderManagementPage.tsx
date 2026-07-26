@@ -2,6 +2,75 @@ import { OrderDetailModal } from '../components/OrderDetailModal';
 import { computeRoute } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 
+type OrderRow = ReturnType<typeof computeRoute>['rowsWithDate'][number];
+
+function OrderTable({ title, tone, rows, isEmpty }: { title: string; tone: 'warn' | 'neutral'; rows: OrderRow[]; isEmpty: boolean }) {
+  return (
+    <div className="card elev-sm" style={{ padding: '4px 14px 8px', marginBottom: 18 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 2px 8px', fontWeight: 600, fontSize: 13.5, color: tone === 'warn' ? 'var(--st-warn-fg)' : 'var(--color-neutral-200)' }}>
+        {tone === 'warn' && <i className="ph ph-calendar-x" />}
+        {title} ({rows.length})
+      </div>
+      <table className="table">
+        <thead>
+          <tr>
+            <th>Route</th><th style={{ textAlign: 'center' }}>โซนที่ควรเป็น</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th style={{ textAlign: 'right' }}>ยอดขาย</th>
+            <th style={{ textAlign: 'center' }}>รายการ</th><th>วันที่จะจัดส่ง</th><th>หมายเหตุ</th><th style={{ textAlign: 'center' }}>ใบกำกับภาษี</th><th>สถานะ</th><th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.orderNo}>
+              <td><span style={{ display: 'inline-flex', fontSize: 11, padding: '2px 8px', borderRadius: 5, background: 'var(--color-neutral-800)', color: 'var(--color-neutral-200)' }}>{r.route}</span></td>
+              <td style={{ textAlign: 'center' }} title={r.zoneReason}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, whiteSpace: 'nowrap' }}>
+                  <span style={{ width: 9, height: 9, borderRadius: '50%', background: r.zoneColor, flex: 'none' }} />
+                  {r.zoneName}
+                </span>
+                {r.zoneMismatch && (
+                  <div style={{ fontSize: 10, color: 'var(--st-warn-fg)', marginTop: 2, whiteSpace: 'nowrap' }}>
+                    <i className="ph ph-warning" style={{ marginRight: 3 }} />ไม่ตรงกับชีท
+                  </div>
+                )}
+              </td>
+              <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 500 }}>{r.orderNo}</td>
+              <td>
+                {r.customer}
+                <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', maxWidth: 200, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.address}</div>
+              </td>
+              <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{r.amtText}</td>
+              <td style={{ textAlign: 'center' }}>{r.itemCount}</td>
+              <td style={{ fontSize: 12, color: r.plannedDeliveryDate === '—' ? 'var(--st-warn-fg)' : 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{r.plannedDeliveryDate}</td>
+              <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', maxWidth: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={r.noteText}>
+                {r.noteText || '—'}
+              </td>
+              <td style={{ textAlign: 'center' }}>
+                {r.wantsTaxInvoice ? <i className="ph ph-check-circle-fill" style={{ color: 'var(--st-ok-fg)' }} title="ต้องการใบกำกับภาษี" /> : <span style={{ color: 'var(--color-neutral-600)' }}>—</span>}
+              </td>
+              <td><span style={r.stStyle}>{r.stLabel}</span></td>
+              <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                {r.saving && <i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite', marginRight: 6, color: 'var(--color-neutral-400)' }} title="กำลังบันทึก..." />}
+                {r.saved && <i className="ph ph-check-circle-fill" style={{ marginRight: 6, color: 'var(--st-ok-fg)' }} title="บันทึกสำเร็จ" />}
+                {r.saveError && <i className="ph ph-warning-fill" style={{ marginRight: 6, color: 'var(--st-bad-fg)' }} title={`บันทึกไม่สำเร็จ: ${r.saveError}`} />}
+                <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={r.edit}><i className="ph ph-pencil-simple" />แก้ไข</button>
+                <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={r.viewItems}>ดูสินค้า</button>
+                {r.mapLink && (
+                  <a className="btn btn-ghost" style={{ fontSize: 12 }} href={r.mapLink} target="_blank" rel="noreferrer" title="เปิดแผนที่">
+                    <i className="ph ph-map-pin" />
+                  </a>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {rows.length === 0 && !isEmpty && (
+        <div style={{ padding: 18, textAlign: 'center', color: 'var(--color-neutral-500)', fontSize: 12 }}>— ไม่มี —</div>
+      )}
+    </div>
+  );
+}
+
 export function OrderManagementPage({ state, actions }: { state: AppState; actions: AppActions }) {
   const v = computeRoute(state, actions);
 
@@ -73,64 +142,15 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
         )}
       </div>
 
-      <div className="card elev-sm" style={{ padding: '4px 14px 8px' }}>
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Route</th><th style={{ textAlign: 'center' }}>โซนที่ควรเป็น</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th style={{ textAlign: 'right' }}>ยอดขาย</th>
-              <th style={{ textAlign: 'center' }}>รายการ</th><th>วันที่จะจัดส่ง</th><th>หมายเหตุ</th><th style={{ textAlign: 'center' }}>ใบกำกับภาษี</th><th>สถานะ</th><th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {v.rows.map((r) => (
-              <tr key={r.orderNo}>
-                <td><span style={{ display: 'inline-flex', fontSize: 11, padding: '2px 8px', borderRadius: 5, background: 'var(--color-neutral-800)', color: 'var(--color-neutral-200)' }}>{r.route}</span></td>
-                <td style={{ textAlign: 'center' }} title={r.zoneReason}>
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, whiteSpace: 'nowrap' }}>
-                    <span style={{ width: 9, height: 9, borderRadius: '50%', background: r.zoneColor, flex: 'none' }} />
-                    {r.zoneName}
-                  </span>
-                  {r.zoneMismatch && (
-                    <div style={{ fontSize: 10, color: 'var(--st-warn-fg)', marginTop: 2, whiteSpace: 'nowrap' }}>
-                      <i className="ph ph-warning" style={{ marginRight: 3 }} />ไม่ตรงกับชีท
-                    </div>
-                  )}
-                </td>
-                <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 500 }}>{r.orderNo}</td>
-                <td>
-                  {r.customer}
-                  <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', maxWidth: 200, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.address}</div>
-                </td>
-                <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{r.amtText}</td>
-                <td style={{ textAlign: 'center' }}>{r.itemCount}</td>
-                <td style={{ fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{r.plannedDeliveryDate}</td>
-                <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', maxWidth: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={r.noteText}>
-                  {r.noteText || '—'}
-                </td>
-                <td style={{ textAlign: 'center' }}>
-                  {r.wantsTaxInvoice ? <i className="ph ph-check-circle-fill" style={{ color: 'var(--st-ok-fg)' }} title="ต้องการใบกำกับภาษี" /> : <span style={{ color: 'var(--color-neutral-600)' }}>—</span>}
-                </td>
-                <td><span style={r.stStyle}>{r.stLabel}</span></td>
-                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                  {r.saving && <i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite', marginRight: 6, color: 'var(--color-neutral-400)' }} title="กำลังบันทึก..." />}
-                  {r.saved && <i className="ph ph-check-circle-fill" style={{ marginRight: 6, color: 'var(--st-ok-fg)' }} title="บันทึกสำเร็จ" />}
-                  {r.saveError && <i className="ph ph-warning-fill" style={{ marginRight: 6, color: 'var(--st-bad-fg)' }} title={`บันทึกไม่สำเร็จ: ${r.saveError}`} />}
-                  <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={r.edit}><i className="ph ph-pencil-simple" />แก้ไข</button>
-                  <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={r.viewItems}>ดูสินค้า</button>
-                  {r.mapLink && (
-                    <a className="btn btn-ghost" style={{ fontSize: 12 }} href={r.mapLink} target="_blank" rel="noreferrer" title="เปิดแผนที่">
-                      <i className="ph ph-map-pin" />
-                    </a>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {v.isEmpty && !v.routeOrdersLoading && (
-          <div style={{ padding: 26, textAlign: 'center', color: 'var(--color-neutral-500)', fontSize: 12.5 }}>ไม่พบคำสั่งซื้อที่ตรงกับตัวกรอง</div>
-        )}
-      </div>
+      {!v.isEmpty && (
+        <OrderTable title="ยังไม่ได้ใส่วันที่จัดส่ง" tone="warn" rows={v.rowsNoDate} isEmpty={v.isEmpty} />
+      )}
+      {!v.isEmpty && (
+        <OrderTable title="ใส่วันที่จัดส่งแล้ว" tone="neutral" rows={v.rowsWithDate} isEmpty={v.isEmpty} />
+      )}
+      {v.isEmpty && !v.routeOrdersLoading && (
+        <div className="card elev-sm" style={{ padding: 26, textAlign: 'center', color: 'var(--color-neutral-500)', fontSize: 12.5 }}>ไม่พบคำสั่งซื้อที่ตรงกับตัวกรอง</div>
+      )}
 
       <OrderDetailModal state={state} actions={actions} />
     </div>
