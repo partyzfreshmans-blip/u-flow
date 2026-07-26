@@ -36,7 +36,7 @@ function OrderTable({ title, tone, rows, isEmpty }: { title: string; tone: 'warn
         <thead>
           <tr>
             <th>Route</th><th style={{ textAlign: 'center' }}>โซนที่ควรเป็น</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th style={{ textAlign: 'right' }}>ยอดขาย</th>
-            <th style={{ textAlign: 'center' }}>รายการ</th><th>วันเวลาที่สั่ง</th><th style={{ minWidth: 168 }}>วันที่จะจัดส่ง</th><th>หมายเหตุ</th><th style={{ textAlign: 'center' }}>ใบกำกับภาษี</th><th>สถานะ</th><th></th>
+            <th style={{ textAlign: 'center' }}>รายการ</th><th>วันเวลาที่สั่ง</th><th style={{ minWidth: 168 }}>วันที่จะจัดส่ง</th><th>หมายเหตุ</th><th style={{ textAlign: 'center' }}>ใบกำกับภาษี</th><th style={{ textAlign: 'center' }}>โปรโมชั่น</th><th>สถานะ</th><th></th>
           </tr>
         </thead>
         <tbody>
@@ -60,7 +60,7 @@ function OrderTable({ title, tone, rows, isEmpty }: { title: string; tone: 'warn
                 <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', maxWidth: 200, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.address}</div>
               </td>
               <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{r.amtText}</td>
-              <td style={{ textAlign: 'center' }}>{r.itemCount}</td>
+              <td style={{ textAlign: 'center' }}>{r.itemCountText}</td>
               <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{r.orderedAtText}</td>
               <td style={{ fontSize: 12 }}>
                 {r.hasDeliveryDate ? (
@@ -86,6 +86,15 @@ function OrderTable({ title, tone, rows, isEmpty }: { title: string; tone: 'warn
               </td>
               <td style={{ textAlign: 'center' }}>
                 {r.wantsTaxInvoice ? <i className="ph ph-check-circle-fill" style={{ color: 'var(--st-ok-fg)' }} title="ต้องการใบกำกับภาษี" /> : <span style={{ color: 'var(--color-neutral-600)' }}>—</span>}
+              </td>
+              <td style={{ textAlign: 'center' }}>
+                {r.hasPromoItem ? (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10.5, padding: '2px 7px', borderRadius: 20, background: 'var(--color-accent-soft, rgba(255,138,0,.15))', color: 'var(--color-accent)', fontWeight: 500, whiteSpace: 'nowrap' }} title="มีสินค้าในออเดอร์นี้เข้าร่วมโปรโมชั่น">
+                    <i className="ph ph-tag-fill" />มีโปรโมชั่น
+                  </span>
+                ) : (
+                  <span style={{ color: 'var(--color-neutral-600)' }}>—</span>
+                )}
               </td>
               <td><span style={r.stStyle}>{r.stLabel}</span></td>
               <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>

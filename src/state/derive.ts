@@ -5,7 +5,7 @@ import { PROMO_UNITS, type Order, type PromoStatus, type PromoUnit, type RouteOr
 import { lineDiff, lineNetTotal, receivingFolderKey, recordHasDiscrepancy, recordTotal, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { loadCode } from '../data/vehicles';
 import { matchZone, UNASSIGNED_COLOR } from '../data/zoneConfig';
-import { addDays, dayKey, dayKeyToDate, daysBetweenKeys, formatOrderedAt, formatThaiShortDate, formatThaiWeekdayDate, sheetDateToDayKey, suggestedDeliveryDayKey, todayDayKey } from '../data/dateUtils';
+import { addDays, dayKey, dayKeyToDate, daysBetweenKeys, formatOrderedAt, formatThaiShortDate, formatThaiWeekdayDate, sheetDateTimeToMs, sheetDateToDayKey, suggestedDeliveryDayKey, todayDayKey } from '../data/dateUtils';
 import { badgeStyle, DELIVERY_DONE_STATUSES, fmt, sheetStatusStyle } from './helpers';
 import type { AppActions, AppState } from './store';
 
@@ -215,6 +215,9 @@ export function computeRoute(state: AppState, actions: AppActions) {
     if (rq && !(o.customer.toLowerCase().includes(rq) || o.orderNo.toLowerCase().includes(rq))) return false;
     return true;
   });
+  // Newest order first — ties (same order pushed within the same minute)
+  // fall back to their original sheet order since Array#sort is stable.
+  filtered.sort((a, b) => (sheetDateTimeToMs(b.orderedAtText) ?? 0) - (sheetDateTimeToMs(a.orderedAtText) ?? 0));
 
   const chipBase: CSSProperties = { border: 0, cursor: 'pointer', fontFamily: 'var(--font-body)', fontSize: 12.5, padding: '6px 13px', borderRadius: 20, fontWeight: 500 };
   const makeTabs = (values: string[], selected: string, onSelect: (v: string) => void) =>
@@ -242,8 +245,24 @@ export function computeRoute(state: AppState, actions: AppActions) {
     go: () => actions.patch({ routeFilterValue: t.key }),
   }));
 
+  // Active promo SKUs (state.promos is already filtered to Active-only) cross
+  // referenced against each order's line items, so staff can see at a glance
+  // which orders include a promoted product without opening every one.
+  const activePromoSkus = new Set(state.promos.map((p) => p.sku));
+  const orderSkus = new Map<string, Set<string>>();
+  for (const li of state.orderLineItems) {
+    let set = orderSkus.get(li.orderNo);
+    if (!set) {
+      set = new Set();
+      orderSkus.set(li.orderNo, set);
+    }
+    set.add(li.sku);
+  }
+
   const rows = filtered.map((o) => {
     const zone = matchZone(state.zoneRules, o.districtProvince, o.addressFromUnii);
+    const skusForOrder = orderSkus.get(o.orderNo);
+    const hasPromoItem = skusForOrder ? Array.from(skusForOrder).some((sku) => activePromoSkus.has(sku)) : false;
     const saveStatus = state.orderSaveStatus[o.orderNo];
     const hasDeliveryDate = sheetDateToDayKey(o.plannedDeliveryDate) != null;
     // Warehouse cutoff rule: ordered before 16:00 -> ship the next day;
@@ -263,7 +282,8 @@ export function computeRoute(state: AppState, actions: AppActions) {
       stLabel: o.status || '—',
       stStyle: sheetStatusStyle(o.status),
       amtText: fmt(o.totalAmount),
-      itemCount: o.itemCount,
+      itemCountText: o.itemCount.toLocaleString('en-US'),
+      hasPromoItem,
       paymentType: o.paymentType,
       orderedAtText: formatOrderedAt(o.orderedAtText),
       plannedDeliveryDate: o.plannedDeliveryDate || '—',

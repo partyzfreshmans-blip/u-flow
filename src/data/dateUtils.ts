@@ -94,6 +94,21 @@ export function suggestedDeliveryDayKey(orderedAtText: string): string | null {
   return dayKey(addDays(parsed.date, cutoffPassed ? 2 : 1));
 }
 
+/** Parses "M/D/YYYY H:MM:SS" (or a bare "M/D/YYYY") into a millisecond
+ * timestamp for stable most-recent-first sorting, including minutes/seconds
+ * (unlike parseSheetDateTime's hour-only precision). Returns null when the
+ * text doesn't parse at all. */
+export function sheetDateTimeToMs(raw: string): number | null {
+  const date = parseSheetDate(raw);
+  if (!date) return null;
+  const m = (raw ?? '').match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  const d = new Date(date);
+  if (m) {
+    d.setHours(Number(m[1]), Number(m[2]), m[3] ? Number(m[3]) : 0, 0);
+  }
+  return d.getTime();
+}
+
 /** Whole-day difference b - a, in days (positive when b is later). */
 export function daysBetweenKeys(a: string, b: string): number {
   const da = dayKeyToDate(a);

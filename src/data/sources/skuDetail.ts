@@ -50,3 +50,11 @@ export async function fetchOrderLineItemsForOrders(orderNos: string[]): Promise<
     .filter((l): l is OrderLineItem => l !== null)
     .filter((l) => wanted.has(l.orderNo));
 }
+
+/** All line items across every order — one fetch (already cached), no
+ * filter. Used to cross-reference orders against active promotions on the
+ * Order Management page without a round trip per order. */
+export async function fetchAllOrderLineItems(): Promise<OrderLineItem[]> {
+  const rows = await fetchSheetRows(CSV_URL);
+  return rows.map(rowToLineItem).filter((l): l is OrderLineItem => l !== null);
+}

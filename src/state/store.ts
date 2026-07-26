@@ -5,7 +5,7 @@ import { updateCsMasterLatLng } from '../data/sources/csMasterWrite';
 import { fetchActivePromotions } from '../data/sources/promotionsSheet';
 import { fetchRouteOrders } from '../data/sources/routeOrders';
 import { invalidateSheetCache } from '../data/sources/sheetCsv';
-import { fetchOrderLineItems, fetchOrderLineItemsForOrders } from '../data/sources/skuDetail';
+import { fetchAllOrderLineItems, fetchOrderLineItems, fetchOrderLineItemsForOrders } from '../data/sources/skuDetail';
 import { fetchSkusFromSheet } from '../data/sources/skuSheet';
 import { attachmentKey, loadAttachments, saveAttachments, uploadToDrive, type AttachmentIndex } from '../data/sources/attachments';
 import { emptyLine, loadReceivingLog, receivingFolderKey, saveReceivingLog, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
@@ -18,7 +18,7 @@ import { loadDriverQueue, saveDriverQueue } from '../data/driverQueue';
 import { loadPickLots, savePickLots, type PickLot, type PickLotLine } from '../data/pickLots';
 import { PICK_CLOSED_STATUS } from './helpers';
 import type { AttachmentScope } from '../config/drive';
-import type { ApiImportOrder, CsMasterCustomer, Promo, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
+import type { ApiImportOrder, CsMasterCustomer, OrderLineItem, Promo, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
 
 export interface OrderEditDraft {
   /** ISO YYYY-MM-DD, '' = not set. */
@@ -129,6 +129,12 @@ export interface AppState {
   promoQ: string;
   promoModal: boolean;
   promoForm: { name: string; sku: string; type: string; start: string; end: string; unit: PromoUnit; tiers: PromoTier[] };
+
+  // all order line items ("SKU Detail" tab, unfiltered) — used to flag which
+  // orders on the Order Management page contain an actively-promoted SKU.
+  orderLineItems: OrderLineItem[];
+  orderLineItemsLoading: boolean;
+  orderLineItemsError: string | null;
 
   // attachments (Drive-backed, metadata kept locally)
   attachments: AttachmentIndex;
@@ -246,6 +252,10 @@ export const initialState: AppState = {
   promoQ: '',
   promoModal: false,
   promoForm: { name: '', sku: '', type: 'ลดราคา', start: '2026-07-24', end: '2026-08-24', unit: 'ลัง', tiers: [{ minQty: 1, price: 0 }] },
+
+  orderLineItems: [],
+  orderLineItemsLoading: true,
+  orderLineItemsError: null,
 
   attachments: {},
   uploadingKey: null,
@@ -520,6 +530,23 @@ export function useAppStore() {
         if (!cancelled) {
           const message = err instanceof Error ? err.message : 'โหลดโปรโมชั่นไม่สำเร็จ';
           dispatch({ type: 'patch', patch: { promosLoading: false, promosError: message } });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchAllOrderLineItems()
+      .then((orderLineItems) => {
+        if (!cancelled) dispatch({ type: 'patch', patch: { orderLineItems, orderLineItemsLoading: false, orderLineItemsError: null } });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          const message = err instanceof Error ? err.message : 'โหลดรายการสินค้าต่อออเดอร์ไม่สำเร็จ';
+          dispatch({ type: 'patch', patch: { orderLineItemsLoading: false, orderLineItemsError: message } });
         }
       });
     return () => {
