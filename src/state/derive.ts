@@ -440,6 +440,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
 
   const vehicles = state.vehicles.map((v) => {
     const orderNos = state.routePlan[v.id] ?? [];
+    const sortDirection = state.routeSortDirection[v.id] ?? 'far';
     const stops = orderNos
       .map((no) => byOrderNo.get(no))
       .filter((o): o is NonNullable<typeof o> => o != null)
@@ -530,15 +531,23 @@ export function computePlanner(state: AppState, actions: AppActions) {
       codDiffText: codDiff === 0 ? 'ยอดตรง' : (codDiff > 0 ? 'เกิน +' : 'ขาด −') + fmt(Math.abs(codDiff)),
       codDiffStyle: codDiff === 0 ? badgeStyle('ok') : badgeStyle('bad'),
       codMismatch: codCashExpected > 0 && codDiff !== 0,
-      // Farthest drop first, working back toward the warehouse — the order the
-      // ops sheet uses.
+      // Toggles each click: applies the direction currently offered, then
+      // flips it for next time — so one button alternates between
+      // farthest-first (the ops sheet's usual order) and nearest-first.
+      autoSequenceDirection: sortDirection,
+      autoSequenceLabel: sortDirection === 'far' ? 'เรียงไกล→ใกล้' : 'เรียงใกล้→ไกล',
+      autoSequenceIcon: sortDirection === 'far' ? 'ph ph-sort-descending' : 'ph ph-sort-ascending',
+      autoSequenceTitle: sortDirection === 'far' ? 'เรียงจากจุดไกลคลังที่สุดไปใกล้ที่สุด' : 'เรียงจากจุดใกล้คลังที่สุดไปไกลที่สุด',
       autoSequence: () => {
         const sorted = [...orderNos].sort((a, b) => {
           const oa = byOrderNo.get(a);
           const ob = byOrderNo.get(b);
-          return (ob ? distanceOf(ob) : 0) - (oa ? distanceOf(oa) : 0);
+          const da = oa ? distanceOf(oa) : 0;
+          const db = ob ? distanceOf(ob) : 0;
+          return sortDirection === 'far' ? db - da : da - db;
         });
         actions.setRoutePlan({ ...state.routePlan, [v.id]: sorted });
+        actions.patch({ routeSortDirection: { ...state.routeSortDirection, [v.id]: sortDirection === 'far' ? 'near' : 'far' } });
       },
       clear: () => actions.setRoutePlan({ ...state.routePlan, [v.id]: [] }),
       mapStops: stops

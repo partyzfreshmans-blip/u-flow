@@ -89,6 +89,9 @@ export interface AppState {
   /** COD tracking per order, route-by-route (which vehicle is implied by routePlan). */
   routeCodCollected: Record<string, string>;
   routeCodMethod: Record<string, 'cash' | 'transfer'>;
+  /** Direction the "เรียงไกล→ใกล้" button will apply next, per vehicle —
+   * toggles each click. Missing = 'far' (the original default). */
+  routeSortDirection: Record<string, 'far' | 'near'>;
 
   // mobile driver view — reuses routeOrders/routePlan/vehicles, only adds its
   // own navigation + offline-sync state
@@ -213,6 +216,7 @@ export const initialState: AppState = {
   plannerDate: todayDayKey(),
   routeCodCollected: {},
   routeCodMethod: {},
+  routeSortDirection: {},
 
   driverSyncQueue: [],
   driverOnline: typeof navigator === 'undefined' || navigator.onLine,

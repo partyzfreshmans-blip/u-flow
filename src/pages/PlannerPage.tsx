@@ -110,9 +110,14 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
               ))}
             </tbody>
           </table>
-          <button className="btn btn-secondary" style={{ alignSelf: 'flex-start' }} onClick={() => actions.setZoneRules([...state.zoneRules, { id: `zone-${Date.now()}`, name: 'โซนใหม่', color: '#b5abfc', route: 'A', areaTerms: [], provinceTerms: [] }])}>
-            <i className="ph ph-plus" />เพิ่มโซน
-          </button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn btn-secondary" onClick={() => actions.setZoneRules([...state.zoneRules, { id: `zone-${Date.now()}`, name: 'โซนใหม่', color: '#b5abfc', route: 'A', areaTerms: [], provinceTerms: [] }])}>
+              <i className="ph ph-plus" />เพิ่มโซน
+            </button>
+            <button className="btn btn-primary" style={{ marginLeft: 'auto' }} onClick={() => actions.patch({ plannerConfigTab: null })}>
+              <i className="ph ph-check" />บันทึก
+            </button>
+          </div>
         </div>
       )}
 
@@ -144,9 +149,14 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
               ))}
             </tbody>
           </table>
-          <button className="btn btn-secondary" style={{ alignSelf: 'flex-start' }} onClick={() => actions.setVehicles([...state.vehicles, { id: `veh-${Date.now()}`, name: 'รถใหม่', loadPrefix: 'X', crew: 2, zoneNote: '' }])}>
-            <i className="ph ph-plus" />เพิ่มรถ
-          </button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn btn-secondary" onClick={() => actions.setVehicles([...state.vehicles, { id: `veh-${Date.now()}`, name: 'รถใหม่', loadPrefix: 'X', crew: 2, zoneNote: '' }])}>
+              <i className="ph ph-plus" />เพิ่มรถ
+            </button>
+            <button className="btn btn-primary" style={{ marginLeft: 'auto' }} onClick={() => actions.patch({ plannerConfigTab: null })}>
+              <i className="ph ph-check" />บันทึก
+            </button>
+          </div>
         </div>
       )}
 
@@ -186,8 +196,8 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                       <span style={veh.codDiffStyle}>{veh.codDiffText}</span>
                     </span>
                   )}
-                  <button className="btn btn-secondary" style={{ minHeight: 30 }} onClick={veh.autoSequence} disabled={veh.stopCount < 2} title="เรียงจากจุดไกลคลังที่สุดไปใกล้ที่สุด">
-                    <i className="ph ph-sort-descending" />เรียงไกล→ใกล้
+                  <button className="btn btn-secondary" style={{ minHeight: 30 }} onClick={veh.autoSequence} disabled={veh.stopCount < 2} title={veh.autoSequenceTitle}>
+                    <i className={veh.autoSequenceIcon} />{veh.autoSequenceLabel}
                   </button>
                   <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={veh.clear} disabled={veh.stopCount === 0}>เอาออกทั้งหมด</button>
                 </div>
