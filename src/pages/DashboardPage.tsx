@@ -94,32 +94,6 @@ export function DashboardPage({ state, actions }: { state: AppState; actions: Ap
         </div>
       )}
 
-      {v.stuckCount > 0 && (
-        <div className="card elev-sm" style={{ marginBottom: 18, gap: 10, boxShadow: 'inset 0 0 0 1px var(--st-bad-fg)' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <i className="ph ph-warning-fill" style={{ color: 'var(--st-bad-fg)', fontSize: 17 }} />
-            <span style={{ fontWeight: 600, fontSize: 14 }}>ออเดอร์ตกหล่น — เลยวันจัดส่งแล้วแต่ยังไม่สำเร็จ ({v.stuckCount})</span>
-          </div>
-          <table className="table">
-            <thead>
-              <tr><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th>วันที่จะจัดส่ง</th><th style={{ textAlign: 'center' }}>ล่าช้า</th><th>สถานะ</th><th></th></tr>
-            </thead>
-            <tbody>
-              {v.stuckOrders.map((o) => (
-                <tr key={o.orderNo}>
-                  <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12.5 }}>{o.orderNo}</td>
-                  <td>{o.customer}</td>
-                  <td style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{o.plannedDeliveryDate}</td>
-                  <td style={{ textAlign: 'center', fontSize: 12, color: 'var(--st-bad-fg)', fontWeight: 600 }}>{o.daysLate} วัน</td>
-                  <td><span style={o.stStyle}>{o.stLabel}</span></td>
-                  <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={o.viewItems}>ดูสินค้า</button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
       <div className="card elev-sm" style={{ marginBottom: 22, gap: 10 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <span style={{ fontWeight: 600, fontSize: 14 }}><i className="ph ph-calendar-check" style={{ marginRight: 6, color: 'var(--color-accent-300)' }} />พยากรณ์ 7 วันข้างหน้า</span>

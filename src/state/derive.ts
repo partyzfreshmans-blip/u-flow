@@ -226,22 +226,6 @@ export function computeDashboard(state: AppState, actions: AppActions) {
     };
   });
 
-  // ---- stuck orders: delivery date already passed, but never reached a done status ----
-  const stuckOrders = stuckRouteOrders(state, today)
-    .map((o) => {
-      const key = effectiveDeliveryDayKey(o)!;
-      return {
-        orderNo: o.orderNo,
-        customer: o.customer,
-        plannedDeliveryDate: o.plannedDeliveryDate,
-        daysLate: Math.abs(daysBetweenKeys(key, today)),
-        stLabel: o.status || '—',
-        stStyle: sheetStatusStyle(o.status),
-        viewItems: () => actions.openOrderDetail(o.orderNo, o.customer, o),
-      };
-    })
-    .sort((a, b) => b.daysLate - a.daysLate);
-
   return {
     apiOrdersLoading: state.apiOrdersLoading,
     apiOrdersError: state.apiOrdersError,
@@ -256,8 +240,6 @@ export function computeDashboard(state: AppState, actions: AppActions) {
     forecastStatusFilter: state.forecastStatusFilter,
     forecastStatusOptions,
     onForecastStatusFilter: (v: string) => actions.patch({ forecastStatusFilter: v }),
-    stuckOrders,
-    stuckCount: stuckOrders.length,
   };
 }
 
@@ -584,6 +566,23 @@ export function computeRoute(state: AppState, actions: AppActions) {
   const rowsNoDate = rows.filter((r) => r.plannedDeliveryDate === '—');
   const rowsWithDate = rows.filter((r) => r.plannedDeliveryDate !== '—');
 
+  // ---- stuck orders: delivery date already passed, but never reached a done status ----
+  const today = todayDayKey();
+  const stuckOrders = stuckRouteOrders(state, today)
+    .map((o) => {
+      const key = effectiveDeliveryDayKey(o)!;
+      return {
+        orderNo: o.orderNo,
+        customer: o.customer,
+        plannedDeliveryDate: o.plannedDeliveryDate,
+        daysLate: Math.abs(daysBetweenKeys(key, today)),
+        stLabel: o.status || '—',
+        stStyle: sheetStatusStyle(o.status),
+        viewItems: () => actions.openOrderDetail(o.orderNo, o.customer, o),
+      };
+    })
+    .sort((a, b) => b.daysLate - a.daysLate);
+
   return {
     routeOrdersLoading: state.routeOrdersLoading,
     routeOrdersError: state.routeOrdersError,
@@ -608,6 +607,8 @@ export function computeRoute(state: AppState, actions: AppActions) {
     unzonedCount,
     unassignedColor: UNASSIGNED_COLOR,
     mismatchCount,
+    stuckOrders,
+    stuckCount: stuckOrders.length,
 
     // ---- archive feature ----
     archivedFilter: state.routeArchivedFilter,
