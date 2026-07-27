@@ -544,7 +544,12 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                           )}
                         </div>
                         <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', marginTop: 1 }}>{o.orderNo}</div>
-                        <div style={{ fontSize: 11, color: 'var(--color-neutral-400)', maxWidth: 320, whiteSpace: 'normal', wordBreak: 'break-word' }}>{o.address}</div>
+                        <div
+                          title={o.address}
+                          style={{ fontSize: 11, color: 'var(--color-neutral-400)', maxWidth: 320, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                        >
+                          {o.address}
+                        </div>
                       </td>
                       <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>{o.districtProvince}</td>
                       <td style={{ fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.phone}</td>
