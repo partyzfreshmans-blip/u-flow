@@ -16,6 +16,18 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
   const [dragOverVehicleId, setDragOverVehicleId] = useState<string | null>(null);
   const [assigningVehicleId, setAssigningVehicleId] = useState<string | null>(null);
   const [assignSyncError, setAssignSyncError] = useState<string | null>(null);
+  // Map display filter — which vehicles' routes/pins to draw, and whether to
+  // include not-yet-assigned orders. Purely a view toggle (doesn't touch
+  // routePlan), so it's fine to keep as local UI state rather than global.
+  const [hiddenVehicleIds, setHiddenVehicleIds] = useState<Set<string>>(new Set());
+  const [showUnassignedOnMap, setShowUnassignedOnMap] = useState(true);
+  const toggleVehicleOnMap = (vehicleId: string) =>
+    setHiddenVehicleIds((cur) => {
+      const next = new Set(cur);
+      if (next.has(vehicleId)) next.delete(vehicleId);
+      else next.add(vehicleId);
+      return next;
+    });
 
   const updateVehicle = (id: string, patch: Partial<(typeof state.vehicles)[number]>) =>
     actions.setVehicles(state.vehicles.map((x) => (x.id === id ? { ...x, ...patch } : x)));
@@ -46,6 +58,9 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
     }
     v.openAssignDialog(vehicleId);
   };
+
+  const mapStopsFiltered = v.mapStops.filter((s) => (s.vehicleId ? !hiddenVehicleIds.has(s.vehicleId) : showUnassignedOnMap));
+  const vehicleRoutesFiltered = v.vehicleRoutes.filter((r) => !hiddenVehicleIds.has(r.vehicleId));
 
   return (
     <div>
@@ -484,11 +499,61 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
             instead of scrolling away once its own short natural height
             passes. */}
         <div style={{ position: 'sticky', top: 96, alignSelf: 'start', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+            <span style={{ fontSize: 11, color: 'var(--color-neutral-500)', marginRight: 2 }}>แสดงบนแผนที่</span>
+            {v.vehicles.map((veh) => {
+              const hidden = hiddenVehicleIds.has(veh.id);
+              return (
+                <button
+                  key={veh.id}
+                  onClick={() => toggleVehicleOnMap(veh.id)}
+                  title={hidden ? `ซ่อนอยู่ — คลิกเพื่อแสดง ${veh.name}` : `คลิกเพื่อซ่อน ${veh.name}`}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, padding: '3px 9px', borderRadius: 20,
+                    border: 0, cursor: 'pointer', fontFamily: 'var(--font-body)',
+                    background: hidden ? 'var(--color-bg)' : 'var(--color-surface)',
+                    color: hidden ? 'var(--color-neutral-600)' : 'var(--color-neutral-200)',
+                    boxShadow: hidden ? 'inset 0 0 0 1px var(--color-divider)' : 'inset 0 0 0 1px var(--color-neutral-700)',
+                    opacity: hidden ? 0.6 : 1,
+                  }}
+                >
+                  <span style={{ width: 9, height: 9, borderRadius: '50%', background: veh.vehicleColor, flex: 'none' }} />
+                  {veh.name} ({veh.stopCount})
+                  {hidden && <i className="ph ph-eye-slash" style={{ fontSize: 11 }} />}
+                </button>
+              );
+            })}
+            <button
+              onClick={() => setShowUnassignedOnMap((cur) => !cur)}
+              title={showUnassignedOnMap ? 'คลิกเพื่อซ่อนออเดอร์ที่ยังไม่ได้จัด' : 'ซ่อนอยู่ — คลิกเพื่อแสดงออเดอร์ที่ยังไม่ได้จัด'}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, padding: '3px 9px', borderRadius: 20,
+                border: 0, cursor: 'pointer', fontFamily: 'var(--font-body)',
+                background: showUnassignedOnMap ? 'var(--color-surface)' : 'var(--color-bg)',
+                color: showUnassignedOnMap ? 'var(--color-neutral-200)' : 'var(--color-neutral-600)',
+                boxShadow: showUnassignedOnMap ? 'inset 0 0 0 1px var(--color-neutral-700)' : 'inset 0 0 0 1px var(--color-divider)',
+                opacity: showUnassignedOnMap ? 1 : 0.6,
+              }}
+            >
+              <span style={{ width: 9, height: 9, borderRadius: '50%', background: v.unassignedColor, flex: 'none' }} />
+              ยังไม่ได้จัด ({v.unassignedCount})
+              {!showUnassignedOnMap && <i className="ph ph-eye-slash" style={{ fontSize: 11 }} />}
+            </button>
+            {hiddenVehicleIds.size > 0 && (
+              <button
+                className="btn btn-ghost"
+                style={{ fontSize: 11, padding: '3px 8px' }}
+                onClick={() => setHiddenVehicleIds(new Set())}
+              >
+                <i className="ph ph-x" />แสดงทั้งหมด
+              </button>
+            )}
+          </div>
           <div className="card elev-sm" style={{ padding: 0, overflow: 'hidden', height: 560, position: 'relative' }}>
             <RouteMap
-              stops={v.mapStops}
+              stops={mapStopsFiltered}
               warehouse={v.warehouse}
-              vehicleRoutes={v.vehicleRoutes}
+              vehicleRoutes={vehicleRoutesFiltered}
               vehicleOptions={v.vehicleOptions}
               onMoveToVehicle={v.canEdit ? v.onMapMoveToVehicle : undefined}
             />
