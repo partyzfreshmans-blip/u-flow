@@ -694,6 +694,21 @@ export function computePlanner(state: AppState, actions: AppActions) {
     for (const no of orderNos) assignedTo.set(no, vehicleId);
   }
 
+  // "ออเดอร์ค้าง/เลยกำหนด" banner — deliberately scoped to the same
+  // not-yet-assigned pool as the unassigned table below (not every
+  // routeOrder), and deliberately NOT scoped to state.plannerDate, so the
+  // count always matches exactly what clicking the banner reveals: clearing
+  // plannerDate surfaces every date's unassigned orders, and the per-row
+  // noDeliveryDate/isOverdue flags below (set the same way here) narrow
+  // that down to precisely the flagged subset.
+  const today = todayDayKey();
+  const unassignedAnyDate = state.routeOrders.filter((o) => !DELIVERY_DONE_STATUSES.includes(o.status) && !assignedTo.has(o.orderNo));
+  const noDeliveryDateCount = unassignedAnyDate.filter((o) => effectiveDeliveryDayKey(o) === null).length;
+  const overdueUnassignedCount = unassignedAnyDate.filter((o) => {
+    const key = effectiveDeliveryDayKey(o);
+    return key !== null && key < today;
+  }).length;
+
   const distanceOf = (o: (typeof candidates)[number]) =>
     o.distanceFromWhKm ?? (warehouse && o.lat != null && o.lng != null ? haversineKm(warehouse.lat, warehouse.lng, o.lat, o.lng) : 0);
 
@@ -833,6 +848,11 @@ export function computePlanner(state: AppState, actions: AppActions) {
         canDecideBooking: canDecide,
         confirmBooking: booking ? () => confirmBookingFor(o.orderNo, booking.driverUsername, booking.driverVehicleId) : undefined,
         rejectBooking: booking ? (note?: string) => rejectBookingFor(o.orderNo, booking.driverUsername, note) : undefined,
+        noDeliveryDate: effectiveDeliveryDayKey(o) === null,
+        isOverdue: (() => {
+          const key = effectiveDeliveryDayKey(o);
+          return key !== null && key < today;
+        })(),
       };
     })
     .sort((a, b) => b.distanceKm - a.distanceKm);
@@ -1226,7 +1246,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
 
     // Batch Route — "Assign"/"ยืนยันรูท" confirmation step
     plannerTab: state.plannerTab,
-    setPlannerTab: (tab: 'plan' | 'history') => actions.patch({ plannerTab: tab }),
+    setPlannerTab: (tab: 'plan' | 'history' | 'calendar') => actions.patch({ plannerTab: tab }),
     canAssign: canEdit && !!state.plannerDate,
     assignDialogOpen: state.assignDialogOpen,
     assignableVehicles: assignableVehicles.map((v) => ({ id: v.id, name: v.name, stopCount: v.stopCount, totalText: v.totalText })),
@@ -1250,6 +1270,15 @@ export function computePlanner(state: AppState, actions: AppActions) {
     // Driver "จองคิว" — booking-request badges/confirm-reject wired into the
     // unassigned rows above; this is just the shared error surface for that.
     bookingActionError: state.bookingActionError,
+
+    // "ออเดอร์ค้าง/เลยกำหนด" banner — see the noDeliveryDateCount/
+    // overdueUnassignedCount computation above for the exact scope (still
+    // unassigned, any planner date). Clicking either count clears
+    // plannerDate (revealing every date's unassigned pool) and applies a
+    // local highlight/filter in PlannerPage.tsx over the noDeliveryDate/
+    // isOverdue flags each unassigned row already carries.
+    noDeliveryDateCount,
+    overdueUnassignedCount,
   };
 }
 
@@ -1417,6 +1446,131 @@ export function computeBatchRouteHistory(state: AppState, actions: AppActions) {
     rows,
     isEmpty: rows.length === 0,
     totalCount: state.batchRoutes.length,
+  };
+}
+
+// ---------- ROUTE CALENDAR (Planner's third tab — month view) ----------
+const THAI_MONTHS_FULL = [
+  'มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน',
+  'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม',
+];
+const CALENDAR_WEEKDAY_HEADERS = ['อา.', 'จ.', 'อ.', 'พ.', 'พฤ.', 'ศ.', 'ส.'];
+
+export interface RouteCalendarDay {
+  dayKey: string;
+  dayNum: number;
+  inMonth: boolean;
+  isToday: boolean;
+  orderCount: number;
+  batchCount: number;
+  hasData: boolean;
+  totalText: string;
+  cashText: string;
+  transferText: string;
+}
+
+/** Month grid + per-day summary (order count, batch count, cash/transfer
+ * split) for the Planner's "Route Calendar" tab — year/month are passed in
+ * explicitly rather than read off global state, since which month is being
+ * viewed is transient UI navigation local to RouteCalendarPanel, the same
+ * way BatchRouteHistoryPanel keeps its own accordion-open state locally. */
+export function computeRouteCalendar(state: AppState, year: number, month: number) {
+  const today = todayDayKey();
+
+  const ordersByDay = new Map<string, RouteOrder[]>();
+  for (const o of state.routeOrders) {
+    const key = effectiveDeliveryDayKey(o);
+    if (!key) continue;
+    const arr = ordersByDay.get(key);
+    if (arr) arr.push(o);
+    else ordersByDay.set(key, [o]);
+  }
+  const batchesByDay = new Map<string, BatchRoute[]>();
+  for (const b of state.batchRoutes) {
+    const arr = batchesByDay.get(b.deliveryDate);
+    if (arr) arr.push(b);
+    else batchesByDay.set(b.deliveryDate, [b]);
+  }
+  const assignedOrderNos = new Set(Object.values(state.routePlan).flat());
+  const byOrderNo = new Map(state.routeOrders.map((o) => [o.orderNo, o]));
+
+  const daySummary = (key: string) => {
+    const dayOrders = ordersByDay.get(key) ?? [];
+    const dayBatches = batchesByDay.get(key) ?? [];
+    let totalSales = 0;
+    let cashExpected = 0;
+    let transferTotal = 0;
+    for (const o of dayOrders) {
+      totalSales += o.totalAmount;
+      if (!isCodPayment(o.paymentType)) continue;
+      const method = state.routeCodMethod[o.orderNo] ?? 'cash';
+      if (method === 'transfer') transferTotal += o.totalAmount;
+      else cashExpected += o.totalAmount;
+    }
+    return { dayOrders, dayBatches, totalSales, cashExpected, transferTotal };
+  };
+
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const firstWeekday = new Date(year, month, 1).getDay();
+  const totalCells = Math.ceil((firstWeekday + daysInMonth) / 7) * 7;
+
+  const allDays: RouteCalendarDay[] = [];
+  for (let i = 0; i < totalCells; i++) {
+    const d = new Date(year, month, 1 - firstWeekday + i);
+    const key = dayKey(d);
+    const { dayOrders, dayBatches, totalSales, cashExpected, transferTotal } = daySummary(key);
+    allDays.push({
+      dayKey: key,
+      dayNum: d.getDate(),
+      inMonth: d.getMonth() === month,
+      isToday: key === today,
+      orderCount: dayOrders.length,
+      batchCount: dayBatches.length,
+      hasData: dayOrders.length > 0 || dayBatches.length > 0,
+      totalText: fmt(totalSales),
+      cashText: fmt(cashExpected),
+      transferText: fmt(transferTotal),
+    });
+  }
+
+  const weeks: RouteCalendarDay[][] = [];
+  for (let i = 0; i < allDays.length; i += 7) weeks.push(allDays.slice(i, i + 7));
+
+  /** Full popup detail for one day, computed on demand (only when a day is
+   * actually clicked) rather than for all ~35 cells up front. */
+  const dayDetail = (key: string) => {
+    const { dayOrders, dayBatches, totalSales, cashExpected, transferTotal } = daySummary(key);
+    const unassignedCount = dayOrders.filter((o) => !assignedOrderNos.has(o.orderNo)).length;
+    const d = dayKeyToDate(key);
+    return {
+      dayKey: key,
+      dateText: d ? formatThaiWeekdayDate(d) : key,
+      orderCount: dayOrders.length,
+      unassignedCount,
+      totalText: fmt(totalSales),
+      cashText: fmt(cashExpected),
+      transferText: fmt(transferTotal),
+      hasCod: cashExpected > 0 || transferTotal > 0,
+      batches: dayBatches
+        .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+        .map((b) => ({
+          id: b.id,
+          vehicleName: b.vehicleName,
+          orderCount: b.orderNos.length,
+          totalText: fmt(b.orderNos.reduce((sum, no) => sum + (byOrderNo.get(no)?.totalAmount ?? 0), 0)),
+          locked: b.locked,
+          codClosed: b.codClosed,
+        })),
+    };
+  };
+
+  return {
+    year,
+    month,
+    monthLabel: `${THAI_MONTHS_FULL[month]} ${year}`,
+    weekdayHeaders: CALENDAR_WEEKDAY_HEADERS,
+    weeks,
+    dayDetail,
   };
 }
 

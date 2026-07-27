@@ -200,3 +200,36 @@ textarea.input { min-height: 90px; resize: vertical; font-family: inherit; }
 }
 .dialog-body { font-size: 14px; opacity: 0.85; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-2); }
+
+/* — planner: vehicle list (left) + map (right, sticky while scrolling) —
+   align-items isn't set on the grid itself, so both columns stretch to the
+   row's full height (matching whichever side is taller); the map column
+   then uses align-self: start to shrink back to its own content height
+   inside that tall cell, which is what gives position: sticky room to hold
+   it in place as the (much longer) vehicle list scrolls past. Below the
+   900px breakpoint (same one the sidebar auto-collapses at) the map drops
+   to a plain stacked block instead — a floating sticky panel next to a
+   single narrow column reads as broken on a phone, not helpful. */
+.planner-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 420px;
+  gap: 18px;
+}
+.planner-map-col {
+  position: sticky;
+  top: 96px;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+@media (max-width: 900px) {
+  .planner-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .planner-map-col {
+    position: static;
+    top: auto;
+  }
+}

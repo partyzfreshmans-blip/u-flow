@@ -49,7 +49,7 @@ function App() {
   const [pageTitle, pageSub] = pageTitles[state.route];
 
   return (
-    <div style={{ display: 'flex', minHeight: '100vh' }}>
+    <div style={{ display: 'flex', height: '100vh' }}>
       {!state.sidebarCollapsed && <Sidebar route={state.route} actions={actions} session={session} />}
 
       <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>

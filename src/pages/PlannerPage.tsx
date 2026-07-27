@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { computePlanner } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 import { BatchRouteHistoryPanel } from './BatchRouteHistoryPanel';
+import { RouteCalendarPanel } from './RouteCalendarPanel';
 import { RouteMap } from './RouteMap';
 
 interface DragPayload {
@@ -25,6 +26,10 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
   // rather than a separate modal (rejecting is rare enough not to need one).
   const [rejectingOrderNo, setRejectingOrderNo] = useState<string | null>(null);
   const [rejectNote, setRejectNote] = useState('');
+  // "ออเดอร์ค้าง/เลยกำหนด" banner — clicking a count clears plannerDate (so
+  // every date's unassigned pool becomes visible, not just today's) and
+  // narrows the table below to just that flagged subset via this filter.
+  const [attentionFilter, setAttentionFilter] = useState<'none' | 'no-date' | 'overdue'>('none');
   const toggleVehicleOnMap = (vehicleId: string) =>
     setHiddenVehicleIds((cur) => {
       const next = new Set(cur);
@@ -65,6 +70,8 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
 
   const mapStopsFiltered = v.mapStops.filter((s) => (s.vehicleId ? !hiddenVehicleIds.has(s.vehicleId) : showUnassignedOnMap));
   const vehicleRoutesFiltered = v.vehicleRoutes.filter((r) => !hiddenVehicleIds.has(r.vehicleId));
+  const unassignedFiltered =
+    attentionFilter === 'none' ? v.unassigned : v.unassigned.filter((o) => (attentionFilter === 'no-date' ? o.noDeliveryDate : o.isOverdue));
 
   return (
     <div>
@@ -98,13 +105,62 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
           <label className="seg-opt">
             <input type="radio" name="plannerTab" checked={v.plannerTab === 'history'} onChange={() => v.setPlannerTab('history')} /><i className="ph ph-clock-counter-clockwise" />ประวัติ Batch Route
           </label>
+          <label className="seg-opt">
+            <input type="radio" name="plannerTab" checked={v.plannerTab === 'calendar'} onChange={() => v.setPlannerTab('calendar')} /><i className="ph ph-calendar-blank" />Route Calendar
+          </label>
         </div>
       )}
 
       {v.plannerTab === 'history' && v.canEdit ? (
         <BatchRouteHistoryPanel state={state} actions={actions} />
+      ) : v.plannerTab === 'calendar' && v.canEdit ? (
+        <RouteCalendarPanel state={state} actions={actions} />
       ) : (
         <>
+      {/* overdue / no-delivery-date attention banner */}
+      {v.canEdit && (v.noDeliveryDateCount > 0 || v.overdueUnassignedCount > 0) && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', padding: '12px 15px', marginBottom: 14, borderRadius: 10, background: 'var(--st-warn-bg)', color: 'var(--st-warn-fg)', fontSize: 13 }}>
+          <i className="ph ph-warning-fill" style={{ fontSize: 17, flex: 'none' }} />
+          <span style={{ flex: 1, minWidth: 200 }}>
+            มีออเดอร์
+            {v.noDeliveryDateCount > 0 && (
+              <>
+                {' '}
+                <button
+                  className="btn btn-ghost"
+                  style={{ fontSize: 13, padding: 0, minHeight: 'auto', textDecoration: 'underline', color: 'inherit', fontWeight: 700 }}
+                  onClick={() => { v.clearPlannerDate(); setAttentionFilter('no-date'); }}
+                >
+                  {v.noDeliveryDateCount} รายการ
+                </button>{' '}
+                ที่ยังไม่กำหนดวันจัดส่ง
+              </>
+            )}
+            {v.noDeliveryDateCount > 0 && v.overdueUnassignedCount > 0 && ' และ'}
+            {v.overdueUnassignedCount > 0 && (
+              <>
+                {' '}
+                <button
+                  className="btn btn-ghost"
+                  style={{ fontSize: 13, padding: 0, minHeight: 'auto', textDecoration: 'underline', color: 'inherit', fontWeight: 700 }}
+                  onClick={() => { v.clearPlannerDate(); setAttentionFilter('overdue'); }}
+                >
+                  {v.overdueUnassignedCount} รายการ
+                </button>{' '}
+                ที่เลยกำหนดส่งแล้วแต่ยังไม่สำเร็จ
+              </>
+            )}
+          </span>
+        </div>
+      )}
+      {attentionFilter !== 'none' && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '9px 15px', marginBottom: 14, borderRadius: 10, background: 'var(--st-info-bg)', color: 'var(--st-info-fg)', fontSize: 12.5 }}>
+          <i className="ph ph-funnel" style={{ flex: 'none' }} />
+          <span>กำลังกรองเฉพาะ{attentionFilter === 'no-date' ? 'ออเดอร์ที่ยังไม่กำหนดวันจัดส่ง' : 'ออเดอร์ที่เลยกำหนดส่งแล้วแต่ยังไม่สำเร็จ'}</span>
+          <button className="btn btn-ghost" style={{ fontSize: 12, marginLeft: 'auto' }} onClick={() => setAttentionFilter('none')}><i className="ph ph-x" />ล้างตัวกรอง</button>
+        </div>
+      )}
+
       {/* summary + actions */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', padding: '11px 15px', marginBottom: 14, borderRadius: 10, background: 'var(--color-surface)', boxShadow: 'var(--shadow-sm)', fontSize: 12.5 }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
@@ -225,7 +281,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 420px', gap: 18 }}>
+      <div className="planner-layout">
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {/* per-vehicle plans */}
           {v.vehicles.map((veh) => (
@@ -410,7 +466,9 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
           {v.canEdit && (
           <div className="card elev-sm" style={{ gap: 10 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-              <div style={{ fontWeight: 600, fontSize: 14 }}>ออเดอร์ที่ยังไม่จัดลงรถ ({v.unassignedCount})</div>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>
+                ออเดอร์ที่ยังไม่จัดลงรถ ({unassignedFiltered.length}{attentionFilter !== 'none' ? `/${v.unassignedCount}` : ''})
+              </div>
               {v.selectedCount > 0 ? (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto', flexWrap: 'wrap' }}>
                   <span style={{ fontSize: 12, color: 'var(--color-accent-300)', fontWeight: 500 }}>เลือกแล้ว {v.selectedCount} รายการ</span>
@@ -424,9 +482,10 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                 <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--color-neutral-500)' }}>เรียงจากไกลคลังที่สุด</span>
               )}
             </div>
-            {v.unassignedCount === 0 ? (
+            {unassignedFiltered.length === 0 ? (
               <div style={{ padding: 18, textAlign: 'center', color: 'var(--st-ok-fg)', fontSize: 12.5 }}>
-                <i className="ph ph-check-circle-fill" style={{ marginRight: 5 }} />จัดครบทุกออเดอร์แล้ว
+                <i className="ph ph-check-circle-fill" style={{ marginRight: 5 }} />
+                {attentionFilter === 'none' ? 'จัดครบทุกออเดอร์แล้ว' : 'ไม่มีออเดอร์ที่ตรงกับตัวกรองนี้'}
               </div>
             ) : (
               <table className="table">
@@ -440,11 +499,21 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                   </tr>
                 </thead>
                 <tbody>
-                  {v.unassigned.map((o) => (
+                  {unassignedFiltered.map((o) => (
                     <tr key={o.orderNo} style={o.bookedByDriver ? { background: 'var(--color-bg)' } : undefined}>
                       <td><input type="checkbox" checked={o.selected} onChange={o.toggleSelect} /></td>
                       <td>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          {o.noDeliveryDate && (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, padding: '2px 7px', borderRadius: 6, background: 'var(--st-warn-bg)', color: 'var(--st-warn-fg)', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                              <i className="ph ph-calendar-x" />ไม่มีวันจัดส่ง
+                            </span>
+                          )}
+                          {o.isOverdue && (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, padding: '2px 7px', borderRadius: 6, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                              <i className="ph ph-clock-countdown" />เลยกำหนดส่ง
+                            </span>
+                          )}
                           {o.bookedByDriver && (
                             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, padding: '2px 7px', borderRadius: 6, background: 'var(--st-warn-bg)', color: 'var(--st-warn-fg)', fontWeight: 600, whiteSpace: 'nowrap' }}>
                               <i className="ph ph-hand-tap" />จองคิวโดย {o.bookedByDriver}
@@ -546,12 +615,10 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
           )}
         </div>
 
-        {/* map — sticky within the grid row (which stretches to match the
-            left column's height, since the grid no longer forces alignItems:
-            start), so it stays in view all the way down the vehicle list
-            instead of scrolling away once its own short natural height
-            passes. */}
-        <div style={{ position: 'sticky', top: 96, alignSelf: 'start', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {/* map — sticky while the (much longer) vehicle list scrolls past;
+            see .planner-map-col in nocturne.css for how/why, and its mobile
+            breakpoint that drops this to a plain stacked block instead. */}
+        <div className="planner-map-col">
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
             <span style={{ fontSize: 11, color: 'var(--color-neutral-500)', marginRight: 2 }}>แสดงบนแผนที่</span>
             {v.vehicles.map((veh) => {

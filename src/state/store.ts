@@ -131,7 +131,7 @@ export interface AppState {
   batchRouteUnlocked: Record<string, boolean>;
   batchRouteQ: string;
   /** Sub-tab on the Planner page: the live plan, or the Batch Route history. */
-  plannerTab: 'plan' | 'history';
+  plannerTab: 'plan' | 'history' | 'calendar';
   assignDialogOpen: boolean;
   assignSelectedVehicleIds: string[];
   /** orderNo whose "ตรวจสอบ/แก้ไขโลเคชั่น" modal is open; null = closed. */
