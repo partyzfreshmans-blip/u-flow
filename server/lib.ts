@@ -398,6 +398,231 @@ export async function handleUpdateUser(token: string | null, body: unknown): Pro
   }
 }
 
+// ---------- Driver stop bookings ("จองคิว") ----------
+//
+// A driver can't assign themselves into a batch route directly (that stays
+// manager/admin-only, unchanged) — instead they "book" an unassigned order
+// here as a request, which a manager/admin then confirms (adding it to that
+// driver's vehicle plan, same as a normal Assign) or rejects. Lives in its
+// own "Bookings" tab, same reasoning as the Users tab: needs to be visible
+// to every driver and every manager/admin at once, which localStorage
+// (what routePlan/batchRoutes use) can never provide across devices — this
+// is the one piece of planner state that genuinely has to be server-side.
+const BOOKINGS_TAB_TITLE = 'Bookings';
+const BOOKINGS_HEADER = ['orderNo', 'driverUsername', 'driverVehicleId', 'status', 'bookedAt', 'decidedBy', 'decidedAt', 'note'];
+type BookingStatus = 'pending' | 'confirmed' | 'rejected';
+
+interface BookingRecord {
+  rowIndex: number;
+  orderNo: string;
+  driverUsername: string;
+  driverVehicleId: string;
+  status: BookingStatus;
+  bookedAt: string;
+  decidedBy: string;
+  decidedAt: string;
+  note: string;
+}
+
+async function ensureBookingsSheet(sheets: SheetsClient): Promise<void> {
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: MAIN_SHEET_ID });
+  const exists = meta.data.sheets?.some((s) => s.properties?.title === BOOKINGS_TAB_TITLE);
+  if (exists) return;
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: MAIN_SHEET_ID,
+    requestBody: { requests: [{ addSheet: { properties: { title: BOOKINGS_TAB_TITLE } } }] },
+  });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: MAIN_SHEET_ID,
+    range: `${BOOKINGS_TAB_TITLE}!A1:H1`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [BOOKINGS_HEADER] },
+  });
+}
+
+async function readBookings(sheets: SheetsClient): Promise<BookingRecord[]> {
+  await ensureBookingsSheet(sheets);
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${BOOKINGS_TAB_TITLE}!A:H` });
+  const rows = res.data.values ?? [];
+  const out: BookingRecord[] = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i] ?? [];
+    const orderNo = String(r[0] ?? '').trim();
+    if (!orderNo) continue;
+    const status = String(r[3] ?? '').trim();
+    out.push({
+      rowIndex: i + 1,
+      orderNo,
+      driverUsername: String(r[1] ?? '').trim(),
+      driverVehicleId: String(r[2] ?? '').trim(),
+      status: status === 'confirmed' || status === 'rejected' ? status : 'pending',
+      bookedAt: String(r[4] ?? '').trim(),
+      decidedBy: String(r[5] ?? '').trim(),
+      decidedAt: String(r[6] ?? '').trim(),
+      note: String(r[7] ?? '').trim(),
+    });
+  }
+  return out;
+}
+
+function bookingRowValues(b: BookingRecord): unknown[] {
+  return [b.orderNo, b.driverUsername, b.driverVehicleId, b.status, b.bookedAt, b.decidedBy, b.decidedAt, b.note];
+}
+
+/** Any authenticated user can list bookings — drivers need to see what's
+ * already taken before picking, managers/admins need to see the queue of
+ * pending requests. Nothing here is more sensitive than what's already on
+ * the (also authenticated-only) planner page. */
+export async function handleListBookings(token: string | null): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  try {
+    const sheets = await getSheetsClient();
+    const bookings = await readBookings(sheets);
+    return {
+      status: 200,
+      body: {
+        bookings: bookings.map((b) => ({
+          orderNo: b.orderNo,
+          driverUsername: b.driverUsername,
+          driverVehicleId: b.driverVehicleId,
+          status: b.status,
+          bookedAt: b.bookedAt,
+          decidedBy: b.decidedBy,
+          decidedAt: b.decidedAt,
+          note: b.note,
+        })),
+      },
+    };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'โหลดรายการจองคิวไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
+}
+
+/** Driver-only: request one or more unassigned orders. Two drivers racing
+ * for the same order is resolved as first-write-wins, arbitrated by actual
+ * row order in the sheet (Google Sheets serializes writes to one
+ * spreadsheet, so whichever append the API processed first lands in the
+ * lower row) — not by request arrival order at this function, which two
+ * concurrent serverless invocations can't otherwise agree on. Whoever's row
+ * isn't first for its orderNo gets demoted to 'rejected' immediately and
+ * reported back as a conflict, rather than left as a second live booking. */
+export async function handleCreateBookings(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (payload.role !== 'driver') return { status: 403, body: { error: 'เฉพาะ Driver เท่านั้นที่จองคิวจุดส่งได้' } };
+  if (!payload.driverVehicleId) return { status: 400, body: { error: 'บัญชีนี้ยังไม่ได้ผูกกับรถคันใด ติดต่อผู้ดูแลระบบก่อนจองคิว' } };
+
+  const { orderNos } = (body ?? {}) as Record<string, unknown>;
+  if (!Array.isArray(orderNos) || orderNos.length === 0) {
+    return { status: 400, body: { error: 'ต้องเลือกอย่างน้อย 1 ออเดอร์' } };
+  }
+  const wanted = Array.from(
+    new Set(orderNos.filter((n): n is string => typeof n === 'string' && n.trim() !== '').map((n) => n.trim())),
+  );
+  if (wanted.length === 0) return { status: 400, body: { error: 'ไม่มีเลขคำสั่งซื้อที่ถูกต้อง' } };
+
+  try {
+    const sheets = await getSheetsClient();
+    const existing = await readBookings(sheets);
+    const activeOrderNos = new Set(existing.filter((b) => b.status === 'pending' || b.status === 'confirmed').map((b) => b.orderNo));
+    const alreadyTaken = wanted.filter((n) => activeOrderNos.has(n));
+    const toCreate = wanted.filter((n) => !activeOrderNos.has(n));
+
+    if (toCreate.length === 0) {
+      return { status: 200, body: { created: [], conflicts: alreadyTaken } };
+    }
+
+    const bookedAt = new Date().toISOString();
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: MAIN_SHEET_ID,
+      range: `${BOOKINGS_TAB_TITLE}!A:H`,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: {
+        values: toCreate.map((orderNo) => bookingRowValues({
+          rowIndex: -1, orderNo, driverUsername: payload.username, driverVehicleId: payload.driverVehicleId!,
+          status: 'pending', bookedAt, decidedBy: '', decidedAt: '', note: '',
+        })),
+      },
+    });
+
+    // Re-read and resolve: for each order just requested, whichever active
+    // row now has the lowest row index actually won it.
+    const after = await readBookings(sheets);
+    const created: string[] = [];
+    const conflicts: string[] = [...alreadyTaken];
+    for (const orderNo of toCreate) {
+      const rowsForOrder = after
+        .filter((b) => b.orderNo === orderNo && (b.status === 'pending' || b.status === 'confirmed'))
+        .sort((a, b) => a.rowIndex - b.rowIndex);
+      const winner = rowsForOrder[0];
+      const mine = after.find((b) => b.orderNo === orderNo && b.driverUsername === payload.username && b.status === 'pending' && b.bookedAt === bookedAt);
+      if (mine && winner && winner.rowIndex === mine.rowIndex) {
+        created.push(orderNo);
+      } else if (mine) {
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: MAIN_SHEET_ID,
+          range: `${BOOKINGS_TAB_TITLE}!A${mine.rowIndex}:H${mine.rowIndex}`,
+          valueInputOption: 'RAW',
+          requestBody: {
+            values: [bookingRowValues({ ...mine, status: 'rejected', decidedBy: 'system', decidedAt: new Date().toISOString(), note: 'ชนกับคำขอจองอื่นที่มาถึงก่อน' })],
+          },
+        });
+        conflicts.push(orderNo);
+      }
+    }
+    return { status: 200, body: { created, conflicts } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'จองคิวไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
+}
+
+/** Manager/admin decision on a pending booking — same role set as the rest
+ * of the planner's edit permissions (canEditPlan on the frontend). Confirm
+ * only marks the booking; the client is what actually adds the order into
+ * the driver's vehicle plan (routePlan lives in localStorage, not here) and
+ * still requires the normal separate Assign step to lock it into a batch. */
+export async function handleDecideBooking(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (!['administrator', 'manager', 'admin_staff'].includes(payload.role)) {
+    return { status: 403, body: { error: 'ไม่มีสิทธิ์ยืนยัน/ปฏิเสธคำขอจองคิว' } };
+  }
+
+  const { orderNo, decision, note } = (body ?? {}) as Record<string, unknown>;
+  if (typeof orderNo !== 'string' || !orderNo.trim()) return { status: 400, body: { error: 'ต้องระบุเลขคำสั่งซื้อ' } };
+  if (decision !== 'confirm' && decision !== 'reject') return { status: 400, body: { error: 'decision ต้องเป็น confirm หรือ reject' } };
+
+  try {
+    const sheets = await getSheetsClient();
+    const bookings = await readBookings(sheets);
+    const booking = bookings.find((b) => b.orderNo === orderNo.trim() && b.status === 'pending');
+    if (!booking) return { status: 404, body: { error: 'ไม่พบคำขอจองที่รอดำเนินการสำหรับออเดอร์นี้ — อาจถูกตัดสินใจไปแล้ว' } };
+
+    const next: BookingRecord = {
+      ...booking,
+      status: decision === 'confirm' ? 'confirmed' : 'rejected',
+      decidedBy: payload.username,
+      decidedAt: new Date().toISOString(),
+      note: typeof note === 'string' ? note.trim() : '',
+    };
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: MAIN_SHEET_ID,
+      range: `${BOOKINGS_TAB_TITLE}!A${booking.rowIndex}:H${booking.rowIndex}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [bookingRowValues(next)] },
+    });
+    return { status: 200, body: { ok: true, driverUsername: booking.driverUsername, driverVehicleId: booking.driverVehicleId } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'ยืนยัน/ปฏิเสธคำขอจองคิวไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
+}
+
 export function handleHealth(): ApiResult {
   const configured = !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY?.trim();
   return {

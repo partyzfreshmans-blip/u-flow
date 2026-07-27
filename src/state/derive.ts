@@ -9,7 +9,8 @@ import { resolveZone, UNASSIGNED_COLOR } from '../data/zoneConfig';
 import { detectUnit } from '../data/sources/promotionsSheet';
 import { addDays, dayKey, dayKeyToDate, daysBetweenKeys, formatOrderedAt, formatThaiShortDate, formatThaiWeekdayDate, sheetDateTimeToMs, sheetDateToDayKey, suggestedDeliveryDayKey, todayDayKey } from '../data/dateUtils';
 import { badgeStyle, DELIVERY_DONE_STATUSES, fmt, sheetStatusStyle } from './helpers';
-import { canClosePickLot, canEditOrder, canEditPlan, canManageUsers, canPickWork, ROLES, ROLE_LABELS, seesAllActivityLog } from '../config/permissions';
+import { canBookStop, canClosePickLot, canDecideBooking, canEditOrder, canEditPlan, canManageUsers, canPickWork, ROLES, ROLE_LABELS, seesAllActivityLog } from '../config/permissions';
+import type { BookingRow } from '../data/sources/bookingsApi';
 import type { AppActions, AppState } from './store';
 
 /** Delivery date, straight off the "คำสั่งซื้อ" sheet — edits go through
@@ -758,9 +759,42 @@ export function computePlanner(state: AppState, actions: AppActions) {
     unassignedCustomerCounts.set(key, (unassignedCustomerCounts.get(key) ?? 0) + 1);
   }
 
+  // Driver "จองคิว" bookings — pending requests against currently-unassigned
+  // stops, read off state.bookings (the one backend-shared piece of planner
+  // state) so every manager/admin session sees the same lock a driver just
+  // placed from their own phone, not just whichever browser placed it.
+  const canDecide = role ? canDecideBooking(role) : false;
+  const activeBookingByOrderNo = new Map<string, BookingRow>();
+  for (const b of state.bookings) {
+    if (b.status !== 'pending') continue;
+    const cur = activeBookingByOrderNo.get(b.orderNo);
+    if (!cur || b.bookedAt > cur.bookedAt) activeBookingByOrderNo.set(b.orderNo, b);
+  }
+  /** Confirming a booking only ever flips the Bookings sheet row server-side
+   * — this still performs the exact same "add to routePlan" step a normal
+   * dropdown-assign does (batch-lock-aware, logged, synced into an active
+   * batch), just targeted at the requesting driver's own vehicle instead of
+   * whichever one was picked from a dropdown. */
+  const confirmBookingFor = (orderNo: string, driverUsername: string, fallbackVehicleId: string) => {
+    if (!canDecide) return;
+    actions.decideBooking(orderNo, 'confirm', driverUsername).then((result) => {
+      const vehicleId = result?.driverVehicleId || fallbackVehicleId;
+      if (!vehicleId || isVehicleLocked(vehicleId)) return;
+      const plan = { ...state.routePlan };
+      plan[vehicleId] = [...(plan[vehicleId] ?? []), orderNo];
+      actions.setRoutePlan(plan);
+      syncBatchAfterEdit(vehicleId, plan[vehicleId], `ยืนยันคำขอจองคิวจาก ${driverUsername} (${orderNo})`);
+    });
+  };
+  const rejectBookingFor = (orderNo: string, driverUsername: string, note?: string) => {
+    if (!canDecide) return;
+    actions.decideBooking(orderNo, 'reject', driverUsername, note);
+  };
+
   const unassigned = unassignedCandidates
     .map((o) => {
       const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
+      const booking = activeBookingByOrderNo.get(o.orderNo) ?? null;
       return {
         orderNo: o.orderNo,
         customer: o.customer,
@@ -795,6 +829,10 @@ export function computePlanner(state: AppState, actions: AppActions) {
           actions.logActivity('จัดออเดอร์ลงรถ (วางแผนจัดรูท)', `${vehicleNameById.get(vehicleId) ?? vehicleId}`, o.orderNo);
           syncBatchAfterEdit(vehicleId, plan[vehicleId], `เพิ่ม ${o.orderNo}`);
         },
+        bookedByDriver: booking?.driverUsername ?? null,
+        canDecideBooking: canDecide,
+        confirmBooking: booking ? () => confirmBookingFor(o.orderNo, booking.driverUsername, booking.driverVehicleId) : undefined,
+        rejectBooking: booking ? (note?: string) => rejectBookingFor(o.orderNo, booking.driverUsername, note) : undefined,
       };
     })
     .sort((a, b) => b.distanceKm - a.distanceKm);
@@ -1205,10 +1243,96 @@ export function computePlanner(state: AppState, actions: AppActions) {
       actions.patch({ assignSelectedVehicleIds: allSelected ? [] : allIds });
     },
     confirmAssign,
+
+    // Driver "จองคิว" — booking-request badges/confirm-reject wired into the
+    // unassigned rows above; this is just the shared error surface for that.
+    bookingActionError: state.bookingActionError,
   };
 }
 
 type RoutePlanShape = Record<string, string[]>;
+
+// ---------- DRIVER "จองคิว" (stop booking) ----------
+/** Full unassigned-stops pool for the Driver's own booking picker — same
+ * underlying candidate pool as computePlanner's own "unassigned" table
+ * (deliberately NOT scoped to isDriverView the way that one is, since a
+ * driver booking a stop needs to see every unclaimed stop across the whole
+ * fleet, not just whatever their own vehicle already has). */
+export function computeDriverBooking(state: AppState, actions: AppActions) {
+  const role = state.session?.role;
+  const canBook = role ? canBookStop(role) : false;
+  const username = state.session?.username ?? '';
+
+  const candidates = state.routeOrders.filter((o) => {
+    if (DELIVERY_DONE_STATUSES.includes(o.status)) return false;
+    if (state.plannerDate && effectiveDeliveryDayKey(o) !== state.plannerDate) return false;
+    return true;
+  });
+  const assignedOrderNos = new Set(Object.values(state.routePlan).flat());
+  const unassigned = candidates.filter((o) => !assignedOrderNos.has(o.orderNo));
+
+  const wh = state.routeOrders.find((o) => o.whLat != null && o.whLng != null);
+  const warehouse = wh && wh.whLat != null && wh.whLng != null ? { lat: wh.whLat, lng: wh.whLng } : null;
+  const distanceOf = (o: RouteOrder) => o.distanceFromWhKm ?? (warehouse && o.lat != null && o.lng != null ? haversineKm(warehouse.lat, warehouse.lng, o.lat, o.lng) : 0);
+
+  // Both pending and already-confirmed requests lock a stop from this view —
+  // once confirmed it's about to become part of a real routePlan/batch
+  // anyway, so it shouldn't be re-offered to other drivers in the meantime.
+  const activeBookingByOrderNo = new Map<string, BookingRow>();
+  for (const b of state.bookings) {
+    if (b.status !== 'pending' && b.status !== 'confirmed') continue;
+    const cur = activeBookingByOrderNo.get(b.orderNo);
+    if (!cur || b.bookedAt > cur.bookedAt) activeBookingByOrderNo.set(b.orderNo, b);
+  }
+
+  const rows = unassigned
+    .map((o) => {
+      const booking = activeBookingByOrderNo.get(o.orderNo) ?? null;
+      const bookedByMe = booking?.driverUsername === username;
+      const bookedByOther = booking != null && !bookedByMe;
+      return {
+        orderNo: o.orderNo,
+        customer: o.customer,
+        address: o.addressFromUnii || o.districtProvince,
+        districtProvince: o.districtProvince || '—',
+        phone: o.phone || '—',
+        amtText: fmt(o.totalAmount),
+        itemCount: o.itemCount,
+        distanceKm: distanceOf(o),
+        distanceText: `${distanceOf(o).toFixed(1)} กม.`,
+        plannedDeliveryDateText: o.plannedDeliveryDate || '—',
+        note: o.note,
+        hasNote: o.note.trim() !== '',
+        bookedByOther,
+        bookedByMe,
+        bookedByLabel: booking ? (bookedByMe ? (booking.status === 'confirmed' ? 'ยืนยันแล้ว (คุณ)' : 'จองแล้ว (คุณ)') : `จองแล้วโดย ${booking.driverUsername}`) : null,
+        selected: !bookedByOther && state.bookingSelectedOrderNos.includes(o.orderNo),
+        toggleSelect: () => {
+          if (bookedByOther) return;
+          actions.toggleBookingSelect(o.orderNo, state.bookingSelectedOrderNos);
+        },
+      };
+    })
+    .sort((a, b) => b.distanceKm - a.distanceKm);
+
+  const rowOrderNos = new Set(rows.map((r) => r.orderNo));
+  const selectedCount = state.bookingSelectedOrderNos.filter((no) => rowOrderNos.has(no)).length;
+
+  return {
+    canBook,
+    loading: state.routeOrdersLoading,
+    error: state.routeOrdersError,
+    rows,
+    isEmpty: rows.length === 0,
+    selectedCount,
+    submitting: state.bookingSubmitting,
+    submitError: state.bookingSubmitError,
+    conflictOrderNos: state.bookingConflictOrderNos,
+    clearConflicts: () => actions.clearBookingConflicts(),
+    clearSelection: () => actions.clearBookingSelection(),
+    submit: () => actions.submitBookingRequests(state.bookingSelectedOrderNos),
+  };
+}
 
 // ---------- BATCH ROUTE HISTORY ----------
 /** Read-only audit view of every Batch Route ever assigned — reuses the same

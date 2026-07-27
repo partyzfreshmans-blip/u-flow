@@ -1,4 +1,6 @@
-import { computePlanner } from '../state/derive';
+import { useState } from 'react';
+import { canBookStop } from '../config/permissions';
+import { computeDriverBooking, computePlanner } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 
 /** Mobile-first route sheet for drivers — full-screen, no admin chrome.
@@ -9,6 +11,9 @@ export function DriverPage({ state, actions }: { state: AppState; actions: AppAc
   const veh = v.vehicles.find((x) => x.id === state.driverVehicleId) ?? null;
   const pendingSyncCount = state.driverSyncQueue.length;
   const isDriverRole = state.session?.role === 'driver';
+  const canBook = state.session ? canBookStop(state.session.role) : false;
+  const [tab, setTab] = useState<'route' | 'book'>('route');
+  const booking = canBook ? computeDriverBooking(state, actions) : null;
 
   const connectionBanner = (!state.driverOnline || pendingSyncCount > 0) && (
     <div style={{ margin: '10px 12px 0', padding: '9px 12px', borderRadius: 10, background: 'var(--st-warn-bg)', color: 'var(--st-warn-fg)', fontSize: 12, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -94,10 +99,92 @@ export function DriverPage({ state, actions }: { state: AppState; actions: AppAc
             <span style={veh.codDiffStyle}>{veh.codDiffText}</span>
           </div>
         )}
+        {canBook && (
+          <div style={{ marginTop: 10, display: 'flex', gap: 6 }}>
+            <button
+              className={tab === 'route' ? 'btn btn-primary' : 'btn btn-secondary'}
+              style={{ flex: 1, minHeight: 38, justifyContent: 'center', fontSize: 13 }}
+              onClick={() => setTab('route')}
+            >
+              เส้นทางของฉัน
+            </button>
+            <button
+              className={tab === 'book' ? 'btn btn-primary' : 'btn btn-secondary'}
+              style={{ flex: 1, minHeight: 38, justifyContent: 'center', fontSize: 13 }}
+              onClick={() => setTab('book')}
+            >
+              <i className="ph ph-hand-tap" />จองคิวจุดส่ง{booking && booking.selectedCount > 0 ? ` (${booking.selectedCount})` : ''}
+            </button>
+          </div>
+        )}
       </div>
 
       {connectionBanner}
 
+      {tab === 'book' && booking ? (
+        <div style={{ padding: '14px 12px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ fontSize: 12, color: 'var(--color-neutral-500)' }}>
+            เลือกจุดส่งที่ยังไม่มีใครจอง แล้วกด "จองคิว" — ผู้ดูแลระบบจะเห็นคำขอและยืนยัน/ปฏิเสธในหน้าวางแผนจัดรูท
+          </div>
+          {booking.error && (
+            <div style={{ padding: 12, borderRadius: 10, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 12.5 }}>{booking.error}</div>
+          )}
+          {booking.submitError && (
+            <div style={{ padding: 12, borderRadius: 10, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 12.5 }}>{booking.submitError}</div>
+          )}
+          {booking.conflictOrderNos.length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: 12, borderRadius: 10, background: 'var(--st-warn-bg)', color: 'var(--st-warn-fg)', fontSize: 12.5 }}>
+              <i className="ph ph-warning-fill" style={{ flex: 'none', marginTop: 1 }} />
+              <span style={{ flex: 1 }}>จุดนี้เพิ่งถูกจองไปแล้วก่อนคุณ: {booking.conflictOrderNos.join(', ')} — เลือกจุดอื่นแทน</span>
+              <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={booking.clearConflicts}>ปิด</button>
+            </div>
+          )}
+          {booking.loading && <div style={{ textAlign: 'center', padding: 20, color: 'var(--color-neutral-500)', fontSize: 13 }}>กำลังโหลด...</div>}
+          {!booking.loading && booking.isEmpty && (
+            <div style={{ textAlign: 'center', padding: 30, color: 'var(--color-neutral-500)', fontSize: 13 }}>ไม่มีจุดส่งที่ยังไม่ได้จัดลงรถ</div>
+          )}
+          {booking.rows.map((r) => (
+            <label
+              key={r.orderNo}
+              style={{
+                display: 'flex', alignItems: 'flex-start', gap: 10, padding: 14, borderRadius: 14,
+                background: r.bookedByOther ? 'var(--color-bg)' : 'var(--color-surface)',
+                boxShadow: 'var(--shadow-sm)',
+                opacity: r.bookedByOther ? 0.6 : 1,
+                cursor: r.bookedByOther ? 'not-allowed' : 'pointer',
+              }}
+            >
+              <input type="checkbox" style={{ marginTop: 3 }} checked={r.selected} disabled={r.bookedByOther} onChange={r.toggleSelect} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <span style={{ fontWeight: 700, fontSize: 15 }}>{r.customer}</span>
+                  {r.bookedByLabel && (
+                    <span
+                      style={{
+                        fontSize: 10.5, padding: '2px 8px', borderRadius: 6, whiteSpace: 'nowrap',
+                        background: r.bookedByMe ? 'var(--st-info-bg)' : 'var(--st-warn-bg)',
+                        color: r.bookedByMe ? 'var(--st-info-fg)' : 'var(--st-warn-fg)',
+                      }}
+                    >
+                      {r.bookedByLabel}
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: 12.5, color: 'var(--color-neutral-400)' }}>{r.address}</div>
+                <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginTop: 2 }}>{r.orderNo} · {r.distanceText} · {r.amtText}</div>
+              </div>
+            </label>
+          ))}
+          {booking.selectedCount > 0 && (
+            <div style={{ position: 'sticky', bottom: 10, marginTop: 4 }}>
+              <button className="btn btn-primary" style={{ width: '100%', minHeight: 46, justifyContent: 'center', fontSize: 14 }} onClick={booking.submit} disabled={booking.submitting}>
+                {booking.submitting ? <i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} /> : <i className="ph ph-hand-tap" />}
+                จองคิว ({booking.selectedCount})
+              </button>
+            </div>
+          )}
+        </div>
+      ) : (
       <div style={{ padding: '14px 12px', display: 'flex', flexDirection: 'column', gap: 10 }}>
         {veh.stops.length === 0 && (
           <div style={{ textAlign: 'center', padding: 30, color: 'var(--color-neutral-500)', fontSize: 13 }}>ยังไม่มีจุดส่งสำหรับรถคันนี้</div>
@@ -158,6 +245,7 @@ export function DriverPage({ state, actions }: { state: AppState; actions: AppAc
           );
         })}
       </div>
+      )}
     </div>
   );
 }

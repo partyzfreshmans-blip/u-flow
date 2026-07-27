@@ -30,6 +30,7 @@ import { appendActivityLog, loadActivityLog, type ActivityLogEntry } from '../da
 import { loadSidebarCollapsed, saveSidebarCollapsed } from '../data/sidebarState';
 import { clearSession, loadSession, saveSession, type Session } from '../data/session';
 import { createUser as apiCreateUser, fetchUsers as apiFetchUsers, login as apiLogin, updateUser as apiUpdateUser, type UserListRow } from '../data/sources/authApi';
+import { createBookings as apiCreateBookings, decideBookingRequest as apiDecideBooking, fetchBookings as apiFetchBookings, type BookingRow } from '../data/sources/bookingsApi';
 import { defaultRouteFor, type Role } from '../config/permissions';
 
 export interface OrderEditDraft {
@@ -147,6 +148,26 @@ export interface AppState {
   /** orderNos marked delivered locally but not yet confirmed synced to the sheet. */
   driverSyncQueue: string[];
   driverOnline: boolean;
+
+  // driver stop bookings ("จองคิว") — a driver "reserves" an unassigned stop
+  // as a request; manager/admin then confirms (adding it to that driver's
+  // vehicle, same as a normal Assign) or rejects it. Backed by a Google
+  // Sheets tab (Bookings) via the same Service-Account backend as the Users
+  // tab — this is the one piece of planner state that genuinely has to be
+  // server-side, since routePlan/batchRoutes (localStorage) can never be
+  // seen across a driver's phone and an office admin's desktop.
+  bookings: BookingRow[];
+  bookingsLoading: boolean;
+  bookingsError: string | null;
+  /** Multi-select on the driver's own booking picker. */
+  bookingSelectedOrderNos: string[];
+  bookingSubmitting: boolean;
+  bookingSubmitError: string | null;
+  /** orderNos the driver just lost the booking race for (first-write-wins) —
+   * surfaced once, then cleared by the UI once shown. */
+  bookingConflictOrderNos: string[];
+  /** Error from the manager/admin confirm/reject action, if the last one failed. */
+  bookingActionError: string | null;
 
   // batch picking ("คำสั่งซื้อ" tab, status = "กำลังดำเนินการ")
   pickOrderQ: string;
@@ -343,6 +364,15 @@ export const initialState: AppState = {
 
   driverSyncQueue: [],
   driverOnline: typeof navigator === 'undefined' || navigator.onLine,
+
+  bookings: [],
+  bookingsLoading: false,
+  bookingsError: null,
+  bookingSelectedOrderNos: [],
+  bookingSubmitting: false,
+  bookingSubmitError: null,
+  bookingConflictOrderNos: [],
+  bookingActionError: null,
 
   pickOrderQ: '',
   pickSelectedOrderNos: [],
@@ -891,6 +921,35 @@ export function useAppStore() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Driver stop bookings ("จองคิว") — there's no push/websocket infra here,
+  // so "real-time" locking is really "refetch the shared Bookings tab often
+  // enough that a lock another driver just placed shows up within one tick."
+  // Polls whenever someone's logged in (both the driver's own booking picker
+  // and the Planner's booking badges/confirm-reject read off the same
+  // state.bookings), same interval-based pattern as the driver sync queue above.
+  useEffect(() => {
+    if (!state.session) return;
+    let cancelled = false;
+    const load = () => {
+      const session = loadSession();
+      if (!session) return;
+      apiFetchBookings(session)
+        .then((bookings) => {
+          if (!cancelled) dispatch({ type: 'patch', patch: { bookings, bookingsError: null } });
+        })
+        .catch((err: unknown) => {
+          if (!cancelled) dispatch({ type: 'patch', patch: { bookingsError: err instanceof Error ? err.message : 'โหลดรายการจองคิวไม่สำเร็จ' } });
+        });
+    };
+    load();
+    const interval = setInterval(load, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.session?.username]);
+
   const actions = useMemo(
     () => ({
       patch: (patch: Partial<AppState>) => dispatch({ type: 'patch', patch }),
@@ -1137,6 +1196,62 @@ export function useAppStore() {
         syncDriverQueue();
       },
       retrySyncQueue: () => syncDriverQueue(),
+
+      toggleBookingSelect: (orderNo: string, selected: string[]) => {
+        const next = selected.includes(orderNo) ? selected.filter((n) => n !== orderNo) : [...selected, orderNo];
+        dispatch({ type: 'patch', patch: { bookingSelectedOrderNos: next } });
+      },
+      clearBookingSelection: () => dispatch({ type: 'patch', patch: { bookingSelectedOrderNos: [] } }),
+      clearBookingConflicts: () => dispatch({ type: 'patch', patch: { bookingConflictOrderNos: [] } }),
+
+      /** Driver "จองคิว" — requests to reserve one or more currently-unassigned
+       * stops. Re-fetches the Bookings tab right after so a lock this driver
+       * just won (or lost, per first-write-wins) shows up on their own screen
+       * immediately rather than waiting for the next poll tick. */
+      submitBookingRequests: async (orderNos: string[]) => {
+        const session = loadSession();
+        if (!session || orderNos.length === 0) return;
+        dispatch({ type: 'patch', patch: { bookingSubmitting: true, bookingSubmitError: null, bookingConflictOrderNos: [] } });
+        try {
+          const { created, conflicts } = await apiCreateBookings(session, orderNos);
+          const bookings = await apiFetchBookings(session);
+          dispatch({
+            type: 'patch',
+            patch: { bookings, bookingSubmitting: false, bookingSelectedOrderNos: [], bookingConflictOrderNos: conflicts },
+          });
+          if (created.length > 0) logActivity('จองคิวจุดส่ง', `${created.length} ออเดอร์ (${created.join(', ')})`);
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : 'จองคิวไม่สำเร็จ';
+          dispatch({ type: 'patch', patch: { bookingSubmitting: false, bookingSubmitError: message } });
+        }
+      },
+
+      /** Manager/admin confirm or reject of a driver's booking request — only
+       * ever updates the Bookings tab's own status column server-side. On
+       * confirm, the caller (derive.ts's computePlanner) is responsible for
+       * the separate "add this order into that driver's vehicle" step, same
+       * as any other routePlan edit — this action never touches routePlan
+       * itself, so the normal batch-lock rules still apply unchanged. */
+      decideBooking: async (orderNo: string, decision: 'confirm' | 'reject', driverUsername: string, note?: string) => {
+        const session = loadSession();
+        if (!session) return undefined;
+        dispatch({ type: 'patch', patch: { bookingActionError: null } });
+        try {
+          const result = await apiDecideBooking(session, { orderNo, decision, note });
+          const bookings = await apiFetchBookings(session);
+          dispatch({ type: 'patch', patch: { bookings } });
+          logActivity(
+            decision === 'confirm' ? 'ยืนยันคำขอจองคิว' : 'ปฏิเสธคำขอจองคิว',
+            decision === 'confirm' ? `คนขับ ${driverUsername}` : `คนขับ ${driverUsername}${note ? ` · เหตุผล: ${note}` : ''}`,
+            orderNo,
+          );
+          return result;
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : 'ยืนยัน/ปฏิเสธคำขอจองคิวไม่สำเร็จ';
+          dispatch({ type: 'patch', patch: { bookingActionError: message } });
+          return undefined;
+        }
+      },
 
       togglePickOrderSelection: (orderNo: string, selected: string[]) => {
         const next = selected.includes(orderNo) ? selected.filter((n) => n !== orderNo) : [...selected, orderNo];

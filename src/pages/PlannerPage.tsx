@@ -21,6 +21,10 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
   // routePlan), so it's fine to keep as local UI state rather than global.
   const [hiddenVehicleIds, setHiddenVehicleIds] = useState<Set<string>>(new Set());
   const [showUnassignedOnMap, setShowUnassignedOnMap] = useState(true);
+  // Driver "จองคิว" — inline reject-with-reason UI for one row at a time,
+  // rather than a separate modal (rejecting is rare enough not to need one).
+  const [rejectingOrderNo, setRejectingOrderNo] = useState<string | null>(null);
+  const [rejectNote, setRejectNote] = useState('');
   const toggleVehicleOnMap = (vehicleId: string) =>
     setHiddenVehicleIds((cur) => {
       const next = new Set(cur);
@@ -78,6 +82,11 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
         <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: 13, marginBottom: 16, borderRadius: 10, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 13 }}>
           <i className="ph ph-warning-fill" style={{ flex: 'none' }} />{assignSyncError}
           <button className="btn btn-ghost" style={{ fontSize: 12, marginLeft: 'auto' }} onClick={() => setAssignSyncError(null)}>ปิด</button>
+        </div>
+      )}
+      {v.bookingActionError && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: 13, marginBottom: 16, borderRadius: 10, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 13 }}>
+          <i className="ph ph-warning-fill" style={{ flex: 'none' }} />{v.bookingActionError}
         </div>
       )}
 
@@ -432,10 +441,15 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                 </thead>
                 <tbody>
                   {v.unassigned.map((o) => (
-                    <tr key={o.orderNo}>
+                    <tr key={o.orderNo} style={o.bookedByDriver ? { background: 'var(--color-bg)' } : undefined}>
                       <td><input type="checkbox" checked={o.selected} onChange={o.toggleSelect} /></td>
                       <td>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          {o.bookedByDriver && (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, padding: '2px 7px', borderRadius: 6, background: 'var(--st-warn-bg)', color: 'var(--st-warn-fg)', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                              <i className="ph ph-hand-tap" />จองคิวโดย {o.bookedByDriver}
+                            </span>
+                          )}
                           {o.duplicateCustomer ? (
                             <span
                               style={{ padding: '1px 6px', borderRadius: 5, background: 'var(--st-warn-bg)', color: 'var(--st-warn-fg)', fontWeight: 600 }}
@@ -474,10 +488,49 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                       <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{o.amtText}</td>
                       <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums' }}>{o.distanceText}</td>
                       <td>
-                        <select className="input" style={{ minHeight: 30, fontSize: 12 }} value="" onChange={(e) => e.target.value && o.assignTo(e.target.value)}>
-                          <option value="">เลือกรถ…</option>
-                          {v.vehicles.filter((veh) => !veh.batchLocked).map((veh) => <option key={veh.id} value={veh.id}>{veh.name}</option>)}
-                        </select>
+                        {o.bookedByDriver && o.canDecideBooking ? (
+                          rejectingOrderNo === o.orderNo ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 140 }}>
+                              <input
+                                className="input"
+                                style={{ minHeight: 28, fontSize: 11.5 }}
+                                placeholder="เหตุผล (ไม่บังคับ)"
+                                value={rejectNote}
+                                onChange={(e) => setRejectNote(e.target.value)}
+                              />
+                              <div style={{ display: 'flex', gap: 4 }}>
+                                <button
+                                  className="btn btn-primary"
+                                  style={{ fontSize: 11, flex: 1, minHeight: 26, justifyContent: 'center' }}
+                                  onClick={() => {
+                                    o.rejectBooking?.(rejectNote.trim() || undefined);
+                                    setRejectingOrderNo(null);
+                                    setRejectNote('');
+                                  }}
+                                >
+                                  ยืนยันปฏิเสธ
+                                </button>
+                                <button className="btn btn-ghost" style={{ fontSize: 11, flex: 1, minHeight: 26, justifyContent: 'center' }} onClick={() => { setRejectingOrderNo(null); setRejectNote(''); }}>
+                                  ยกเลิก
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div style={{ display: 'flex', gap: 4 }}>
+                              <button className="btn btn-primary" style={{ fontSize: 11.5, minHeight: 28 }} onClick={o.confirmBooking} title="ยืนยันคำขอจองคิว — จัดลงรถของคนขับที่จอง">
+                                <i className="ph ph-check" />ยืนยัน
+                              </button>
+                              <button className="btn btn-ghost" style={{ fontSize: 11.5, minHeight: 28 }} onClick={() => { setRejectingOrderNo(o.orderNo); setRejectNote(''); }} title="ปฏิเสธคำขอจองคิว">
+                                <i className="ph ph-x" />ปฏิเสธ
+                              </button>
+                            </div>
+                          )
+                        ) : (
+                          <select className="input" style={{ minHeight: 30, fontSize: 12 }} value="" onChange={(e) => e.target.value && o.assignTo(e.target.value)}>
+                            <option value="">เลือกรถ…</option>
+                            {v.vehicles.filter((veh) => !veh.batchLocked).map((veh) => <option key={veh.id} value={veh.id}>{veh.name}</option>)}
+                          </select>
+                        )}
                       </td>
                       <td>
                         <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={o.editLocation} title="ตรวจสอบ/แก้ไขโลเคชั่นบนแผนที่">

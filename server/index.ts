@@ -4,9 +4,12 @@ import express from 'express';
 import multer from 'multer';
 import { DRIVE_ROOT_FOLDER_ENV, MAX_UPLOAD_BYTES } from '../src/config/drive.js';
 import {
+  handleCreateBookings,
   handleCreateUser,
+  handleDecideBooking,
   handleDriveUpload,
   handleHealth,
+  handleListBookings,
   handleListUsers,
   handleLogin,
   handleMe,
@@ -88,6 +91,21 @@ app.post('/api/users/create', async (req, res) => {
 
 app.post('/api/users/update', async (req, res) => {
   const { status, body } = await handleUpdateUser(bearerToken(req.headers.authorization), req.body);
+  res.status(status).json(body);
+});
+
+app.get('/api/bookings', async (req, res) => {
+  const { status, body } = await handleListBookings(bearerToken(req.headers.authorization));
+  res.status(status).json(body);
+});
+
+app.post('/api/bookings/create', async (req, res) => {
+  const { status, body } = await handleCreateBookings(bearerToken(req.headers.authorization), req.body);
+  res.status(status).json(body);
+});
+
+app.post('/api/bookings/decide', async (req, res) => {
+  const { status, body } = await handleDecideBooking(bearerToken(req.headers.authorization), req.body);
   res.status(status).json(body);
 });
 

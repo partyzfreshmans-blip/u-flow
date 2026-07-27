@@ -101,3 +101,15 @@ export function seesAllActivityLog(role: Role): boolean {
 export function canManageUsers(role: Role): boolean {
   return role === 'administrator';
 }
+
+/** Driver "จองคิว": booking an unassigned stop is a driver-only action —
+ * it never grants assign rights, just a request a manager/admin later acts on. */
+export function canBookStop(role: Role): boolean {
+  return role === 'driver';
+}
+
+/** Confirming/rejecting a driver's booking request — same role set as
+ * canEditPlan, since this is a planner-editing action. */
+export function canDecideBooking(role: Role): boolean {
+  return role === 'administrator' || role === 'manager' || role === 'admin_staff';
+}
