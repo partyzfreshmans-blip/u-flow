@@ -1,9 +1,27 @@
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import 'leaflet.markercluster';
-import 'leaflet.markercluster/dist/MarkerCluster.css';
-import 'leaflet.markercluster/dist/MarkerCluster.Default.css';
+// Side-effect only — attaches window.OverlappingMarkerSpiderfier once
+// window.L exists (Leaflet always sets that global itself; see its own
+// dist/leaflet-src.js). No ESM export, so it's imported purely for effect.
+import 'overlapping-marker-spiderfier-leaflet';
 import { useEffect, useRef } from 'react';
+
+// This plugin ships no TypeScript types and attaches itself to the global
+// scope rather than exporting anything — declare just the surface used here.
+interface OverlappingMarkerSpiderfier {
+  addMarker(marker: L.Marker | L.CircleMarker): OverlappingMarkerSpiderfier;
+  clearMarkers(): OverlappingMarkerSpiderfier;
+  addListener(event: 'click', cb: (marker: L.Marker | L.CircleMarker) => void): OverlappingMarkerSpiderfier;
+  addListener(event: 'spiderfy' | 'unspiderfy', cb: (markers: (L.Marker | L.CircleMarker)[]) => void): OverlappingMarkerSpiderfier;
+}
+interface OverlappingMarkerSpiderfierCtor {
+  new (map: L.Map, options?: { keepSpiderfied?: boolean; nearbyDistance?: number }): OverlappingMarkerSpiderfier;
+}
+declare global {
+  interface Window {
+    OverlappingMarkerSpiderfier?: OverlappingMarkerSpiderfierCtor;
+  }
+}
 
 interface Stop {
   id: string;
@@ -57,11 +75,13 @@ function escapeHtml(s: string): string {
 export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMoveToVehicle }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
-  // Stop pins live in a cluster group (so nearby pins merge visually when
-  // zoomed out); the warehouse marker and route lines stay in a plain layer
-  // group so they're never swallowed into a cluster bubble.
-  const clusterRef = useRef<L.MarkerClusterGroup | null>(null);
-  const baseLayerRef = useRef<L.LayerGroup | null>(null);
+  const layerRef = useRef<L.LayerGroup | null>(null);
+  // Spreads overlapping/near-identical pins apart into a small circle (with
+  // thin "leg" lines back to the real point) on click, instead of merging
+  // them into a numbered cluster bubble — every stop stays individually
+  // labeled and colored no matter how many share a spot or what zoom level
+  // is active.
+  const omsRef = useRef<OverlappingMarkerSpiderfier | null>(null);
   // Always-current callback ref so marker popups (built once per stops
   // change) never close over a stale onMoveToVehicle from an earlier render.
   const onMoveRef = useRef(onMoveToVehicle);
@@ -76,26 +96,34 @@ export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMo
       attribution: '&copy; OpenStreetMap',
     }).addTo(map);
     map.setView([18.56, 99.04], 10); // Lamphun / Chiang Mai, until data arrives
-    baseLayerRef.current = L.layerGroup().addTo(map);
-    clusterRef.current = L.markerClusterGroup({ maxClusterRadius: 50, spiderfyOnMaxZoom: true }).addTo(map);
+    layerRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
+
+    if (window.OverlappingMarkerSpiderfier) {
+      const oms = new window.OverlappingMarkerSpiderfier(map, { keepSpiderfied: true, nearbyDistance: 20 });
+      // OMS owns click semantics for any marker added to it (see below,
+      // where each marker's own Leaflet click binding is stripped) — this
+      // is the one place a popup actually gets opened.
+      oms.addListener('click', (marker) => marker.openPopup());
+      oms.addListener('spiderfy', () => map.closePopup());
+      omsRef.current = oms;
+    }
 
     return () => {
       map.remove();
       mapRef.current = null;
-      baseLayerRef.current = null;
-      clusterRef.current = null;
+      layerRef.current = null;
+      omsRef.current = null;
     };
   }, []);
 
   useEffect(() => {
     const map = mapRef.current;
-    const cluster = clusterRef.current;
-    const base = baseLayerRef.current;
-    if (!map || !cluster || !base) return;
+    const layer = layerRef.current;
+    if (!map || !layer) return;
 
-    cluster.clearLayers();
-    base.clearLayers();
+    layer.clearLayers();
+    omsRef.current?.clearMarkers();
 
     if (warehouse) {
       L.marker([warehouse.lat, warehouse.lng], {
@@ -107,12 +135,12 @@ export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMo
         }),
       })
         .bindTooltip('WH · คลังสินค้า')
-        .addTo(base);
+        .addTo(layer);
     }
 
     // Route lines: warehouse -> stop 1 -> stop 2 -> ... per vehicle, in that
-    // vehicle's own colour — drawn under the pins, in the always-visible
-    // base layer so they're never hidden inside a cluster bubble.
+    // vehicle's own colour — drawn under the pins, always visible (never
+    // spiderfied or otherwise touched by the overlap handling below).
     for (const r of vehicleRoutes ?? []) {
       if (r.points.length === 0) continue;
       const latlngs: L.LatLngExpression[] = [
@@ -120,7 +148,7 @@ export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMo
         ...r.points.map((p): L.LatLngExpression => [p.lat, p.lng]),
       ];
       if (latlngs.length < 2) continue;
-      L.polyline(latlngs, { color: r.color, weight: 2.5, opacity: 0.75, dashArray: '6 5' }).addTo(base);
+      L.polyline(latlngs, { color: r.color, weight: 2.5, opacity: 0.75, dashArray: '6 5' }).addTo(layer);
     }
 
     for (const s of stops) {
@@ -182,10 +210,18 @@ export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMo
           });
           wrap.appendChild(select);
           marker.bindPopup(wrap);
+          if (omsRef.current) {
+            // OMS decides when a click should open the popup (letting it
+            // spiderfy overlapping pins apart first) — strip Leaflet's own
+            // auto-open-on-click that bindPopup just registered, so the two
+            // don't race each other on the very first click of a group.
+            marker.off('click');
+          }
         }
       }
 
-      cluster.addLayer(marker);
+      marker.addTo(layer);
+      omsRef.current?.addMarker(marker);
     }
 
     const points: L.LatLngExpression[] = stops.map((s) => [s.lat, s.lng]);
