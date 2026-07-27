@@ -202,6 +202,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
           <div style={{ fontSize: 11, color: 'var(--color-neutral-500)', lineHeight: 1.5 }}>
             <i className="ph ph-info" style={{ marginRight: 4 }} />ตรวจจากบนลงล่าง เจอข้อแรกที่ตรงถือเป็นโซนนั้น — วางโซนที่เจาะจงที่สุดไว้บนสุด · "จังหวัด" อ่านจากคอลัมน์ อำเภอ,จังหวัด เท่านั้น (กันที่อยู่ที่ชื่อถนนมีคำว่าเชียงใหม่-ลำพูน) · เว้นว่าง = ไม่จำกัด
           </div>
+          <div className="table-scroll">
           <table className="table">
             <thead>
               <tr><th style={{ width: 40 }}>สี</th><th>ชื่อโซน</th><th>คำในตำบล/อำเภอ (คั่นด้วย ,)</th><th>จังหวัด (คั่นด้วย ,)</th><th style={{ width: 70 }}>รถ</th><th style={{ width: 90 }}>ลำดับ</th><th></th></tr>
@@ -231,6 +232,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
               ))}
             </tbody>
           </table>
+          </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn btn-secondary" onClick={() => actions.setZoneRules([...state.zoneRules, { id: `zone-${Date.now()}`, name: 'โซนใหม่', color: '#b5abfc', route: 'A', areaTerms: [], provinceTerms: [] }])}>
               <i className="ph ph-plus" />เพิ่มโซน
@@ -246,6 +248,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
       {v.canEdit && v.configTab === 'vehicles' && (
         <div className="card elev-sm" style={{ marginBottom: 16, gap: 10 }}>
           <div style={{ fontWeight: 600, fontSize: 14 }}>รถจัดส่ง — เพิ่ม ลด และบันทึกจำนวนคน</div>
+          <div className="table-scroll">
           <table className="table">
             <thead>
               <tr><th>ชื่อรถ</th><th style={{ width: 110 }}>รหัสโหลด</th><th style={{ width: 110, textAlign: 'center' }}>ไปกี่คน</th><th>โซนที่รับผิดชอบ</th><th></th></tr>
@@ -270,6 +273,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
               ))}
             </tbody>
           </table>
+          </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn btn-secondary" onClick={() => actions.setVehicles([...state.vehicles, { id: `veh-${Date.now()}`, name: 'รถใหม่', loadPrefix: 'X', crew: 2, zoneNote: '' }])}>
               <i className="ph ph-plus" />เพิ่มรถ
@@ -364,12 +368,19 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
               {veh.stopCount === 0 ? (
                 <div style={{ padding: 18, textAlign: 'center', color: 'var(--color-neutral-600)', fontSize: 12, borderRadius: 9, background: 'var(--color-bg)' }}>ยังไม่มีจุดส่ง — เพิ่มจากรายการด้านล่าง</div>
               ) : (
-                <table className="table">
+                <div className="table-scroll">
+                <table className="table table-compact">
                   <thead>
                     <tr>
-                      <th style={{ width: 24 }}></th>
-                      <th style={{ width: 46, textAlign: 'center' }}>ลำดับ</th><th style={{ width: 70, textAlign: 'center' }}>ลำดับโหลด</th>
-                      <th>ลูกค้า</th><th>โซน</th><th style={{ textAlign: 'right' }}>ยอดเงิน</th><th style={{ width: 200 }}>COD</th><th style={{ textAlign: 'right' }}>ระยะ</th><th style={{ width: 130 }}>สถานะ</th><th style={{ width: 190 }}></th>
+                      <th style={{ width: 20 }}></th>
+                      <th style={{ width: 40, textAlign: 'center' }}>ลำดับ</th><th style={{ width: 62, textAlign: 'center' }}>ลำดับโหลด</th>
+                      <th style={{ minWidth: 140 }}>ลูกค้า</th>
+                      <th style={{ width: 85 }}>โซน</th>
+                      <th style={{ width: 80, textAlign: 'right' }}>ยอดเงิน</th>
+                      <th style={{ width: 172 }}>COD</th>
+                      <th style={{ width: 62, textAlign: 'right' }}>ระยะ</th>
+                      <th style={{ width: 96 }}>สถานะ</th>
+                      <th style={{ width: 168 }}></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -400,18 +411,19 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                         <td style={{ textAlign: 'center', fontFamily: 'ui-monospace, monospace', fontSize: 12, color: 'var(--color-accent-200)' }}>{s.loadCode}</td>
                         <td>
                           {s.customer}
-                          <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', maxWidth: 240, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.orderNo} · {s.address}</div>
+                          <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', maxWidth: 210, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.orderNo} · {s.address}</div>
                         </td>
-                        <td>
-                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, whiteSpace: 'nowrap' }}>
-                            <span style={{ width: 9, height: 9, borderRadius: '50%', background: s.zoneColor, flex: 'none' }} />{s.zoneName}
+                        <td style={{ maxWidth: 85, overflow: 'hidden' }}>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, whiteSpace: 'nowrap', maxWidth: 85, overflow: 'hidden', textOverflow: 'ellipsis' }} title={s.zoneName}>
+                            <span style={{ width: 9, height: 9, borderRadius: '50%', background: s.zoneColor, flex: 'none' }} />
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.zoneName}</span>
                           </span>
                         </td>
-                        <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{s.amtText}</td>
+                        <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{s.amtText}</td>
                         <td>
                           {s.isCod ? (
                             v.canEdit ? (
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
                                 <label className="seg-opt" style={{ fontSize: 10.5 }}>
                                   <input type="radio" checked={s.codMethod === 'cash'} onChange={s.setCodCash} />สด
                                 </label>
@@ -419,7 +431,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                                   <input type="radio" checked={s.codMethod === 'transfer'} onChange={s.setCodTransfer} />โอน
                                 </label>
                                 {s.codMethod === 'cash' && (
-                                  <input className="input" style={{ minHeight: 26, width: 70, fontSize: 11 }} inputMode="numeric" placeholder="เก็บได้" value={s.codCollected} onChange={(e) => s.onCodCollected(e.target.value)} />
+                                  <input className="input" style={{ minHeight: 26, width: 58, fontSize: 11 }} inputMode="numeric" placeholder="เก็บได้" value={s.codCollected} onChange={(e) => s.onCodCollected(e.target.value)} />
                                 )}
                               </div>
                             ) : (
@@ -429,8 +441,8 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                             <span style={{ fontSize: 11, color: 'var(--color-neutral-600)' }}>—</span>
                           )}
                         </td>
-                        <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums' }}>{s.distanceText}</td>
-                        <td><span style={s.stStyle}>{s.status || '—'}</span></td>
+                        <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{s.distanceText}</td>
+                        <td style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}><span style={s.stStyle}>{s.status || '—'}</span></td>
                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                           {v.canEdit && !veh.batchLocked && (
                             <>
@@ -439,7 +451,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                               <button className="btn btn-icon btn-ghost" onClick={s.remove} title="เอาออก"><i className="ph ph-x" style={{ fontSize: 12 }} /></button>
                               <select
                                 className="input"
-                                style={{ minHeight: 26, fontSize: 10.5, width: 96, display: 'inline-block', marginLeft: 4 }}
+                                style={{ minHeight: 26, fontSize: 10.5, width: 78, display: 'inline-block', marginLeft: 4 }}
                                 value=""
                                 onChange={(e) => {
                                   if (e.target.value) s.moveToVehicle(e.target.value);
@@ -458,6 +470,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                     ))}
                   </tbody>
                 </table>
+                </div>
               )}
             </div>
           ))}
@@ -488,14 +501,24 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                 {attentionFilter === 'none' ? 'จัดครบทุกออเดอร์แล้ว' : 'ไม่มีออเดอร์ที่ตรงกับตัวกรองนี้'}
               </div>
             ) : (
-              <table className="table">
+              <div className="table-scroll">
+              <table className="table table-compact">
                 <thead>
                   <tr>
-                    <th style={{ width: 30 }}>
+                    <th style={{ width: 26 }}>
                       <input type="checkbox" checked={v.allUnassignedSelected} onChange={v.toggleSelectAllUnassigned} />
                     </th>
-                    <th>ลูกค้า / ที่อยู่</th><th>อำเภอ, จังหวัด</th><th>เบอร์โทร</th><th>ผู้จัด</th><th>วันที่จะจัดส่ง</th><th>หมายเหตุ</th><th>จำนวน</th><th style={{ textAlign: 'right' }}>ยอดเงิน</th>
-                    <th style={{ textAlign: 'right' }}>ระยะ</th><th style={{ width: 150 }}>จัดลงรถ</th><th></th>
+                    <th style={{ minWidth: 160 }}>ลูกค้า / ที่อยู่</th>
+                    <th style={{ width: 110 }}>อำเภอ, จังหวัด</th>
+                    <th style={{ width: 95 }}>เบอร์โทร</th>
+                    <th style={{ width: 80 }}>ผู้จัด</th>
+                    <th style={{ width: 82 }}>วันที่จะจัดส่ง</th>
+                    <th style={{ width: 130 }}>หมายเหตุ</th>
+                    <th style={{ width: 85 }}>จำนวน</th>
+                    <th style={{ width: 85, textAlign: 'right' }}>ยอดเงิน</th>
+                    <th style={{ width: 65, textAlign: 'right' }}>ระยะ</th>
+                    <th style={{ width: 130 }}>จัดลงรถ</th>
+                    <th style={{ width: 32 }}></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -551,20 +574,20 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                           {o.address}
                         </div>
                       </td>
-                      <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>{o.districtProvince}</td>
+                      <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 110 }} title={o.districtProvince}>{o.districtProvince}</td>
                       <td style={{ fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.phone}</td>
-                      <td style={{ fontSize: 11.5, color: o.packedBy === 'ยังไม่จัด' ? 'var(--color-neutral-600)' : 'var(--color-neutral-300)', whiteSpace: 'nowrap' }}>{o.packedBy}</td>
+                      <td style={{ fontSize: 11.5, color: o.packedBy === 'ยังไม่จัด' ? 'var(--color-neutral-600)' : 'var(--color-neutral-300)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 80 }} title={o.packedBy}>{o.packedBy}</td>
                       <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>{o.plannedDeliveryDateText}</td>
-                      <td style={{ fontSize: 11.5, color: o.hasNote ? 'var(--color-neutral-200)' : 'var(--color-neutral-600)', maxWidth: 200, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={o.hasNote ? o.note : undefined}>
+                      <td style={{ fontSize: 11.5, color: o.hasNote ? 'var(--color-neutral-200)' : 'var(--color-neutral-600)', maxWidth: 130, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={o.hasNote ? o.note : undefined}>
                         {o.noteText}
                       </td>
-                      <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>{o.qtyText}</td>
-                      <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{o.amtText}</td>
-                      <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums' }}>{o.distanceText}</td>
+                      <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 85 }} title={o.qtyText}>{o.qtyText}</td>
+                      <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.amtText}</td>
+                      <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.distanceText}</td>
                       <td>
                         {o.bookedByDriver && o.canDecideBooking ? (
                           rejectingOrderNo === o.orderNo ? (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 140 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, width: 122 }}>
                               <input
                                 className="input"
                                 style={{ minHeight: 28, fontSize: 11.5 }}
@@ -600,14 +623,14 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                             </div>
                           )
                         ) : (
-                          <select className="input" style={{ minHeight: 30, fontSize: 12 }} value="" onChange={(e) => e.target.value && o.assignTo(e.target.value)}>
+                          <select className="input" style={{ minHeight: 30, fontSize: 12, width: '100%' }} value="" onChange={(e) => e.target.value && o.assignTo(e.target.value)}>
                             <option value="">เลือกรถ…</option>
                             {v.vehicles.filter((veh) => !veh.batchLocked).map((veh) => <option key={veh.id} value={veh.id}>{veh.name}</option>)}
                           </select>
                         )}
                       </td>
                       <td>
-                        <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={o.editLocation} title="ตรวจสอบ/แก้ไขโลเคชั่นบนแผนที่">
+                        <button className="btn btn-icon btn-ghost" style={{ fontSize: 12 }} onClick={o.editLocation} title="ตรวจสอบ/แก้ไขโลเคชั่นบนแผนที่">
                           <i className="ph ph-map-pin-line" />
                         </button>
                       </td>
@@ -615,6 +638,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                   ))}
                 </tbody>
               </table>
+              </div>
             )}
           </div>
           )}

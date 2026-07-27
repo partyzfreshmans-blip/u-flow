@@ -182,6 +182,14 @@ textarea.input { min-height: 90px; resize: vertical; font-family: inherit; }
       transparent, color-mix(in srgb, var(--color-text) 8%, transparent) 48px,
       color-mix(in srgb, var(--color-text) 8%, transparent) calc(100% - 48px), transparent) no-repeat bottom / 100% 1px;
 }
+/* A wide table (table-layout: auto sizes columns to content) can end up
+ * wider than its card, especially in the Planner's left column which
+ * shares row width with the sticky map beside it — wrap any table that
+ * might do that in .table-scroll so the overflow scrolls INSIDE the card
+ * instead of visually bleeding out past it (which, since the sticky map
+ * paints later in DOM order, looks like the map "covering" the table). */
+.table-scroll { overflow-x: auto; }
+.table-compact th, .table-compact td { padding: 4px 7px; }
 
 /* — dialog — */
 .dialog-backdrop {
@@ -214,6 +222,15 @@ textarea.input { min-height: 90px; resize: vertical; font-family: inherit; }
   display: grid;
   grid-template-columns: minmax(0, 1fr) 420px;
   gap: 18px;
+  /* align-items deliberately left unset (defaults to stretch) so both
+   * columns stretch to the row's full height — the left column is much
+   * taller, and that tall row is exactly what gives .planner-map-col's
+   * position: sticky (align-self: start, set on that column alone) room
+   * to hold it in place as the row scrolls past. Setting align-items:
+   * start here would shrink both columns to content height and break that. */
+}
+.planner-layout > *:first-child {
+  min-width: 0;
 }
 .planner-map-col {
   position: sticky;
@@ -223,6 +240,11 @@ textarea.input { min-height: 90px; resize: vertical; font-family: inherit; }
   flex-direction: column;
   gap: var(--space-2);
   min-width: 0;
+  /* Explicit and intentional, not incidental — this column's grid track is
+   * a fixed 420px, so it should never need to sit above overflowing left-
+   * column content (that overflow is what .table-scroll now prevents), but
+   * this stacking order is deliberate in case anything else ever floats. */
+  z-index: 2;
 }
 @media (max-width: 900px) {
   .planner-layout {
