@@ -97,6 +97,18 @@ export interface AppState {
   /** ISO date (YYYY-MM-DD) filters; '' = no filter. */
   routeOrderDateFilter: string;
   routeDeliveryDateFilter: string;
+  /** false (default) = normal view, hides archived orders; true = show only
+   * archived orders (the "แสดงออเดอร์ที่จัดเก็บแล้ว" toggle). */
+  routeArchivedFilter: boolean;
+  /** Multi-select on the Order Management table, for bulk archive/unarchive. */
+  routeSelectedOrderNos: string[];
+  archiveDialogOpen: boolean;
+  /** Which action the confirm dialog is about — decided by routeArchivedFilter
+   * at the moment the dialog opens, so it stays consistent even if the toggle
+   * changes while the dialog is up. */
+  archiveDialogMode: 'archive' | 'unarchive';
+  archiveSubmitting: boolean;
+  archiveError: string | null;
 
   // route planner (zones + vehicles are user-editable and persisted locally)
   zoneRules: ZoneRule[];
@@ -338,6 +350,12 @@ export const initialState: AppState = {
   routeQ: '',
   routeOrderDateFilter: '',
   routeDeliveryDateFilter: '',
+  routeArchivedFilter: false,
+  routeSelectedOrderNos: [],
+  archiveDialogOpen: false,
+  archiveDialogMode: 'archive',
+  archiveSubmitting: false,
+  archiveError: null,
 
   zoneRules: DEFAULT_ZONE_RULES,
   geocodeCache: {},
@@ -465,7 +483,8 @@ export type Action =
   | { type: 'setOrderSaveStatus'; orderNo: string; status: OrderSaveStatus | null }
   | { type: 'applyOrderEdit'; orderNo: string; plannedDeliveryDateSheetText: string | null; note: string | null; wantsTaxInvoice: boolean | null }
   | { type: 'applyDeliveryMark'; orderNo: string; statusText: string; completedDateText: string }
-  | { type: 'applyPickLotStatus'; orderNo: string; statusText: string };
+  | { type: 'applyPickLotStatus'; orderNo: string; statusText: string }
+  | { type: 'applyArchiveMark'; orderNos: string[]; archived: boolean };
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -583,6 +602,15 @@ function reducer(state: AppState, action: Action): AppState {
       const routeOrders = state.routeOrders.map((o) => (o.orderNo === action.orderNo ? { ...o, status: action.statusText } : o));
       const apiOrders = state.apiOrders.map((o) => (o.orderUid === action.orderNo ? { ...o, status: action.statusText } : o));
       return { ...state, routeOrders, apiOrders };
+    }
+
+    case 'applyArchiveMark': {
+      // Confirmed writes for a whole selected batch land in one patch, same
+      // shared routeOrders every other page (Planner/Pick/Dashboard) reads —
+      // this is what makes archived orders disappear from all of them at once.
+      const set = new Set(action.orderNos);
+      const routeOrders = state.routeOrders.map((o) => (set.has(o.orderNo) ? { ...o, archived: action.archived } : o));
+      return { ...state, routeOrders };
     }
 
     default:
@@ -1112,6 +1140,34 @@ export function useAppStore() {
           .catch((err: unknown) => {
             const message = err instanceof Error ? err.message : 'บันทึกไม่สำเร็จ';
             dispatch({ type: 'setOrderSaveStatus', orderNo, status: { state: 'error', message } });
+          });
+      },
+
+      toggleRouteSelect: (orderNo: string, selected: string[]) => {
+        const next = selected.includes(orderNo) ? selected.filter((n) => n !== orderNo) : [...selected, orderNo];
+        dispatch({ type: 'patch', patch: { routeSelectedOrderNos: next } });
+      },
+      setRouteSelection: (orderNos: string[]) => dispatch({ type: 'patch', patch: { routeSelectedOrderNos: orderNos } }),
+      clearRouteSelection: () => dispatch({ type: 'patch', patch: { routeSelectedOrderNos: [] } }),
+
+      openArchiveDialog: (mode: 'archive' | 'unarchive') =>
+        dispatch({ type: 'patch', patch: { archiveDialogOpen: true, archiveDialogMode: mode, archiveError: null } }),
+      closeArchiveDialog: () => dispatch({ type: 'patch', patch: { archiveDialogOpen: false, archiveError: null } }),
+      /** Bulk archive/unarchive over the single-order update endpoint — same
+       * fire-per-item pattern as syncPickLotStatus above, via Promise.all so
+       * the confirm dialog can await the whole batch before closing. One
+       * logActivity call for the whole batch, not per order. */
+      confirmArchiveSelected: (orderNos: string[], archived: boolean) => {
+        dispatch({ type: 'patch', patch: { archiveSubmitting: true, archiveError: null } });
+        Promise.all(orderNos.map((orderNo) => updateRouteOrder({ orderNo, archived })))
+          .then(() => {
+            dispatch({ type: 'applyArchiveMark', orderNos, archived });
+            dispatch({ type: 'patch', patch: { archiveSubmitting: false, archiveDialogOpen: false, routeSelectedOrderNos: [] } });
+            logActivity(archived ? 'จัดเก็บออเดอร์' : 'นำออเดอร์กลับมาใช้งาน', `${orderNos.length} ออเดอร์ (${orderNos.join(', ')})`);
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'บันทึกไม่สำเร็จ';
+            dispatch({ type: 'patch', patch: { archiveSubmitting: false, archiveError: message } });
           });
       },
 

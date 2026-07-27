@@ -52,6 +52,7 @@ function qtyTextForOrder(map: Map<string, Partial<Record<'ชิ้น' | 'แ�
  * notification bell's standing-condition items. */
 function stuckRouteOrders(state: AppState, today: string): RouteOrder[] {
   return state.routeOrders.filter((o) => {
+    if (o.archived) return false;
     const key = effectiveDeliveryDayKey(o);
     if (!key || key >= today) return false;
     return !DELIVERY_DONE_STATUSES.includes(o.status);
@@ -108,7 +109,12 @@ const dashboardStatusOrder = ['รอยืนยันออเดอร์', '
 
 export function computeDashboard(state: AppState, actions: AppActions) {
   const q = state.q.trim().toLowerCase();
+  // apiOrders (the "API Import" tab) has no archive flag of its own — cross
+  // reference against routeOrders (the "คำสั่งซื้อ" tab) by orderUid/orderNo,
+  // the same join every other cross-tab lookup on this page already uses.
+  const archivedOrderNos = new Set(state.routeOrders.filter((o) => o.archived).map((o) => o.orderNo));
   const list = state.apiOrders.filter((o) => {
+    if (archivedOrderNos.has(o.orderUid)) return false;
     if (state.statusFilter !== 'all' && o.status !== state.statusFilter) return false;
     if (q && !(o.customer.toLowerCase().includes(q) || o.orderUid.toLowerCase().includes(q) || o.phone.includes(q))) return false;
     return true;
@@ -160,8 +166,9 @@ export function computeDashboard(state: AppState, actions: AppActions) {
     viewItems: () => actions.openOrderDetail(o.orderUid, o.customer, state.routeOrders.find((r) => r.orderNo === o.orderUid)),
   }));
 
-  const cnt = (s: string) => state.apiOrders.filter((o) => s === 'all' || o.status === s).length;
-  const presentStatuses = dashboardStatusOrder.filter((s) => state.apiOrders.some((o) => o.status === s));
+  const visibleApiOrders = state.apiOrders.filter((o) => !archivedOrderNos.has(o.orderUid));
+  const cnt = (s: string) => visibleApiOrders.filter((o) => s === 'all' || o.status === s).length;
+  const presentStatuses = dashboardStatusOrder.filter((s) => visibleApiOrders.some((o) => o.status === s));
   const chipBase: CSSProperties = { border: 0, cursor: 'pointer', fontFamily: 'var(--font-body)', fontSize: 12.5, padding: '6px 13px', borderRadius: 20, fontWeight: 500 };
   const statusChips = ['all', ...presentStatuses].map((k) => ({
     key: k,
@@ -202,6 +209,7 @@ export function computeDashboard(state: AppState, actions: AppActions) {
     const d = addDays(dayKeyToDate(today)!, i);
     const key = dayKey(d);
     const ordersOnDay = state.routeOrders.filter((o) => {
+      if (o.archived) return false;
       if (state.forecastStatusFilter !== 'all' && o.status !== state.forecastStatusFilter) return false;
       return effectiveDeliveryDayKey(o) === key;
     });
@@ -422,13 +430,21 @@ export function routeZoneLetter(route: string): string {
 
 export function computeRoute(state: AppState, actions: AppActions) {
   const rq = state.routeQ.trim().toLowerCase();
-  const statusValues = Array.from(new Set(state.routeOrders.map((o) => o.status).filter(Boolean))).sort();
+  // "แสดงออเดอร์ที่จัดเก็บแล้ว" is a binary view switch, not just another
+  // filter chip — OFF (default) shows the normal working set, ON shows only
+  // the archived pile, so the two never mix in one table and every other
+  // filter/option below only ever reflects whichever side is currently shown.
+  const visibleOrders = state.routeOrders.filter((o) => (state.routeArchivedFilter ? o.archived : !o.archived));
+  const archivedCount = state.routeOrders.filter((o) => o.archived).length;
+  const canArchive = state.session ? canEditOrder(state.session.role) : false;
+
+  const statusValues = Array.from(new Set(visibleOrders.map((o) => o.status).filter(Boolean))).sort();
   // อำเภอ,จังหวัด has far more distinct values than the old route-letter
   // filter did — a dropdown, not a chip row, is what keeps that many options
   // usable (chips only make sense for a handful of values).
-  const districtProvinceValues = Array.from(new Set(state.routeOrders.map((o) => o.districtProvince.trim()).filter(Boolean))).sort();
+  const districtProvinceValues = Array.from(new Set(visibleOrders.map((o) => o.districtProvince.trim()).filter(Boolean))).sort();
 
-  const filtered = state.routeOrders.filter((o) => {
+  const filtered = visibleOrders.filter((o) => {
     if (state.routeFilterValue !== 'all') {
       const dp = o.districtProvince.trim();
       if (state.routeFilterValue === 'other' ? dp !== '' : dp !== state.routeFilterValue) return false;
@@ -455,10 +471,10 @@ export function computeRoute(state: AppState, actions: AppActions) {
       go: () => onSelect(v),
     }));
 
-  const countForDistrict = (dp: string) => state.routeOrders.filter((o) => o.districtProvince.trim() === dp).length;
-  const noDistrictCount = state.routeOrders.filter((o) => o.districtProvince.trim() === '').length;
+  const countForDistrict = (dp: string) => visibleOrders.filter((o) => o.districtProvince.trim() === dp).length;
+  const noDistrictCount = visibleOrders.filter((o) => o.districtProvince.trim() === '').length;
   const districtProvinceOptions = [
-    { value: 'all', label: `ทั้งหมด (${state.routeOrders.length})` },
+    { value: 'all', label: `ทั้งหมด (${visibleOrders.length})` },
     ...districtProvinceValues.map((dp) => ({ value: dp, label: `${dp} (${countForDistrict(dp)})` })),
     ...(noDistrictCount > 0 ? [{ value: 'other', label: `ไม่ระบุ (${noDistrictCount})` }] : []),
   ];
@@ -518,6 +534,9 @@ export function computeRoute(state: AppState, actions: AppActions) {
       zoneSource: zone.source,
       zoneMismatch: zone.route !== '—' && routeZoneLetter(o.route) !== '' && routeZoneLetter(o.route) !== zone.route,
       orderNo: o.orderNo,
+      archived: o.archived,
+      selected: state.routeSelectedOrderNos.includes(o.orderNo),
+      toggleSelect: () => actions.toggleRouteSelect(o.orderNo, state.routeSelectedOrderNos),
       customer: o.customer,
       stLabel: o.status || '—',
       stStyle: sheetStatusStyle(o.status),
@@ -589,6 +608,23 @@ export function computeRoute(state: AppState, actions: AppActions) {
     unzonedCount,
     unassignedColor: UNASSIGNED_COLOR,
     mismatchCount,
+
+    // ---- archive feature ----
+    archivedFilter: state.routeArchivedFilter,
+    toggleArchivedFilter: () => actions.patch({ routeArchivedFilter: !state.routeArchivedFilter, routeSelectedOrderNos: [] }),
+    archivedCount,
+    canArchive,
+    selectedOrderNos: state.routeSelectedOrderNos,
+    selectedCount: state.routeSelectedOrderNos.length,
+    setSelection: actions.setRouteSelection,
+    clearSelection: actions.clearRouteSelection,
+    archiveDialogOpen: state.archiveDialogOpen,
+    archiveDialogMode: state.archiveDialogMode,
+    archiveSubmitting: state.archiveSubmitting,
+    archiveError: state.archiveError,
+    openArchiveDialog: () => actions.openArchiveDialog(state.routeArchivedFilter ? 'unarchive' : 'archive'),
+    closeArchiveDialog: actions.closeArchiveDialog,
+    confirmArchive: () => actions.confirmArchiveSelected(state.routeSelectedOrderNos, !state.routeArchivedFilter),
   };
 }
 
@@ -683,7 +719,10 @@ export function computePlanner(state: AppState, actions: AppActions) {
 
   // Plan the selected day's outstanding work: anything not yet delivered or
   // cancelled, scoped to the chosen delivery date when one is picked.
+  // Archived orders are excluded so staff can't accidentally route stale/bad
+  // data that was deliberately hidden via the Order Management archive action.
   const candidates = state.routeOrders.filter((o) => {
+    if (o.archived) return false;
     if (DELIVERY_DONE_STATUSES.includes(o.status)) return false;
     if (state.plannerDate && effectiveDeliveryDayKey(o) !== state.plannerDate) return false;
     return true;
@@ -702,7 +741,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
   // noDeliveryDate/isOverdue flags below (set the same way here) narrow
   // that down to precisely the flagged subset.
   const today = todayDayKey();
-  const unassignedAnyDate = state.routeOrders.filter((o) => !DELIVERY_DONE_STATUSES.includes(o.status) && !assignedTo.has(o.orderNo));
+  const unassignedAnyDate = state.routeOrders.filter((o) => !o.archived && !DELIVERY_DONE_STATUSES.includes(o.status) && !assignedTo.has(o.orderNo));
   const noDeliveryDateCount = unassignedAnyDate.filter((o) => effectiveDeliveryDayKey(o) === null).length;
   const overdueUnassignedCount = unassignedAnyDate.filter((o) => {
     const key = effectiveDeliveryDayKey(o);
@@ -1296,6 +1335,7 @@ export function computeDriverBooking(state: AppState, actions: AppActions) {
   const username = state.session?.username ?? '';
 
   const candidates = state.routeOrders.filter((o) => {
+    if (o.archived) return false;
     if (DELIVERY_DONE_STATUSES.includes(o.status)) return false;
     if (state.plannerDate && effectiveDeliveryDayKey(o) !== state.plannerDate) return false;
     return true;
@@ -1586,6 +1626,7 @@ function computePickOrderSelection(state: AppState, actions: AppActions) {
   const q = state.pickOrderQ.trim().toLowerCase();
 
   const candidates = state.routeOrders.filter((o) => {
+    if (o.archived) return false;
     if (o.status !== 'กำลังดำเนินการ') return false;
     if (alreadyInALot.has(o.orderNo)) return false;
     if (q && !(o.customer.toLowerCase().includes(q) || o.orderNo.toLowerCase().includes(q))) return false;

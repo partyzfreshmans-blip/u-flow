@@ -11,6 +11,8 @@ export interface RouteOrderUpdatePayload {
   /** Sets the Status column to an arbitrary known value (see server/lib.ts's
    * allowlist) — used when closing a batch-picking lot. */
   status?: string;
+  /** Hides/unhides the order from normal operational views without deleting it. */
+  archived?: boolean;
 }
 
 /**

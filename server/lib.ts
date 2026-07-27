@@ -51,6 +51,10 @@ const KNOWN_STATUS_VALUES = ['รอยืนยันออเดอร์', '�
 // by labelling its header on first write, and refuse if that ever turns out
 // not to be true anymore (someone typed something else into it since).
 const TAX_INVOICE_FALLBACK_COLUMN_INDEX = 13; // column N, 0-based
+// Archive feature — no legacy blank column to reuse like the tax-invoice
+// special case above, so this one bootstraps as a brand-new column appended
+// right after whatever the sheet's last used column currently is.
+const ARCHIVED_HEADER = 'Archived';
 
 export interface ApiResult {
   status: number;
@@ -710,7 +714,7 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
   const payload = verifySessionToken(token);
   if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
 
-  const { orderNo, plannedDeliveryDate, note, wantsTaxInvoice, markDelivered, status } = (body ?? {}) as Record<string, unknown>;
+  const { orderNo, plannedDeliveryDate, note, wantsTaxInvoice, markDelivered, status, archived } = (body ?? {}) as Record<string, unknown>;
 
   if (typeof orderNo !== 'string' || orderNo.trim() === '') {
     return { status: 400, body: { error: 'ต้องระบุเลขคำสั่งซื้อ' } };
@@ -731,7 +735,14 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
   } else if (!['administrator', 'manager', 'admin_staff'].includes(payload.role)) {
     return { status: 403, body: { error: 'ไม่มีสิทธิ์แก้ไขออเดอร์' } };
   }
-  if (plannedDeliveryDate === undefined && note === undefined && wantsTaxInvoice === undefined && markDelivered === undefined && status === undefined) {
+  if (
+    plannedDeliveryDate === undefined &&
+    note === undefined &&
+    wantsTaxInvoice === undefined &&
+    markDelivered === undefined &&
+    status === undefined &&
+    archived === undefined
+  ) {
     return { status: 400, body: { error: 'ไม่มีข้อมูลให้บันทึก' } };
   }
   if (plannedDeliveryDate !== undefined && typeof plannedDeliveryDate !== 'string') {
@@ -748,6 +759,9 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
   }
   if (status !== undefined && (typeof status !== 'string' || !KNOWN_STATUS_VALUES.includes(status))) {
     return { status: 400, body: { error: `status ต้องเป็นค่าที่รู้จัก (${KNOWN_STATUS_VALUES.join(', ')})` } };
+  }
+  if (archived !== undefined && typeof archived !== 'boolean') {
+    return { status: 400, body: { error: 'archived ต้องเป็น true/false' } };
   }
 
   let sheetDate: string | null = null;
@@ -822,6 +836,13 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
       deliveredTimestampCol = headerAt(DELIVERED_TIMESTAMP_HEADER);
       if (deliveredTimestampCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${DELIVERED_TIMESTAMP_HEADER}" ในชีท` } };
     }
+    let archivedCol = -1;
+    if (typeof archived === 'boolean') {
+      archivedCol = headerAt(ARCHIVED_HEADER);
+      // No known-blank legacy column to reuse here (unlike tax-invoice above)
+      // — just claim the next empty column past whatever's currently used.
+      if (archivedCol === -1) archivedCol = header.length;
+    }
 
     // Bootstrap the tax-invoice header the first time it's needed. Plain
     // values.update (not append) so it can never create a new row.
@@ -831,6 +852,15 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
         range: `${title}!${columnLetter(taxInvoiceCol)}1`,
         valueInputOption: 'RAW',
         requestBody: { values: [[TAX_INVOICE_HEADER]] },
+      });
+    }
+    // Bootstrap the archived header the first time it's needed, same pattern.
+    if (typeof archived === 'boolean' && headerAt(ARCHIVED_HEADER) === -1) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: MAIN_SHEET_ID,
+        range: `${title}!${columnLetter(archivedCol)}1`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[ARCHIVED_HEADER]] },
       });
     }
 
@@ -868,6 +898,14 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
         range: `${title}!${columnLetter(statusCol)}${targetRow}`,
         valueInputOption: 'RAW',
         requestBody: { values: [[status]] },
+      });
+    }
+    if (typeof archived === 'boolean') {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: MAIN_SHEET_ID,
+        range: `${title}!${columnLetter(archivedCol)}${targetRow}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[archived ? 'ใช่' : '']] },
       });
     }
     if (markDelivered === true) {

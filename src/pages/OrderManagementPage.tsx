@@ -38,18 +38,42 @@ function DeliveryDateCell({ suggestedIso, suggestedText, onSave }: { suggestedIs
   );
 }
 
-function OrderTable({ title, tone, rows, isEmpty, canEdit }: { title: string; tone: 'warn' | 'neutral'; rows: OrderRow[]; isEmpty: boolean; canEdit: boolean }) {
+function OrderTable({
+  title,
+  tone,
+  rows,
+  isEmpty,
+  canEdit,
+  selectedOrderNos,
+  setSelection,
+}: {
+  title: string;
+  tone: 'warn' | 'neutral';
+  rows: OrderRow[];
+  isEmpty: boolean;
+  canEdit: boolean;
+  selectedOrderNos: string[];
+  setSelection: (orderNos: string[]) => void;
+}) {
   const [shown, setShown] = useState(PAGE_SIZE);
   const visible = rows.slice(0, shown);
+  const allOrderNos = rows.map((r) => r.orderNo);
+  const allSelected = allOrderNos.length > 0 && allOrderNos.every((no) => selectedOrderNos.includes(no));
+  const toggleSelectAll = () => {
+    if (allSelected) setSelection(selectedOrderNos.filter((no) => !allOrderNos.includes(no)));
+    else setSelection(Array.from(new Set([...selectedOrderNos, ...allOrderNos])));
+  };
   return (
     <div className="card elev-sm" style={{ padding: '4px 14px 8px', marginBottom: 18 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 2px 8px', fontWeight: 600, fontSize: 13.5, color: tone === 'warn' ? 'var(--st-warn-fg)' : 'var(--color-neutral-200)' }}>
         {tone === 'warn' && <i className="ph ph-calendar-x" />}
         {title} ({rows.length})
       </div>
+      <div className="table-scroll">
       <table className="table">
         <thead>
           <tr>
+            {canEdit && <th style={{ width: 26 }}><input type="checkbox" checked={allSelected} onChange={toggleSelectAll} /></th>}
             <th>Route</th><th style={{ textAlign: 'center' }}>โซนที่ควรเป็น</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th>Batch Route</th><th style={{ textAlign: 'right' }}>ยอดขาย</th>
             <th style={{ textAlign: 'center' }}>รายการ</th><th>วันเวลาที่สั่ง</th><th style={{ minWidth: 168 }}>วันที่จะจัดส่ง</th><th>หมายเหตุ</th><th style={{ textAlign: 'center' }}>ใบกำกับภาษี</th><th style={{ textAlign: 'center' }}>โปรโมชั่น</th><th>สถานะ</th><th></th>
           </tr>
@@ -57,6 +81,7 @@ function OrderTable({ title, tone, rows, isEmpty, canEdit }: { title: string; to
         <tbody>
           {visible.map((r) => (
             <tr key={r.orderNo}>
+              {canEdit && <td><input type="checkbox" checked={r.selected} onChange={r.toggleSelect} /></td>}
               <td><span style={{ display: 'inline-flex', fontSize: 11, padding: '2px 8px', borderRadius: 5, background: 'var(--color-neutral-800)', color: 'var(--color-neutral-200)' }}>{r.route}</span></td>
               <td style={{ textAlign: 'center' }} title={r.zoneReason}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, whiteSpace: 'nowrap' }}>
@@ -134,6 +159,7 @@ function OrderTable({ title, tone, rows, isEmpty, canEdit }: { title: string; to
           ))}
         </tbody>
       </table>
+      </div>
       {rows.length === 0 && !isEmpty && (
         <div style={{ padding: 18, textAlign: 'center', color: 'var(--color-neutral-500)', fontSize: 12 }}>— ไม่มี —</div>
       )}
@@ -154,7 +180,14 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
   // Reset each table's "show more" cap whenever a filter narrows/widens the
   // result set, by remounting via key — otherwise narrowing to a handful of
   // matches could still look capped at 30 from a previous broad search.
-  const filterSignature = [state.routeFilterValue, state.routeStatusFilter, state.routeQ, state.routeOrderDateFilter, state.routeDeliveryDateFilter].join('|');
+  const filterSignature = [
+    state.routeFilterValue,
+    state.routeStatusFilter,
+    state.routeQ,
+    state.routeOrderDateFilter,
+    state.routeDeliveryDateFilter,
+    state.routeArchivedFilter,
+  ].join('|');
 
   return (
     <div>
@@ -180,8 +213,21 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
           <i className="ph ph-magnifying-glass" style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', fontSize: 15, color: 'var(--color-neutral-500)' }} />
           <input className="input" style={{ paddingLeft: 32 }} placeholder="ค้นหาลูกค้า / เลขคำสั่งซื้อ" value={v.routeQ} onChange={(e) => v.onRouteSearch(e.target.value)} />
         </div>
-        <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-neutral-500)' }}>{v.resultCount} รายการ</div>
+        {v.canArchive && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, color: 'var(--color-neutral-400)', marginLeft: 'auto' }}>
+            <input type="checkbox" checked={v.archivedFilter} onChange={v.toggleArchivedFilter} />
+            แสดงออเดอร์ที่จัดเก็บแล้ว{v.archivedCount > 0 ? ` (${v.archivedCount})` : ''}
+          </label>
+        )}
+        <div style={{ fontSize: 12, color: 'var(--color-neutral-500)', marginLeft: v.canArchive ? 0 : 'auto' }}>{v.resultCount} รายการ</div>
       </div>
+
+      {v.archivedFilter && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', marginBottom: 12, borderRadius: 10, background: 'var(--color-surface)', boxShadow: 'var(--shadow-sm)', fontSize: 12.5, color: 'var(--color-neutral-400)' }}>
+          <i className="ph ph-archive" style={{ color: 'var(--color-accent-300)' }} />
+          กำลังดูออเดอร์ที่จัดเก็บแล้ว — ออเดอร์เหล่านี้ถูกซ่อนจากตารางหลักและหน้าอื่นๆ (วางแผนจัดรูท / จัดล็อตหยิบสินค้า / แดชบอร์ด) แต่ข้อมูลยังอยู่ครบ เลือกแล้วกด "นำกลับมาใช้งาน" เพื่อย้ายกลับ
+        </div>
+      )}
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', marginBottom: 12 }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, color: 'var(--color-neutral-400)' }}>
@@ -234,14 +280,88 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
         )}
       </div>
 
+      {v.canArchive && v.selectedCount > 0 && (
+        <div
+          style={{
+            position: 'sticky',
+            top: 8,
+            zIndex: 5,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '10px 14px',
+            marginBottom: 14,
+            borderRadius: 10,
+            background: 'var(--color-accent-900)',
+            boxShadow: 'var(--shadow-md)',
+            fontSize: 13,
+          }}
+        >
+          <span style={{ fontWeight: 600, color: 'var(--color-accent-200)' }}>เลือกแล้ว {v.selectedCount} รายการ</span>
+          <button className="btn btn-primary" style={{ fontSize: 12.5 }} onClick={v.openArchiveDialog}>
+            <i className={v.archivedFilter ? 'ph ph-arrow-counter-clockwise' : 'ph ph-archive'} />
+            {v.archivedFilter ? 'นำกลับมาใช้งาน' : 'จัดเก็บ (Archive)'}
+          </button>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={v.clearSelection}>
+            <i className="ph ph-x" />ล้างที่เลือก
+          </button>
+        </div>
+      )}
+
       {!v.isEmpty && (
-        <OrderTable key={`nodate-${filterSignature}`} title="ยังไม่ได้ใส่วันที่จัดส่ง" tone="warn" rows={v.rowsNoDate} isEmpty={v.isEmpty} canEdit={canEdit} />
+        <OrderTable
+          key={`nodate-${filterSignature}`}
+          title="ยังไม่ได้ใส่วันที่จัดส่ง"
+          tone="warn"
+          rows={v.rowsNoDate}
+          isEmpty={v.isEmpty}
+          canEdit={canEdit}
+          selectedOrderNos={v.selectedOrderNos}
+          setSelection={v.setSelection}
+        />
       )}
       {!v.isEmpty && (
-        <OrderTable key={`dated-${filterSignature}`} title="ใส่วันที่จัดส่งแล้ว" tone="neutral" rows={v.rowsWithDate} isEmpty={v.isEmpty} canEdit={canEdit} />
+        <OrderTable
+          key={`dated-${filterSignature}`}
+          title="ใส่วันที่จัดส่งแล้ว"
+          tone="neutral"
+          rows={v.rowsWithDate}
+          isEmpty={v.isEmpty}
+          canEdit={canEdit}
+          selectedOrderNos={v.selectedOrderNos}
+          setSelection={v.setSelection}
+        />
       )}
       {v.isEmpty && !v.routeOrdersLoading && (
         <div className="card elev-sm" style={{ padding: 26, textAlign: 'center', color: 'var(--color-neutral-500)', fontSize: 12.5 }}>ไม่พบคำสั่งซื้อที่ตรงกับตัวกรอง</div>
+      )}
+
+      {v.archiveDialogOpen && (
+        <div className="dialog-backdrop" onClick={v.closeArchiveDialog}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-title">{v.archiveDialogMode === 'archive' ? 'ยืนยันจัดเก็บออเดอร์' : 'ยืนยันนำออเดอร์กลับมาใช้งาน'}</div>
+            <div className="dialog-body">
+              {v.archiveDialogMode === 'archive'
+                ? `จัดเก็บ ${v.selectedCount} ออเดอร์ — ออเดอร์เหล่านี้จะไม่แสดงในตารางหลักของหน้านี้ และในหน้าวางแผนจัดรูท / จัดล็อตหยิบสินค้า / แดชบอร์ด (ข้อมูลจะไม่ถูกลบ ดูย้อนหลังและนำกลับมาใช้งานได้ทุกเมื่อ)`
+                : `นำ ${v.selectedCount} ออเดอร์กลับมาใช้งานปกติ — ออเดอร์เหล่านี้จะกลับไปแสดงในตารางหลักและหน้าอื่นๆ อีกครั้ง`}
+            </div>
+            {v.archiveError && <div style={{ color: 'var(--st-bad-fg)', fontSize: 12.5 }}>{v.archiveError}</div>}
+            <div className="dialog-actions">
+              <button className="btn btn-secondary" onClick={v.closeArchiveDialog} disabled={v.archiveSubmitting}>ยกเลิก</button>
+              <button className="btn btn-primary" onClick={v.confirmArchive} disabled={v.archiveSubmitting}>
+                {v.archiveSubmitting ? (
+                  <>
+                    <i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังบันทึก...
+                  </>
+                ) : v.archiveDialogMode === 'archive' ? (
+                  'ยืนยันจัดเก็บ'
+                ) : (
+                  'ยืนยันนำกลับมาใช้งาน'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       <OrderDetailModal state={state} actions={actions} />

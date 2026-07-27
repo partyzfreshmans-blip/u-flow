@@ -45,6 +45,10 @@ function rowToRouteOrder(row: Record<string, string>): RouteOrder | null {
     // one named exactly "ขอใบกำกับภาษี" the first time someone saves the
     // toggle (see server/index.ts). Until then this just reads blank/false.
     wantsTaxInvoice: /^(ใช่|yes|true|y)$/i.test((row['ขอใบกำกับภาษี'] ?? '').trim()),
+    // Same bootstrapped-column pattern, this time for the Archive feature — the
+    // backend creates a column named exactly "Archived" the first time someone
+    // archives an order (see server/lib.ts).
+    archived: /^(ใช่|yes|true|y)$/i.test((row['Archived'] ?? '').trim()),
     districtProvince,
     addressFromUnii,
     mapLink: (row['Link'] ?? '').trim(),

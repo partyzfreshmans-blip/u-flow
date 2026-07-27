@@ -132,6 +132,10 @@ export interface RouteOrder {
   updatedDate: string;
   /** Parsed from a bootstrapped "ขอใบกำกับภาษี" column — see routeOrdersWrite.ts. */
   wantsTaxInvoice: boolean;
+  /** Parsed from a bootstrapped "Archived" column — see routeOrdersWrite.ts. Hides
+   * the order from normal operational views (Order Management, Planner, Pick,
+   * Dashboard) without deleting any data; toggled via the archive/unarchive UI. */
+  archived: boolean;
   districtProvince: string;
   addressFromUnii: string;
   mapLink: string;
