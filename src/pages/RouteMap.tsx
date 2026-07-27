@@ -39,6 +39,16 @@ interface Stop {
   /** Vehicle this stop currently belongs to; null = unassigned. Needed so a
    * pin click can offer "move to another vehicle" and exclude its own. */
   vehicleId?: string | null;
+  /** Present only for stops already on a vehicle's route — lets the popup
+   * offer "เลื่อนขึ้น/ลง" using the exact same batch-lock-aware, Activity
+   * Log-logging closures the table's own reorder buttons call. */
+  canMoveUp?: boolean;
+  canMoveDown?: boolean;
+  moveUp?: () => void;
+  moveDown?: () => void;
+  /** true once this stop's vehicle has a locked batch — suppresses the
+   * whole popup, matching the table's own hide-not-disable behavior. */
+  locked?: boolean;
 }
 
 interface VehicleRoute {
@@ -172,21 +182,52 @@ export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMo
 
       marker.bindTooltip(s.pinLabel ? tooltipText : `${tooltipText} (ยังไม่จัดลงรถ)`);
 
-      // "ย้ายไปรถคันอื่น" straight from the map — built as real DOM nodes
-      // (not an HTML string) so the change handler can be wired directly,
-      // with no risk of injecting sheet-sourced text as markup.
-      if (onMoveRef.current && vehicleOptions && vehicleOptions.length > 0) {
-        const targets = vehicleOptions.filter((v) => v.id !== s.vehicleId);
+      // Popup — built as real DOM nodes (not an HTML string) so change/click
+      // handlers can be wired directly, with no risk of injecting
+      // sheet-sourced text as markup. Offers "เลื่อนขึ้น/ลง" (reorder within
+      // the current vehicle) and "ย้ายไปรถคันอื่น" (move to another
+      // vehicle), whichever apply to this stop — an unassigned stop only
+      // ever gets the move option, and a vehicle with just one stop only
+      // ever gets the move option too (nothing to reorder against).
+      const canReorder = !s.locked && !!(s.moveUp || s.moveDown);
+      const targets = !s.locked && onMoveRef.current && vehicleOptions ? vehicleOptions.filter((v) => v.id !== s.vehicleId) : [];
+      if (canReorder || targets.length > 0) {
+        const wrap = document.createElement('div');
+        wrap.style.minWidth = '150px';
+        wrap.style.fontFamily = 'var(--font-body)';
+        const title = document.createElement('div');
+        title.style.fontWeight = '600';
+        title.style.fontSize = '12.5px';
+        title.style.marginBottom = '6px';
+        title.textContent = s.label;
+        wrap.appendChild(title);
+
+        if (canReorder) {
+          const row = document.createElement('div');
+          row.style.display = 'flex';
+          row.style.gap = '6px';
+          row.style.marginBottom = targets.length > 0 ? '8px' : '0';
+          const makeBtn = (label: string, enabled: boolean, onClick: () => void) => {
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-secondary';
+            btn.type = 'button';
+            btn.style.flex = '1';
+            btn.style.fontSize = '11.5px';
+            btn.style.minHeight = '26px';
+            btn.textContent = label;
+            btn.disabled = !enabled;
+            btn.addEventListener('click', () => {
+              onClick();
+              map.closePopup();
+            });
+            return btn;
+          };
+          row.appendChild(makeBtn('↑ เลื่อนขึ้น', !!s.canMoveUp, () => s.moveUp?.()));
+          row.appendChild(makeBtn('↓ เลื่อนลง', !!s.canMoveDown, () => s.moveDown?.()));
+          wrap.appendChild(row);
+        }
+
         if (targets.length > 0) {
-          const wrap = document.createElement('div');
-          wrap.style.minWidth = '150px';
-          wrap.style.fontFamily = 'var(--font-body)';
-          const title = document.createElement('div');
-          title.style.fontWeight = '600';
-          title.style.fontSize = '12.5px';
-          title.style.marginBottom = '6px';
-          title.textContent = s.label;
-          wrap.appendChild(title);
           const select = document.createElement('select');
           select.className = 'input';
           select.style.width = '100%';
@@ -209,14 +250,15 @@ export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMo
             map.closePopup();
           });
           wrap.appendChild(select);
-          marker.bindPopup(wrap);
-          if (omsRef.current) {
-            // OMS decides when a click should open the popup (letting it
-            // spiderfy overlapping pins apart first) — strip Leaflet's own
-            // auto-open-on-click that bindPopup just registered, so the two
-            // don't race each other on the very first click of a group.
-            marker.off('click');
-          }
+        }
+
+        marker.bindPopup(wrap);
+        if (omsRef.current) {
+          // OMS decides when a click should open the popup (letting it
+          // spiderfy overlapping pins apart first) — strip Leaflet's own
+          // auto-open-on-click that bindPopup just registered, so the two
+          // don't race each other on the very first click of a group.
+          marker.off('click');
         }
       }
 

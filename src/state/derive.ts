@@ -979,6 +979,17 @@ export function computePlanner(state: AppState, actions: AppActions) {
             vehicleId: v.id,
             // Short on-pin text: vehicle code + delivery sequence, e.g. "A-3".
             pinLabel: `${v.loadPrefix}-${s.seq}`,
+            // Reuses the same moveUp/moveDown closures the table's own
+            // "เลื่อนขึ้น/ลง" buttons call — already batch-lock-aware and
+            // already logs to Activity Log, so the map's popup needs no
+            // separate reorder logic of its own. `locked` mirrors the
+            // table's own behavior of hiding (not just disabling) every
+            // reorder/move control once a vehicle's batch is locked.
+            locked: isVehicleLocked(v.id),
+            canMoveUp: s.seq > 1,
+            canMoveDown: s.seq < stops.length,
+            moveUp: s.moveUp,
+            moveDown: s.moveDown,
           };
         }),
     };
