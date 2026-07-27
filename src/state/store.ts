@@ -2,7 +2,8 @@ import { useEffect, useMemo, useReducer, useRef } from 'react';
 import { fetchApiImportOrders } from '../data/sources/apiImportOrders';
 import { CS_MASTER_CSV_URL, fetchCsMasterCustomers } from '../data/sources/csMaster';
 import { updateCsMasterLatLng } from '../data/sources/csMasterWrite';
-import { fetchActivePromotions } from '../data/sources/promotionsSheet';
+import { avgPricePerPiece, fetchActivePromotions, formatPackUnitsTerm, formatTiersTerm, PROMOTIONS_CSV_URL } from '../data/sources/promotionsSheet';
+import { upsertPromotion } from '../data/sources/promotionsWrite';
 import { fetchRouteOrders } from '../data/sources/routeOrders';
 import { invalidateSheetCache } from '../data/sources/sheetCsv';
 import { fetchAllOrderLineItems, fetchOrderLineItems, fetchOrderLineItemsForOrders } from '../data/sources/skuDetail';
@@ -15,14 +16,14 @@ import { coordKey, loadGeocodeCache, saveGeocodeCache, type GeocodeCache } from 
 import { reverseGeocode } from '../data/sources/geocoding';
 import { GEOCODE_MIN_INTERVAL_MS } from '../config/geocoding';
 import { loadRouteCodState, saveRouteCodState } from '../data/routeCod';
-import { isoToSheetDateText, sheetDateToDayKey, todayDayKey } from '../data/dateUtils';
+import { addDays, dayKey, dayKeyToDate, isoToSheetDateText, sheetDateToDayKey, todayDayKey } from '../data/dateUtils';
 import { updateRouteOrder } from '../data/sources/routeOrdersWrite';
 import { loadDriverQueue, saveDriverQueue } from '../data/driverQueue';
 import { loadPickLots, savePickLots, type PickLot, type PickLotLine } from '../data/pickLots';
 import { loadBatchRoutes, saveBatchRoutes, type BatchRoute } from '../data/batchRoutes';
 import { PICK_CLOSED_STATUS } from './helpers';
 import type { AttachmentScope } from '../config/drive';
-import type { ApiImportOrder, CsMasterCustomer, OrderLineItem, Promo, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
+import type { ApiImportOrder, CsMasterCustomer, OrderLineItem, Promo, PromoPackUnit, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
 import { csvExportUrl, SHEET_TABS } from '../config/sheets';
 import { loadLastSyncAt, saveLastSyncAt } from '../data/syncMeta';
 import { appendNotificationEvents, loadNotificationEvents, loadNotificationReadIds, saveNotificationReadIds, type NotificationEvent } from '../data/notifications';
@@ -200,13 +201,34 @@ export interface AppState {
   codVehicleFilter: string;
   codMobile: boolean;
 
-  // promo ("โปรโมชั่น" tab, Active rows only; "create promotion" flow is local)
+  // promo ("โปรโมชั่น" tab, Active rows only)
   promos: Promo[];
   promosLoading: boolean;
   promosError: string | null;
   promoQ: string;
   promoModal: boolean;
-  promoForm: { name: string; sku: string; type: string; start: string; end: string; unit: PromoUnit; tiers: PromoTier[] };
+  /** null = creating a new promotion; a Promo = editing that existing row in
+   * place (matched by its SKU — the SKU field is locked while editing).
+   * Kept in full (not just the SKU) so an edit that doesn't touch the dates
+   * can still redisplay the original period text right after saving. */
+  promoEditingOriginal: Promo | null;
+  promoForm: {
+    name: string;
+    sku: string;
+    type: string;
+    /** ISO YYYY-MM-DD; '' = leave the sheet's existing date untouched (only
+     * meaningful while editing — a new promo always sends both). */
+    start: string;
+    end: string;
+    unit: PromoUnit;
+    /** Which pricing shape the form is currently editing — a promo is either
+     * a stepped quantity discount (tiers) or priced per packaging unit
+     * (packUnits), never both at once. */
+    mode: 'tiers' | 'packUnits';
+    tiers: PromoTier[];
+    packUnits: PromoPackUnit[];
+  };
+  promoSaveStatus: OrderSaveStatus | null;
 
   // all order line items ("SKU Detail" tab, unfiltered) — used to flag which
   // orders on the Order Management page contain an actively-promoted SKU.
@@ -319,6 +341,22 @@ function initialSession(): Pick<AppState, 'session' | 'route' | 'driverVehicleId
   return { session, route: defaultRouteFor(session.role), driverVehicleId: session.role === 'driver' ? session.driverVehicleId : null };
 }
 
+/** Fresh create-promo form defaults — 90 days out is a reasonable long-run
+ * promo window; every field resets to this both on initial load and every
+ * time "สร้างโปรโมชั่น" is clicked (so a previous edit/create never leaks
+ * into the next one). */
+const DEFAULT_PROMO_FORM: AppState['promoForm'] = {
+  name: '',
+  sku: '',
+  type: 'ลดราคา',
+  start: todayDayKey(),
+  end: dayKey(addDays(dayKeyToDate(todayDayKey())!, 90)),
+  unit: 'ชิ้น',
+  mode: 'packUnits',
+  tiers: [{ minQty: 1, price: 0 }],
+  packUnits: [{ label: 'ชิ้น', price: 0, qtyPerUnit: 1 }],
+};
+
 export const initialState: AppState = {
   ...initialRouteFromUrl(),
   ...initialSession(),
@@ -407,7 +445,9 @@ export const initialState: AppState = {
   promosError: null,
   promoQ: '',
   promoModal: false,
-  promoForm: { name: '', sku: '', type: 'ลดราคา', start: '2026-07-24', end: '2026-08-24', unit: 'ลัง', tiers: [{ minQty: 1, price: 0 }] },
+  promoEditingOriginal: null,
+  promoForm: DEFAULT_PROMO_FORM,
+  promoSaveStatus: null,
 
   orderLineItems: [],
   orderLineItemsLoading: true,
@@ -477,7 +517,7 @@ export type Action =
   | { type: 'patch'; patch: Partial<AppState> }
   | { type: 'openEditSku'; sku: Sku }
   | { type: 'saveSku' }
-  | { type: 'addPromo' }
+  | { type: 'applyPromoSaved'; promo: Promo }
   | { type: 'updateCustomerLatLng'; rowIndex: number; lat: number; lng: number }
   | { type: 'updateOrderLocation'; orderNo: string; lat: number; lng: number }
   | { type: 'setOrderSaveStatus'; orderNo: string; status: OrderSaveStatus | null }
@@ -520,30 +560,13 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, skus: arr, skuModal: null };
     }
 
-    case 'addPromo': {
-      const f = state.promoForm;
-      if (!f.name.trim()) return state;
-      const match = state.skus.find((s) => s.id === f.sku || s.name === f.sku);
-      const tiers = f.tiers.filter((t) => t.price > 0).sort((a, b) => a.minQty - b.minQty);
-      const base = tiers[0];
-      const promo: Promo = {
-        name: f.name.trim(),
-        value: base ? `฿${base.price}/${f.unit}` : f.type,
-        sku: match ? match.displayId : f.sku.trim() || '—',
-        skuName: match ? match.name : f.sku.trim() || '—',
-        type: tiers.length > 1 ? 'ลดขั้นบันได' : f.type,
-        period: `${f.start} – ${f.end}`,
-        st: 'active',
-        unit: f.unit,
-        tiers,
-        termText: tiers.map((t) => (t.minQty > 1 ? `${t.minQty}${f.unit}ขึ้นไป ${t.price}บาท` : `${f.unit}ละ ${t.price}บาท`)).join(', '),
-      };
-      return {
-        ...state,
-        promos: [promo, ...state.promos],
-        promoModal: false,
-        promoForm: { name: '', sku: '', type: 'ลดราคา', start: '2026-07-24', end: '2026-08-24', unit: 'ลัง', tiers: [{ minQty: 1, price: 0 }] },
-      };
+    case 'applyPromoSaved': {
+      // Written back to the real sheet successfully — patch (or insert) the
+      // matching promo by SKU so the table reflects it immediately, without
+      // waiting on the next cached CSV refetch.
+      const idx = state.promos.findIndex((p) => p.sku === action.promo.sku);
+      const promos = idx >= 0 ? state.promos.map((p, i) => (i === idx ? action.promo : p)) : [action.promo, ...state.promos];
+      return { ...state, promos, promoModal: false, promoEditingOriginal: null, promoForm: DEFAULT_PROMO_FORM };
     }
 
     case 'updateCustomerLatLng': {
@@ -1064,7 +1087,95 @@ export function useAppStore() {
       },
       openEditSku: (sku: Sku) => dispatch({ type: 'openEditSku', sku }),
       saveSku: () => dispatch({ type: 'saveSku' }),
-      addPromo: () => dispatch({ type: 'addPromo' }),
+
+      openCreatePromo: () =>
+        dispatch({ type: 'patch', patch: { promoModal: true, promoEditingOriginal: null, promoForm: DEFAULT_PROMO_FORM, promoSaveStatus: null } }),
+      openEditPromo: (promo: Promo) =>
+        dispatch({
+          type: 'patch',
+          patch: {
+            promoModal: true,
+            promoEditingOriginal: promo,
+            promoSaveStatus: null,
+            promoForm: {
+              name: promo.skuName || promo.name,
+              sku: promo.sku,
+              type: promo.type,
+              // Sheet dates aren't guaranteed to be ISO text, so they can't be
+              // reliably parsed back into this YYYY-MM-DD field — left blank
+              // means "keep the existing dates", exactly like leaving them
+              // blank does for a new promo's optional fields server-side.
+              start: '',
+              end: '',
+              unit: promo.unit,
+              mode: promo.packUnits.length > 0 ? 'packUnits' : 'tiers',
+              tiers: promo.tiers.length > 0 ? promo.tiers : [{ minQty: 1, price: 0 }],
+              packUnits: promo.packUnits.length > 0 ? promo.packUnits : [{ label: 'ชิ้น', price: 0, qtyPerUnit: 1 }],
+            },
+          },
+        }),
+      closePromo: () => dispatch({ type: 'patch', patch: { promoModal: false, promoSaveStatus: null } }),
+      /** Writes to the real "โปรโมชั่น" sheet; local state only updates after
+       * that succeeds, same promise as saveOrderEdit above. `editingOriginal`
+       * is passed in explicitly (rather than closed over) per this file's
+       * stale-closure rule for the frozen actions object below. */
+      savePromo: (form: AppState['promoForm'], editingOriginal: Promo | null) => {
+        const packUnits = form.packUnits.filter((u) => u.price > 0 && u.qtyPerUnit >= 1);
+        const tiers = form.tiers.filter((t) => t.price > 0).sort((a, b) => a.minQty - b.minQty);
+        const usingPackUnits = form.mode === 'packUnits' && packUnits.length > 0;
+        const sku = (editingOriginal?.sku ?? form.sku).trim();
+        const name = form.name.trim();
+        if (!sku || !name || (usingPackUnits ? packUnits.length === 0 : tiers.length === 0)) return;
+
+        const termText = usingPackUnits ? formatPackUnitsTerm(packUnits) : formatTiersTerm(tiers, form.unit);
+        const single = usingPackUnits ? packUnits.find((u) => u.label === 'ชิ้น') : form.unit === 'ชิ้น' ? tiers[0] : undefined;
+        const box = usingPackUnits
+          ? (packUnits.find((u) => u.label === 'หีบ') ?? packUnits.find((u) => u.label === 'ลัง'))
+          : form.unit === 'หีบ' || form.unit === 'ลัง'
+            ? tiers[tiers.length - 1]
+            : undefined;
+        const headlinePrice = usingPackUnits ? packUnits[0]?.price : tiers[0]?.price;
+
+        dispatch({ type: 'patch', patch: { promoSaveStatus: { state: 'saving' } } });
+        upsertPromotion({
+          sku,
+          productName: name,
+          termText,
+          start: form.start || undefined,
+          end: form.end || undefined,
+          promotionPrice: headlinePrice,
+          boxPrice: box?.price,
+          singlePrice: single?.price,
+        })
+          .then(() => {
+            const bestPackUnit = usingPackUnits ? packUnits.reduce((a, b) => (avgPricePerPiece(b) < avgPricePerPiece(a) ? b : a)) : null;
+            const period = form.start && form.end ? `${form.start} – ${form.end}` : (editingOriginal?.period ?? '');
+            const promo: Promo = {
+              name: termText,
+              value: bestPackUnit
+                ? `เฉลี่ยต่ำสุด ฿${avgPricePerPiece(bestPackUnit).toFixed(2)}/ชิ้น (${bestPackUnit.label} ฿${bestPackUnit.price})`
+                : `฿${tiers[0]?.price ?? 0}/${form.unit}`,
+              sku,
+              skuName: name,
+              type: usingPackUnits ? 'ราคาต่อหน่วยบรรจุ' : tiers.length > 1 ? 'ลดขั้นบันได' : form.type,
+              period,
+              st: 'active',
+              unit: usingPackUnits ? packUnits[0].label : form.unit,
+              tiers: usingPackUnits ? [] : tiers,
+              packUnits: usingPackUnits ? packUnits : [],
+              termText,
+            };
+            dispatch({ type: 'applyPromoSaved', promo });
+            dispatch({ type: 'patch', patch: { promoSaveStatus: { state: 'saved' } } });
+            setTimeout(() => dispatch({ type: 'patch', patch: { promoSaveStatus: null } }), 2500);
+            invalidateSheetCache(PROMOTIONS_CSV_URL);
+            logActivity(editingOriginal ? 'แก้ไขโปรโมชั่น' : 'สร้างโปรโมชั่น', `${sku} · ${name} · ${termText}`);
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'บันทึกไม่สำเร็จ';
+            dispatch({ type: 'patch', patch: { promoSaveStatus: { state: 'error', message } } });
+          });
+      },
 
       openOrderDetail: (orderNo: string, customer: string, matchedOrder: RouteOrder | undefined) => {
         dispatch({

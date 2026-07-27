@@ -1,12 +1,12 @@
 import type { CSSProperties } from 'react';
 import { orders } from '../data/mockData';
 import type { PickLot } from '../data/pickLots';
-import { PROMO_UNITS, type ApiImportOrder, type Order, type OrderLineItem, type PromoStatus, type PromoUnit, type RouteOrder } from '../data/types';
+import { PROMO_UNITS, type ApiImportOrder, type Order, type OrderLineItem, type PromoPackUnit, type PromoStatus, type PromoUnit, type RouteOrder } from '../data/types';
 import { lineDiff, lineNetTotal, receivingFolderKey, recordHasDiscrepancy, recordTotal, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { loadCode } from '../data/vehicles';
 import { nextBatchId, type BatchRoute } from '../data/batchRoutes';
 import { resolveZone, UNASSIGNED_COLOR } from '../data/zoneConfig';
-import { detectUnit } from '../data/sources/promotionsSheet';
+import { avgPricePerPiece, detectUnit } from '../data/sources/promotionsSheet';
 import { addDays, dayKey, dayKeyToDate, daysBetweenKeys, formatOrderedAt, formatThaiShortDate, formatThaiWeekdayDate, sheetDateTimeToMs, sheetDateToDayKey, suggestedDeliveryDayKey, todayDayKey } from '../data/dateUtils';
 import { badgeStyle, DELIVERY_DONE_STATUSES, fmt, sheetStatusStyle } from './helpers';
 import { canBookStop, canClosePickLot, canDecideBooking, canEditOrder, canEditPlan, canManageUsers, canPickWork, ROLES, ROLE_LABELS, seesAllActivityLog } from '../config/permissions';
@@ -95,7 +95,7 @@ export const pageTitles: Record<AppState['route'], [string, string]> = {
   driver: ['มุมมองคนขับ', 'ใบจัดรูทมือถือรายคัน'],
   pick: ['Batch picking / จัดล็อตหยิบสินค้า', 'รวมหลายออเดอร์เป็นล็อตเดียว หยิบสินค้าตามตำแหน่งเก็บ'],
   cod: ['เคลียร์เงินปลายทาง (COD)', 'เทียบยอดที่ควรเก็บกับยอดคืนจริงต่อ driver'],
-  promo: ['โปรโมชั่น / ส่วนลด', 'โปรโมชั่นที่ Active จาก Google Sheet · สร้างโปรโมชั่นใหม่ได้ในเครื่องนี้'],
+  promo: ['โปรโมชั่น / ส่วนลด', 'โปรโมชั่นที่ Active จาก Google Sheet · สร้าง/แก้ไขแล้วบันทึกกลับชีทได้'],
   grn: ['รับสินค้าเข้าคลัง (Goods Receiving)', 'บันทึกของเข้าจากซัพพลายเออร์ · เทียบจำนวนกับบิล · แนบไฟล์บิลขึ้น Drive'],
   sku: ['ฐานข้อมูลสินค้า (SKU master)', 'ทะเบียนสินค้าทั้งหมดในระบบ'],
   customer: ['ฐานข้อมูลลูกค้า (CS Master)', 'แก้ไขพิกัด lat/long แล้วบันทึกกลับเข้า Google Sheet จริง'],
@@ -1922,13 +1922,29 @@ export function computePromo(state: AppState, actions: AppActions) {
       ...p,
       stLabel: promoMeta[p.st][0],
       stStyle: badgeStyle(promoMeta[p.st][1]),
-      typeStyle: badgeStyle(p.tiers.length > 1 ? 'info' : 'accent'),
+      typeStyle: badgeStyle(p.packUnits.length > 0 ? 'info' : p.tiers.length > 1 ? 'info' : 'accent'),
       isStepped: p.tiers.length > 1,
+      isPackUnits: p.packUnits.length > 0,
       tierRows: p.tiers.map((t) => ({
         label: t.minQty > 1 ? `${t.minQty}${p.unit}ขึ้นไป` : `1 ${p.unit}`,
         priceText: `฿${t.price.toLocaleString('en-US')}`,
       })),
+      packUnitRows: p.packUnits.map((u) => ({
+        label: u.label,
+        qtyPerUnit: u.qtyPerUnit,
+        priceText: `฿${u.price.toLocaleString('en-US')}`,
+        avgText: `฿${avgPricePerPiece(u).toFixed(2)}/ชิ้น`,
+      })),
+      edit: () => actions.openEditPromo(p),
     }));
+
+  const f = state.promoForm;
+  const isEditing = state.promoEditingOriginal !== null;
+
+  const canSavePromo =
+    (isEditing ? state.promoEditingOriginal!.sku.trim() !== '' : f.sku.trim() !== '') &&
+    f.name.trim() !== '' &&
+    (f.mode === 'packUnits' ? f.packUnits.some((u) => u.price > 0 && u.qtyPerUnit >= 1) : f.tiers.some((t) => t.price > 0));
 
   return {
     promosLoading: state.promosLoading,
@@ -1937,37 +1953,74 @@ export function computePromo(state: AppState, actions: AppActions) {
     onPromoSearch: (v: string) => actions.patch({ promoQ: v }),
     promos: rows,
     promoModalOpen: state.promoModal,
-    promoForm: state.promoForm,
-    openPromo: () => actions.patch({ promoModal: true }),
-    closePromo: () => actions.patch({ promoModal: false }),
-    onPromoName: (v: string) => actions.patch({ promoForm: { ...state.promoForm, name: v } }),
-    onPromoSku: (v: string) => actions.patch({ promoForm: { ...state.promoForm, sku: v } }),
-    onPromoType: (v: string) => actions.patch({ promoForm: { ...state.promoForm, type: v } }),
-    onPromoStart: (v: string) => actions.patch({ promoForm: { ...state.promoForm, start: v } }),
-    onPromoEnd: (v: string) => actions.patch({ promoForm: { ...state.promoForm, end: v } }),
-    onPromoUnit: (v: PromoUnit) => actions.patch({ promoForm: { ...state.promoForm, unit: v } }),
+    promoForm: f,
+    isEditingPromo: isEditing,
+    editingPromoSku: state.promoEditingOriginal?.sku ?? null,
+    openPromo: () => actions.openCreatePromo(),
+    closePromo: () => actions.closePromo(),
+    onPromoName: (v: string) => actions.patch({ promoForm: { ...f, name: v } }),
+    onPromoSku: (v: string) => actions.patch({ promoForm: { ...f, sku: v } }),
+    onPromoType: (v: string) => actions.patch({ promoForm: { ...f, type: v } }),
+    onPromoStart: (v: string) => actions.patch({ promoForm: { ...f, start: v } }),
+    onPromoEnd: (v: string) => actions.patch({ promoForm: { ...f, end: v } }),
+    onPromoUnit: (v: PromoUnit) => actions.patch({ promoForm: { ...f, unit: v } }),
+    onPromoMode: (v: 'tiers' | 'packUnits') => actions.patch({ promoForm: { ...f, mode: v } }),
     promoUnits: PROMO_UNITS,
-    tierRows: state.promoForm.tiers.map((t, i) => ({
+    tierRows: f.tiers.map((t, i) => ({
       minQty: t.minQty === 0 ? '' : String(t.minQty),
       price: t.price === 0 ? '' : String(t.price),
       isFirst: i === 0,
       onMinQty: (val: string) => {
-        const tiers = state.promoForm.tiers.map((x, j) => (j === i ? { ...x, minQty: Number(val.replace(/[^0-9]/g, '') || 0) } : x));
-        actions.patch({ promoForm: { ...state.promoForm, tiers } });
+        const tiers = f.tiers.map((x, j) => (j === i ? { ...x, minQty: Number(val.replace(/[^0-9]/g, '') || 0) } : x));
+        actions.patch({ promoForm: { ...f, tiers } });
       },
       onPrice: (val: string) => {
-        const tiers = state.promoForm.tiers.map((x, j) => (j === i ? { ...x, price: Number(val.replace(/[^0-9.]/g, '') || 0) } : x));
-        actions.patch({ promoForm: { ...state.promoForm, tiers } });
+        const tiers = f.tiers.map((x, j) => (j === i ? { ...x, price: Number(val.replace(/[^0-9.]/g, '') || 0) } : x));
+        actions.patch({ promoForm: { ...f, tiers } });
       },
-      remove: () => actions.patch({ promoForm: { ...state.promoForm, tiers: state.promoForm.tiers.filter((_, j) => j !== i) } }),
+      remove: () => actions.patch({ promoForm: { ...f, tiers: f.tiers.filter((_, j) => j !== i) } }),
     })),
     addTier: () => {
-      const last = state.promoForm.tiers[state.promoForm.tiers.length - 1];
+      const last = f.tiers[f.tiers.length - 1];
       const nextQty = last ? Math.max(last.minQty + 1, 2) : 1;
-      actions.patch({ promoForm: { ...state.promoForm, tiers: [...state.promoForm.tiers, { minQty: nextQty, price: 0 }] } });
+      actions.patch({ promoForm: { ...f, tiers: [...f.tiers, { minQty: nextQty, price: 0 }] } });
     },
-    canSavePromo: state.promoForm.name.trim() !== '' && state.promoForm.tiers.some((t) => t.price > 0),
-    addPromo: () => actions.addPromo(),
+    // Packaging-unit rows — same shape of per-row edit callbacks as tierRows
+    // above, plus a live-computed "avg price per piece" (price ÷ qtyPerUnit)
+    // so staff can see at a glance which packaging size is the better deal
+    // while they're still typing.
+    packUnitRows: f.packUnits.map((u, i) => ({
+      label: u.label,
+      qtyPerUnit: u.qtyPerUnit === 0 ? '' : String(u.qtyPerUnit),
+      price: u.price === 0 ? '' : String(u.price),
+      avgText: u.price > 0 && u.qtyPerUnit > 0 ? `฿${avgPricePerPiece(u).toFixed(2)}/ชิ้น` : '—',
+      onLabel: (val: PromoUnit) => {
+        const packUnits = f.packUnits.map((x, j) => (j === i ? { ...x, label: val } : x));
+        actions.patch({ promoForm: { ...f, packUnits } });
+      },
+      onQtyPerUnit: (val: string) => {
+        const packUnits = f.packUnits.map((x, j) => (j === i ? { ...x, qtyPerUnit: Number(val.replace(/[^0-9]/g, '') || 0) } : x));
+        actions.patch({ promoForm: { ...f, packUnits } });
+      },
+      onPrice: (val: string) => {
+        const packUnits = f.packUnits.map((x, j) => (j === i ? { ...x, price: Number(val.replace(/[^0-9.]/g, '') || 0) } : x));
+        actions.patch({ promoForm: { ...f, packUnits } });
+      },
+      remove: () => actions.patch({ promoForm: { ...f, packUnits: f.packUnits.filter((_, j) => j !== i) } }),
+    })),
+    addPackUnit: () => {
+      // Next unused label from PROMO_UNITS, smallest-to-largest, so a second
+      // add naturally suggests แพ็ค after ชิ้น, then หีบ, rather than repeating
+      // the same label the user would just have to change anyway.
+      const used = new Set(f.packUnits.map((u) => u.label));
+      const nextLabel = PROMO_UNITS.find((u) => !used.has(u)) ?? PROMO_UNITS[0];
+      const last = f.packUnits[f.packUnits.length - 1];
+      const suggestedQty: PromoPackUnit = { label: nextLabel, price: 0, qtyPerUnit: last ? Math.max(last.qtyPerUnit, 2) : 1 };
+      actions.patch({ promoForm: { ...f, packUnits: [...f.packUnits, suggestedQty] } });
+    },
+    canSavePromo,
+    promoSaveStatus: state.promoSaveStatus,
+    savePromo: () => actions.savePromo(f, state.promoEditingOriginal),
   };
 }
 

@@ -17,6 +17,7 @@ import {
   handleUpdateCsMasterLocation,
   handleUpdateRouteOrder,
   handleUpdateUser,
+  handleUpsertPromotion,
 } from './lib.js';
 import { bearerToken } from './session.js';
 
@@ -61,6 +62,11 @@ app.post('/api/cs-master/update-location', async (req, res) => {
 
 app.post('/api/route-orders/update', async (req, res) => {
   const { status, body } = await handleUpdateRouteOrder(bearerToken(req.headers.authorization), req.body);
+  res.status(status).json(body);
+});
+
+app.post('/api/promotions/upsert', async (req, res) => {
+  const { status, body } = await handleUpsertPromotion(bearerToken(req.headers.authorization), req.body);
   res.status(status).json(body);
 });
 

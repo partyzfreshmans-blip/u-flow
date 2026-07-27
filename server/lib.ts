@@ -18,6 +18,7 @@ import { createSessionToken, verifySessionToken } from './session.js';
 
 export const CS_MASTER_GID = Number(SHEET_TABS.csMaster.gid);
 export const ROUTE_ORDERS_GID = Number(SHEET_TABS.routeOrders.gid);
+export const PROMOTIONS_GID = Number(SHEET_TABS.promotions.gid);
 
 // Columns in the CS Master tab: A=ชื่อ B=เบอร์ C=ที่อยู่ D=ละ(lat) E=ลอง(lng)
 const LAT_COLUMN = 'D';
@@ -56,6 +57,19 @@ const TAX_INVOICE_FALLBACK_COLUMN_INDEX = 13; // column N, 0-based
 // right after whatever the sheet's last used column currently is.
 const ARCHIVED_HEADER = 'Archived';
 
+// Columns in the "โปรโมชั่น" tab — same header-name lookup approach as the
+// คำสั่งซื้อ tab above (never by fixed position).
+const PROMO_SKU_HEADER = 'SKU';
+const PROMO_STATUS_HEADER = 'Status';
+const PROMO_PRODUCT_NAME_HEADER = 'Product Name';
+const PROMO_TERM_HEADER = 'Promotion Term';
+const PROMO_START_HEADER = 'เริ่มโปร';
+const PROMO_END_HEADER = 'สินสุด';
+const PROMO_PRICE_HEADER = 'Promotion Price';
+const PROMO_BOX_PRICE_HEADER = 'Box Price';
+const PROMO_SINGLE_PRICE_HEADER = 'Single Price';
+const PROMO_PERIOD_HEADER = 'Period (วัน)';
+
 export interface ApiResult {
   status: number;
   body: unknown;
@@ -78,6 +92,24 @@ function isoToSheetDate(iso: string): string {
   const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) throw new Error('รูปแบบวันที่ไม่ถูกต้อง (ต้องเป็น YYYY-MM-DD)');
   return `${Number(m[2])}/${Number(m[3])}/${Number(m[1])}`;
+}
+
+/** The "โปรโมชั่น" tab writes dates as zero-padded DD-MM-YYYY (e.g.
+ * "21-07-2026") — a completely different convention from the M/D/YYYY the
+ * คำสั่งซื้อ tab uses above, confirmed from real rows already in that sheet.
+ * Never share isoToSheetDate between the two tabs. */
+function isoToPromoSheetDate(iso: string): string {
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) throw new Error('รูปแบบวันที่ไม่ถูกต้อง (ต้องเป็น YYYY-MM-DD)');
+  const [, year, month, day] = m;
+  return `${day}-${month}-${year}`;
+}
+
+/** Whole days between two YYYY-MM-DD ISO dates — matches the "Period (วัน)"
+ * column, which real rows already keep as end-minus-start in days. */
+function daysBetweenIso(startIso: string, endIso: string): number {
+  const MS_PER_DAY = 24 * 60 * 60 * 1000;
+  return Math.round((new Date(`${endIso}T00:00:00Z`).getTime() - new Date(`${startIso}T00:00:00Z`).getTime()) / MS_PER_DAY);
 }
 
 /** Matches the sheet's own datetime text form, e.g. "7/24/2026 8:00:00". */
@@ -927,6 +959,114 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
     console.error('[route-orders/update]', message);
+    return { status: 500, body: { error: message } };
+  }
+}
+
+/**
+ * Create-or-update a promotion row in the "โปรโมชั่น" tab, matched by SKU —
+ * an existing SKU updates that row in place; a new one is written to the
+ * first row past the sheet's current data (never via values.append, so the
+ * exact target row is always known up front). The frontend is responsible
+ * for turning whatever pricing shape the user entered (stepped tiers or
+ * per-packaging-unit prices) into the plain termText + numeric columns this
+ * handler writes — this endpoint doesn't need to know which shape it was.
+ */
+export async function handleUpsertPromotion(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (!['administrator', 'manager', 'admin_staff'].includes(payload.role)) {
+    return { status: 403, body: { error: 'ไม่มีสิทธิ์แก้ไขโปรโมชั่น' } };
+  }
+
+  const { sku, productName, start, end, termText, promotionPrice, boxPrice, singlePrice } = (body ?? {}) as Record<string, unknown>;
+
+  if (typeof sku !== 'string' || sku.trim() === '') return { status: 400, body: { error: 'ต้องระบุ SKU' } };
+  if (typeof productName !== 'string' || productName.trim() === '') return { status: 400, body: { error: 'ต้องระบุชื่อสินค้า' } };
+  if (typeof termText !== 'string' || termText.trim() === '') return { status: 400, body: { error: 'ต้องระบุรายละเอียดโปรโมชั่น' } };
+  if (start !== undefined && typeof start !== 'string') return { status: 400, body: { error: 'start ต้องเป็นข้อความรูปแบบ YYYY-MM-DD' } };
+  if (end !== undefined && typeof end !== 'string') return { status: 400, body: { error: 'end ต้องเป็นข้อความรูปแบบ YYYY-MM-DD' } };
+  if (promotionPrice !== undefined && typeof promotionPrice !== 'number') return { status: 400, body: { error: 'promotionPrice ต้องเป็นตัวเลข' } };
+  if (boxPrice !== undefined && typeof boxPrice !== 'number') return { status: 400, body: { error: 'boxPrice ต้องเป็นตัวเลข' } };
+  if (singlePrice !== undefined && typeof singlePrice !== 'number') return { status: 400, body: { error: 'singlePrice ต้องเป็นตัวเลข' } };
+
+  let sheetStart: string | null = null;
+  let sheetEnd: string | null = null;
+  let periodDays: number | null = null;
+  try {
+    if (typeof start === 'string' && start) sheetStart = isoToPromoSheetDate(start);
+    if (typeof end === 'string' && end) sheetEnd = isoToPromoSheetDate(end);
+    if (typeof start === 'string' && start && typeof end === 'string' && end) periodDays = daysBetweenIso(start, end);
+  } catch (err: unknown) {
+    return { status: 400, body: { error: err instanceof Error ? err.message : 'วันที่ไม่ถูกต้อง' } };
+  }
+
+  try {
+    const sheets = await getSheetsClient();
+    const title = await resolveSheetTitle(sheets, PROMOTIONS_GID);
+
+    const current = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${title}!A:Z` });
+    const rows = current.data.values ?? [];
+    const header = rows[0] ?? [];
+    const headerAt = (name: string) => header.findIndex((h) => String(h ?? '').trim() === name);
+
+    const skuCol = headerAt(PROMO_SKU_HEADER);
+    if (skuCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${PROMO_SKU_HEADER}" ในชีท` } };
+    const statusCol = headerAt(PROMO_STATUS_HEADER);
+    if (statusCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${PROMO_STATUS_HEADER}" ในชีท` } };
+    const nameCol = headerAt(PROMO_PRODUCT_NAME_HEADER);
+    if (nameCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${PROMO_PRODUCT_NAME_HEADER}" ในชีท` } };
+    const termCol = headerAt(PROMO_TERM_HEADER);
+    if (termCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${PROMO_TERM_HEADER}" ในชีท` } };
+    // These four are optional — some sheets may not have every one of them,
+    // and a missing column just means that particular field is skipped
+    // rather than failing the whole save.
+    const startCol = headerAt(PROMO_START_HEADER);
+    const endCol = headerAt(PROMO_END_HEADER);
+    const priceCol = headerAt(PROMO_PRICE_HEADER);
+    const boxCol = headerAt(PROMO_BOX_PRICE_HEADER);
+    const singleCol = headerAt(PROMO_SINGLE_PRICE_HEADER);
+    const periodCol = headerAt(PROMO_PERIOD_HEADER);
+
+    const wanted = sku.trim();
+    const matches: number[] = [];
+    for (let i = 1; i < rows.length; i++) {
+      if (String(rows[i]?.[skuCol] ?? '').trim() === wanted) matches.push(i + 1); // sheet rows are 1-based
+    }
+    if (matches.length > 1) {
+      return { status: 409, body: { error: `พบ SKU "${wanted}" ซ้ำกัน ${matches.length} แถว (แถว ${matches.join(', ')}) — โปรดแก้ไขในชีทโดยตรง` } };
+    }
+    const isNew = matches.length === 0;
+    const targetRow = isNew ? rows.length + 1 : matches[0];
+
+    // RAW for free text so a SKU/name/term starting with "=" can never be
+    // read as a formula; USER_ENTERED only for the two date cells, so Sheets
+    // parses them the same way a person typing a date in would.
+    const writeCell = async (col: number, value: string | number, valueInputOption: 'RAW' | 'USER_ENTERED' = 'RAW') => {
+      if (col === -1) return;
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: MAIN_SHEET_ID,
+        range: `${title}!${columnLetter(col)}${targetRow}`,
+        valueInputOption,
+        requestBody: { values: [[value]] },
+      });
+    };
+
+    await writeCell(skuCol, wanted);
+    await writeCell(statusCol, 'Active');
+    await writeCell(nameCol, productName.trim());
+    await writeCell(termCol, termText.trim());
+    if (sheetStart !== null) await writeCell(startCol, sheetStart, 'USER_ENTERED');
+    if (sheetEnd !== null) await writeCell(endCol, sheetEnd, 'USER_ENTERED');
+    if (periodDays !== null) await writeCell(periodCol, periodDays);
+    if (typeof promotionPrice === 'number') await writeCell(priceCol, promotionPrice);
+    if (typeof boxPrice === 'number') await writeCell(boxCol, boxPrice);
+    if (typeof singlePrice === 'number') await writeCell(singleCol, singlePrice);
+
+    return { status: 200, body: { ok: true, updatedRow: targetRow, created: isNew } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+    console.error('[promotions/upsert]', message);
     return { status: 500, body: { error: message } };
   }
 }

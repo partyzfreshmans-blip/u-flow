@@ -32,6 +32,23 @@ export interface PromoTier {
   price: number;
 }
 
+/** One packaging level of a promotion priced per packaging unit rather than
+ * by a buy-more-save-more quantity threshold — e.g. a product sold as a
+ * single ชิ้น, a แพ็ค of 4 ชิ้น, and a หีบ of 24 แพ็ค, each at its own flat
+ * price. Distinct from PromoTier: a tier is "buy N+ of the SAME unit, pay
+ * less per unit"; a pack unit is "this is a DIFFERENT packaging size,
+ * naturally priced differently because it contains more/less". */
+export interface PromoPackUnit {
+  /** e.g. 'ชิ้น', 'แพ็ค', 'หีบ'. */
+  label: PromoUnit;
+  /** Flat price for one of this packaging unit. */
+  price: number;
+  /** How many of the next-smaller packaging unit (or how many loose pieces,
+   * for the smallest/base entry) are packed inside one of this unit. E.g.
+   * แพ็ค containing 4 ชิ้น -> qtyPerUnit=4. Always >= 1. */
+  qtyPerUnit: number;
+}
+
 export interface Promo {
   name: string;
   value: string;
@@ -42,8 +59,13 @@ export interface Promo {
   st: PromoStatus;
   /** Unit the promotion price applies to. */
   unit: PromoUnit;
-  /** Volume steps, ascending by minQty. A single-step promo has one entry. */
+  /** Volume steps, ascending by minQty. A single-step promo has one entry.
+   * Used for the "buy more, pay less per unit" style of promo (e.g. ลัง). */
   tiers: PromoTier[];
+  /** Packaging-unit prices (ชิ้น/แพ็ค/หีบ, etc.), when this promo is instead
+   * priced per distinct packaging size rather than by quantity threshold.
+   * Empty when the promo uses `tiers` instead. */
+  packUnits: PromoPackUnit[];
   /** Original free-text term from the sheet, kept verbatim so nothing the
    * parser could not interpret is lost. */
   termText: string;
