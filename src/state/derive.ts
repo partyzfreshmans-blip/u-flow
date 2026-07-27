@@ -1141,6 +1141,9 @@ export function computePlanner(state: AppState, actions: AppActions) {
         updatedAt: now,
         updatedBy: username,
         locked: true,
+        codClosed: false,
+        codClosedAt: '',
+        codClosedBy: '',
       };
       nextBatches = [...nextBatches, batch];
       actions.logActivity('ยืนยันรูท (สร้าง Batch Route)', `${id} · ${veh.name} · ${vehicleOrderNos.length} ออเดอร์ (${vehicleOrderNos.join(', ')})`);
@@ -1389,6 +1392,15 @@ export function computeBatchRouteHistory(state: AppState, actions: AppActions) {
         updatedAtText: formatDateTime(new Date(b.updatedAt).getTime()),
         edited: b.updatedAt !== b.createdAt,
         missingCount: missingOrderNos.length,
+        // COD-clearing status — the same codClosed/codClosedAt/codClosedBy
+        // fields the COD Clearing page's own "ปิดยอดรอบนี้ (batch)" button
+        // writes, so both pages read one shared source of truth.
+        codClosed: b.codClosed,
+        codClosedBy: b.codClosedBy,
+        codClosedAtText: b.codClosedAt ? formatDateTime(new Date(b.codClosedAt).getTime()) : '',
+        // Edited (membership changed) after its COD round was already
+        // closed — same "needs re-checking" signal the COD page itself shows.
+        codEditedAfterClose: b.codClosed && b.updatedAt > b.codClosedAt,
         stops: orders.map((o) => ({
           orderNo: o.orderNo,
           customer: o.customer,
@@ -1551,26 +1563,62 @@ export function computePick(state: AppState, actions: AppActions) {
 }
 
 // ---------- COD ----------
+/** Groups the same per-order COD tracking the Planner page and DriverPage
+ * already read/write (state.routeCodCollected/routeCodMethod) by Batch
+ * Route instead of by driver name — one batch route is exactly one
+ * clearing round, so "closing" here just stamps that batch's own
+ * codClosed/codClosedAt/codClosedBy fields (src/data/batchRoutes.ts), the
+ * same record the Batch Route History page reads for its own status badge. */
 export function computeCod(state: AppState, actions: AppActions) {
-  const codClosed = !!state.codClosed[state.codDriver];
-  const codList = orders.filter((o) => o.cod && o.status === 'delivered' && o.driver === state.codDriver);
+  const role = state.session?.role;
+  const isDriverView = role === 'driver';
+  // A driver only ever sees their own vehicle's batches; everyone else can
+  // optionally narrow the tab list by vehicle via the filter dropdown.
+  const effectiveVehicleFilter = isDriverView ? state.session?.driverVehicleId || 'all' : state.codVehicleFilter;
 
-  let expSum = 0; // everything the driver had to collect, cash + transfer
+  const byOrderNo = new Map(state.routeOrders.map((o) => [o.orderNo, o]));
+
+  const vehicleFilterOptions = Array.from(new Map(state.batchRoutes.map((b) => [b.vehicleId, b.vehicleName])).entries())
+    .map(([id, name]) => ({ id, name }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const visibleBatches = state.batchRoutes
+    .filter((b) => effectiveVehicleFilter === 'all' || b.vehicleId === effectiveVehicleFilter)
+    // Newest first — same ordering as the Batch Route History page.
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
+
+  const selectedBatch = visibleBatches.find((b) => b.id === state.codBatchId) ?? visibleBatches[0] ?? null;
+
+  const batchTabs = visibleBatches.map((b) => ({
+    id: b.id,
+    label: `${b.id} · ${b.vehicleName}`,
+    codClosed: b.codClosed,
+    active: b.id === selectedBatch?.id,
+    go: () => actions.patch({ codBatchId: b.id }),
+  }));
+
+  const batchOrders = selectedBatch
+    ? selectedBatch.orderNos.map((no) => byOrderNo.get(no)).filter((o): o is RouteOrder => o != null)
+    : [];
+  const codOrders = batchOrders.filter((o) => isCodPayment(o.paymentType));
+  const isClosed = selectedBatch?.codClosed ?? false;
+
+  let expSum = 0; // everything this batch had to collect, cash + transfer
   let cashExpected = 0; // the cash portion — the only part handed back
   let transferSum = 0;
   let cashReturned = 0;
 
-  const codRows = codList.map((o) => {
-    const method = state.codMethod[o.id] ?? 'cash';
+  const codRows = codOrders.map((o) => {
+    const method = state.routeCodMethod[o.orderNo] ?? 'cash';
     const isTransfer = method === 'transfer';
-    const ret = state.cod[o.id] ?? '';
+    const ret = state.routeCodCollected[o.orderNo] ?? '';
     const retN = ret === '' ? null : Number(ret);
 
-    expSum += o.amt;
+    expSum += o.totalAmount;
     if (isTransfer) {
-      transferSum += o.amt;
+      transferSum += o.totalAmount;
     } else {
-      cashExpected += o.amt;
+      cashExpected += o.totalAmount;
       cashReturned += retN || 0;
     }
 
@@ -1582,7 +1630,7 @@ export function computeCod(state: AppState, actions: AppActions) {
       diffText = 'โอนแล้ว';
       diffStyle = badgeStyle('info');
     } else if (retN != null) {
-      const diff = retN - o.amt;
+      const diff = retN - o.totalAmount;
       if (diff === 0) {
         diffText = 'ตรง';
         diffStyle = badgeStyle('ok');
@@ -1593,36 +1641,58 @@ export function computeCod(state: AppState, actions: AppActions) {
     }
 
     return {
-      id: o.id,
-      cust: o.cust,
-      expectedText: fmt(o.amt),
+      id: o.orderNo,
+      cust: o.customer,
+      expectedText: fmt(o.totalAmount),
       returned: ret,
       isTransfer,
       isCash: !isTransfer,
       methodLabel: isTransfer ? 'โอน' : 'เงินสด',
-      setCash: () => actions.patch({ codMethod: { ...state.codMethod, [o.id]: 'cash' } }),
-      setTransfer: () => actions.patch({ codMethod: { ...state.codMethod, [o.id]: 'transfer' } }),
+      setCash: () => actions.saveRouteCod(state.routeCodCollected, { ...state.routeCodMethod, [o.orderNo]: 'cash' }),
+      setTransfer: () => actions.saveRouteCod(state.routeCodCollected, { ...state.routeCodMethod, [o.orderNo]: 'transfer' }),
       diffText,
       diffStyle,
-      onInput: (v: string) => actions.patch({ cod: { ...state.cod, [o.id]: v.replace(/[^0-9]/g, '') } }),
+      onInput: (v: string) => actions.saveRouteCod({ ...state.routeCodCollected, [o.orderNo]: v.replace(/[^0-9]/g, '') }, state.routeCodMethod),
     };
   });
 
   // Reconciliation is cash-only; transfers are settled by definition.
   const totalDiff = cashReturned - cashExpected;
-  const codMismatch = totalDiff !== 0 && !codClosed;
+  const codMismatch = totalDiff !== 0 && !isClosed;
   const codDiffText = totalDiff === 0 ? 'ยอดตรง' : (totalDiff > 0 ? 'เกิน +' : 'ขาด −') + fmt(Math.abs(totalDiff));
   const codDiffStyle = totalDiff === 0 ? badgeStyle('ok') : badgeStyle('bad');
   const transferCount = codRows.filter((r) => r.isTransfer).length;
+
+  // A batch edited (orders added/removed via "แก้ไข batch") after its COD
+  // round was already closed — updatedAt only moves forward on a genuine
+  // membership edit (see syncBatchAfterEdit), so this can't false-positive
+  // on an already-closed batch that was simply reopened for viewing.
+  const editedAfterClose = !!selectedBatch && selectedBatch.codClosed && selectedBatch.updatedAt > selectedBatch.codClosedAt;
+
+  const selectedBatchDate = selectedBatch ? dayKeyToDate(selectedBatch.deliveryDate) : null;
 
   return {
     codMobile: state.codMobile,
     codDesktop: !state.codMobile,
     setCodMobile: () => actions.patch({ codMobile: true }),
     setCodDesktop: () => actions.patch({ codMobile: false }),
-    codDriver: state.codDriver,
-    driverTabs: ['สมชาย ป.', 'วิรัช ต.'].map((name) => ({ name, active: state.codDriver === name, go: () => actions.patch({ codDriver: name }) })),
-    codClosed,
+
+    isDriverView,
+    vehicleFilterOptions,
+    vehicleFilter: state.codVehicleFilter,
+    setVehicleFilter: (id: string) => actions.patch({ codVehicleFilter: id, codBatchId: null }),
+
+    batchTabs,
+    hasBatches: state.batchRoutes.length > 0,
+    hasVisibleBatches: visibleBatches.length > 0,
+
+    selectedBatchId: selectedBatch?.id ?? null,
+    selectedBatchLabel: selectedBatch ? `${selectedBatch.id} · ${selectedBatch.vehicleName}` : '',
+    selectedBatchDateText: selectedBatch ? (selectedBatchDate ? formatThaiShortDate(selectedBatchDate) : selectedBatch.deliveryDate) : '',
+    hasCodOrders: codOrders.length > 0,
+
+    codClosed: isClosed,
+    editedAfterClose,
     codRows,
     codExpectedText: fmt(expSum),
     cashExpectedText: fmt(cashExpected),
@@ -1633,7 +1703,11 @@ export function computeCod(state: AppState, actions: AppActions) {
     codMismatch,
     codDiffText,
     codDiffStyle,
-    closeBatch: () => actions.patch({ codClosed: { ...state.codClosed, [state.codDriver]: true } }),
+    closeBatch: () => {
+      if (!selectedBatch || selectedBatch.codClosed) return;
+      const detail = `${selectedBatch.vehicleName} · เก็บสด ${fmt(cashReturned)}/${fmt(cashExpected)}${transferCount > 0 ? ` · โอน ${fmt(transferSum)}` : ''}`;
+      actions.closeBatchCod(selectedBatch.id, state.batchRoutes, detail);
+    },
   };
 }
 

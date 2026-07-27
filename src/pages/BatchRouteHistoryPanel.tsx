@@ -47,6 +47,15 @@ export function BatchRouteHistoryPanel({ state, actions }: { state: AppState; ac
                   ) : null}
                   <span style={{ fontSize: 11.5, color: b.deliveredCount === b.orderCount ? 'var(--st-ok-fg)' : 'var(--color-neutral-400)' }}>ส่งแล้ว {b.deliveredText}</span>
                   {b.edited && <span style={{ fontSize: 10.5, padding: '2px 7px', borderRadius: 6, background: 'var(--st-info-bg)', color: 'var(--st-info-fg)' }}>แก้ไขแล้ว</span>}
+                  <span style={{ fontSize: 10.5, padding: '2px 7px', borderRadius: 6, background: b.codClosed ? 'var(--st-ok-bg)' : 'var(--st-warn-bg)', color: b.codClosed ? 'var(--st-ok-fg)' : 'var(--st-warn-fg)' }}>
+                    <i className={b.codClosed ? 'ph ph-check-circle-fill' : 'ph ph-circle-dashed'} style={{ marginRight: 3 }} />
+                    {b.codClosed ? 'ปิดยอด COD แล้ว' : 'ยังไม่ปิดยอด COD'}
+                  </span>
+                  {b.codEditedAfterClose && (
+                    <span style={{ fontSize: 10.5, padding: '2px 7px', borderRadius: 6, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)' }} title="แก้ไข batch หลังปิดยอดแล้ว — ยอด COD อาจไม่ตรง ต้องตรวจสอบใหม่">
+                      ยอด COD อาจไม่ตรง
+                    </span>
+                  )}
                   {b.missingCount > 0 && (
                     <span style={{ fontSize: 10.5, padding: '2px 7px', borderRadius: 6, background: 'var(--st-warn-bg)', color: 'var(--st-warn-fg)' }} title="ออเดอร์บางรายการไม่พบในชีทปัจจุบันแล้ว">
                       ไม่พบ {b.missingCount} ออเดอร์
@@ -61,6 +70,7 @@ export function BatchRouteHistoryPanel({ state, actions }: { state: AppState; ac
                       <span>สร้างโดย {b.createdBy || '—'} · {b.createdAtText}</span>
                       {b.edited && <span>แก้ไขล่าสุดโดย {b.updatedBy || '—'} · {b.updatedAtText}</span>}
                       {b.hasCodTransfer && <span>โอน {b.codTransferText}</span>}
+                      {b.codClosed && <span>ปิดยอด COD โดย {b.codClosedBy || '—'} · {b.codClosedAtText}</span>}
                     </div>
                     <table className="table">
                       <thead>

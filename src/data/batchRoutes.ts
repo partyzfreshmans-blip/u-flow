@@ -22,16 +22,28 @@ export interface BatchRoute {
   updatedBy: string;
   /** true = sequence/membership locked; edits require unlocking first. */
   locked: boolean;
+  /** Set by the COD Clearing page's "ปิดยอดรอบนี้ (batch)" button — one
+   * batch route is exactly one COD clearing round. */
+  codClosed: boolean;
+  codClosedAt: string; // ISO timestamp, '' until closed
+  codClosedBy: string; // username, '' until closed
 }
 
 const STORAGE_KEY = 'warehouse-ops.batchRoutes.v1';
+
+/** Older persisted batches predate the codClosed/codClosedAt/codClosedBy
+ * fields — default them to "never closed" rather than leaving them
+ * undefined, so every reader can rely on the fields always being present. */
+function normalize(b: BatchRoute): BatchRoute {
+  return { ...b, codClosed: b.codClosed ?? false, codClosedAt: b.codClosedAt ?? '', codClosedBy: b.codClosedBy ?? '' };
+}
 
 export function loadBatchRoutes(): BatchRoute[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as BatchRoute[]) : [];
+    return Array.isArray(parsed) ? (parsed as BatchRoute[]).map(normalize) : [];
   } catch {
     return [];
   }

@@ -178,15 +178,15 @@ export interface AppState {
   /** null = order-selection / open-lots screen. */
   activePickLotId: string | null;
 
-  // COD
-  codDriver: string;
+  // COD clearing — scoped by Batch Route (one batch = one clearing round),
+  // reusing the same routeCodCollected/routeCodMethod state the Planner page
+  // and DriverPage already read/write per order; this page just groups that
+  // same data by which batch each order belongs to.
+  /** Selected batch tab; null = auto-pick the newest one in view. */
+  codBatchId: string | null;
+  /** vehicleId, or 'all' — narrows which batches' tabs are shown. */
+  codVehicleFilter: string;
   codMobile: boolean;
-  cod: Record<string, string>;
-  /** How each order's COD was actually settled. Cash has to be physically
-   * handed back at clearing; a transfer is already in the company account,
-   * so it is reconciled but never counted as cash owed. Defaults to cash. */
-  codMethod: Record<string, 'cash' | 'transfer'>;
-  codClosed: Record<string, boolean>;
 
   // promo ("โปรโมชั่น" tab, Active rows only; "create promotion" flow is local)
   promos: Promo[];
@@ -380,11 +380,9 @@ export const initialState: AppState = {
   pickCreateError: null,
   pickLots: [],
   activePickLotId: null,
-  codDriver: 'สมชาย ป.',
+  codBatchId: null,
+  codVehicleFilter: 'all',
   codMobile: false,
-  cod: { 'OD-6004': '3380', 'OD-6009': '3900', 'OD-6006': '1980', 'OD-6007': '7450' },
-  codMethod: {},
-  codClosed: {},
 
   promos: [],
   promosLoading: true,
@@ -972,6 +970,22 @@ export function useAppStore() {
       saveRouteCod: (collected: Record<string, string>, method: Record<string, 'cash' | 'transfer'>) => {
         saveRouteCodState({ collected, method });
         dispatch({ type: 'patch', patch: { routeCodCollected: collected, routeCodMethod: method } });
+      },
+      /** COD Clearing page's "ปิดยอดรอบนี้ (batch)" — one Batch Route is one
+       * clearing round, so this just stamps that batch's own record (no
+       * separate closed-status system) and logs it, same as every other
+       * batch-route edit. Takes the current batchRoutes as a parameter (from
+       * derive.ts, which always has fresh state) rather than reading it off
+       * this memoized closure, same reasoning as every other action here. */
+      closeBatchCod: (batchId: string, batchRoutes: BatchRoute[], detail: string) => {
+        const batch = batchRoutes.find((b) => b.id === batchId);
+        if (!batch || batch.codClosed) return;
+        const now = new Date().toISOString();
+        const username = loadSession()?.username ?? '';
+        const next = batchRoutes.map((b) => (b.id === batchId ? { ...b, codClosed: true, codClosedAt: now, codClosedBy: username } : b));
+        saveBatchRoutes(next);
+        dispatch({ type: 'patch', patch: { batchRoutes: next } });
+        logActivity('ปิดยอดเคลียร์เงิน COD (batch)', `${batchId} · ${detail}`);
       },
 
       /** Upload to Drive via the backend, then record the returned metadata.
