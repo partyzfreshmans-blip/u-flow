@@ -747,13 +747,24 @@ export function computePlanner(state: AppState, actions: AppActions) {
     }
   }
 
-  const unassigned = (isDriverView ? [] : candidates)
-    .filter((o) => !assignedTo.has(o.orderNo))
+  const unassignedCandidates = (isDriverView ? [] : candidates).filter((o) => !assignedTo.has(o.orderNo));
+  // Same customer placing several separate orders isn't rare (case in point:
+  // the screenshot that prompted this) — flagging repeats saves someone
+  // routing manually from having to notice it themselves row by row.
+  const unassignedCustomerCounts = new Map<string, number>();
+  for (const o of unassignedCandidates) {
+    const key = o.customer.trim();
+    if (!key) continue;
+    unassignedCustomerCounts.set(key, (unassignedCustomerCounts.get(key) ?? 0) + 1);
+  }
+
+  const unassigned = unassignedCandidates
     .map((o) => {
       const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
       return {
         orderNo: o.orderNo,
         customer: o.customer,
+        duplicateCustomer: (unassignedCustomerCounts.get(o.customer.trim()) ?? 0) > 1,
         address: o.addressFromUnii || o.districtProvince,
         districtProvince: o.districtProvince || '—',
         phone: o.phone || '—',
@@ -770,6 +781,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
         wantsTaxInvoice: o.wantsTaxInvoice,
         note: o.note,
         hasNote: o.note.trim() !== '',
+        noteText: o.note.trim() || '—',
         lat: o.lat,
         lng: o.lng,
         selected: state.plannerSelectedOrderNos.includes(o.orderNo),

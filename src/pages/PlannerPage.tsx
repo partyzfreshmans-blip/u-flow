@@ -411,7 +411,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                     <th style={{ width: 30 }}>
                       <input type="checkbox" checked={v.allUnassignedSelected} onChange={v.toggleSelectAllUnassigned} />
                     </th>
-                    <th>ลูกค้า / ที่อยู่</th><th>อำเภอ, จังหวัด</th><th>เบอร์โทร</th><th>ผู้จัด</th><th>วันที่จะจัดส่ง</th><th>โซน</th><th>จำนวน</th><th style={{ textAlign: 'right' }}>ยอดเงิน</th>
+                    <th>ลูกค้า / ที่อยู่</th><th>อำเภอ, จังหวัด</th><th>เบอร์โทร</th><th>ผู้จัด</th><th>วันที่จะจัดส่ง</th><th>หมายเหตุ</th><th>จำนวน</th><th style={{ textAlign: 'right' }}>ยอดเงิน</th>
                     <th style={{ textAlign: 'right' }}>ระยะ</th><th style={{ width: 150 }}>จัดลงรถ</th><th></th>
                   </tr>
                 </thead>
@@ -421,7 +421,16 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                       <td><input type="checkbox" checked={o.selected} onChange={o.toggleSelect} /></td>
                       <td>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                          {o.customer}
+                          {o.duplicateCustomer ? (
+                            <span
+                              style={{ padding: '1px 6px', borderRadius: 5, background: 'var(--st-warn-bg)', color: 'var(--st-warn-fg)', fontWeight: 600 }}
+                              title="ลูกค้าคนนี้มีมากกว่า 1 ออเดอร์ในรายการนี้"
+                            >
+                              {o.customer}
+                            </span>
+                          ) : (
+                            o.customer
+                          )}
                           {o.wantsTaxInvoice && (
                             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, padding: '2px 7px', borderRadius: 6, background: 'var(--st-info-bg)', color: 'var(--st-info-fg)', whiteSpace: 'nowrap' }}>
                               <i className="ph ph-receipt" />ต้องการใบกำกับ
@@ -443,10 +452,8 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                       <td style={{ fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.phone}</td>
                       <td style={{ fontSize: 11.5, color: o.packedBy === 'ยังไม่จัด' ? 'var(--color-neutral-600)' : 'var(--color-neutral-300)', whiteSpace: 'nowrap' }}>{o.packedBy}</td>
                       <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>{o.plannedDeliveryDateText}</td>
-                      <td>
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, whiteSpace: 'nowrap' }}>
-                          <span style={{ width: 9, height: 9, borderRadius: '50%', background: o.zoneColor, flex: 'none' }} />{o.zoneName}
-                        </span>
+                      <td style={{ fontSize: 11.5, color: o.hasNote ? 'var(--color-neutral-200)' : 'var(--color-neutral-600)', maxWidth: 200, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={o.hasNote ? o.note : undefined}>
+                        {o.noteText}
                       </td>
                       <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>{o.qtyText}</td>
                       <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{o.amtText}</td>
