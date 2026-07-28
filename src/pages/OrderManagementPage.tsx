@@ -74,7 +74,7 @@ function OrderTable({
         <thead>
           <tr>
             {canEdit && <th style={{ width: 26 }}><input type="checkbox" checked={allSelected} onChange={toggleSelectAll} /></th>}
-            <th>Route</th><th style={{ textAlign: 'center' }}>โซนที่ควรเป็น</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th>Batch Route</th><th style={{ textAlign: 'right' }}>ยอดขาย</th>
+            <th>Route</th><th>อำเภอ, จังหวัด</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th>Batch Route</th><th style={{ textAlign: 'right' }}>ยอดขาย</th>
             <th style={{ textAlign: 'center' }}>รายการ</th><th>วันเวลาที่สั่ง</th><th style={{ minWidth: 168 }}>วันที่จะจัดส่ง</th><th>หมายเหตุ</th><th style={{ textAlign: 'center' }}>ใบกำกับภาษี</th><th style={{ textAlign: 'center' }}>โปรโมชั่น</th><th>สถานะ</th><th></th>
           </tr>
         </thead>
@@ -83,22 +83,7 @@ function OrderTable({
             <tr key={r.orderNo}>
               {canEdit && <td><input type="checkbox" checked={r.selected} onChange={r.toggleSelect} /></td>}
               <td><span style={{ display: 'inline-flex', fontSize: 11, padding: '2px 8px', borderRadius: 5, background: 'var(--color-neutral-800)', color: 'var(--color-neutral-200)' }}>{r.route}</span></td>
-              <td style={{ textAlign: 'center' }} title={r.zoneReason}>
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, whiteSpace: 'nowrap' }}>
-                  <span style={{ width: 9, height: 9, borderRadius: '50%', background: r.zoneColor, flex: 'none' }} />
-                  {r.zoneName}
-                  {r.zoneSource === 'geocoded' ? (
-                    <i className="ph ph-map-pin-fill" style={{ fontSize: 10, color: 'var(--st-ok-fg)' }} title="ระบุจากพิกัด (แม่นยำ)" />
-                  ) : (
-                    <i className="ph ph-map-pin-line" style={{ fontSize: 10, color: 'var(--color-neutral-500)' }} title="เดาจากข้อความที่อยู่ (ยังไม่มีพิกัด/รอระบุพื้นที่)" />
-                  )}
-                </span>
-                {r.zoneMismatch && (
-                  <div style={{ fontSize: 10, color: 'var(--st-warn-fg)', marginTop: 2, whiteSpace: 'nowrap' }}>
-                    <i className="ph ph-warning" style={{ marginRight: 3 }} />ไม่ตรงกับชีท
-                  </div>
-                )}
-              </td>
+              <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>{r.districtProvince}</td>
               <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 500 }}>{r.orderNo}</td>
               <td>
                 {r.customer}
@@ -257,27 +242,6 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12, alignItems: 'center' }}>
         <span style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginRight: 2 }}>สถานะ</span>
         {v.statusTabs.map((t) => <button key={t.key} style={t.style} onClick={t.go}>{t.label}</button>)}
-      </div>
-
-      <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', padding: '10px 14px', marginBottom: 16, borderRadius: 10, background: 'var(--color-surface)', boxShadow: 'var(--shadow-sm)', fontSize: 12 }}>
-        <span style={{ fontWeight: 600 }}><i className="ph ph-path" style={{ marginRight: 6, color: 'var(--color-accent-300)' }} />โซนจัดส่ง</span>
-        {v.zoneLegend.map((z) => (
-          <span key={z.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-            <span style={{ width: 10, height: 10, borderRadius: '50%', background: z.color, flex: 'none' }} />
-            {z.name} · {z.count}
-          </span>
-        ))}
-        {v.unzonedCount > 0 && (
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: 'var(--color-neutral-500)' }} title="ที่อยู่อยู่นอกโซนที่ตั้งไว้">
-            <span style={{ width: 10, height: 10, borderRadius: '50%', background: v.unassignedColor, flex: 'none' }} />
-            นอกพื้นที่ · {v.unzonedCount}
-          </span>
-        )}
-        {v.mismatchCount > 0 && (
-          <span style={{ marginLeft: 'auto', color: 'var(--st-warn-fg)' }}>
-            <i className="ph ph-warning" style={{ marginRight: 4 }} />ชีทระบุไม่ตรงกับโซน {v.mismatchCount} รายการ
-          </span>
-        )}
       </div>
 
       {v.canArchive && v.selectedCount > 0 && (

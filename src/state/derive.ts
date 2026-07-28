@@ -6,6 +6,7 @@ import { lineDiff, lineNetTotal, receivingFolderKey, recordHasDiscrepancy, recor
 import { loadCode } from '../data/vehicles';
 import { nextBatchId, type BatchRoute } from '../data/batchRoutes';
 import { resolveZone, UNASSIGNED_COLOR } from '../data/zoneConfig';
+import { coordKey, type GeocodeCache } from '../data/geocodeCache';
 import { avgPricePerPiece, detectUnit } from '../data/sources/promotionsSheet';
 import { addDays, dayKey, dayKeyToDate, daysBetweenKeys, formatOrderedAt, formatThaiShortDate, formatThaiWeekdayDate, sheetDateTimeToMs, sheetDateToDayKey, suggestedDeliveryDayKey, todayDayKey } from '../data/dateUtils';
 import { badgeStyle, DELIVERY_DONE_STATUSES, fmt, sheetStatusStyle } from './helpers';
@@ -45,6 +46,21 @@ function qtyTextForOrder(map: Map<string, Partial<Record<'ชิ้น' | 'แ�
   if (!m) return '—';
   const parts = (['ชิ้น', 'แพ็ค', 'ลัง'] as const).map((u) => (m[u] ? `${m[u]!.toLocaleString('en-US')} ${u}` : null)).filter((s): s is string => s !== null);
   return parts.length > 0 ? parts.join(' · ') : '—';
+}
+
+/** "อำเภอ, จังหวัด" display value for the Order Management table — prefers a
+ * real reverse-geocoded result (see src/data/geocodeCache.ts) off the same
+ * coordinate/cache the zone matcher already reads, since that's more
+ * accurate than whatever the sheet's own column carries; falls back to that
+ * sheet column when no geocode is cached yet, then "-" if that's blank too. */
+function districtProvinceLabel(order: { lat: number | null; lng: number | null; districtProvince: string }, geocodeCache: GeocodeCache): string {
+  if (order.lat != null && order.lng != null) {
+    const entry = geocodeCache[coordKey(order.lat, order.lng)];
+    if (entry && (entry.district.trim() || entry.province.trim())) {
+      return [entry.district.trim(), entry.province.trim()].filter(Boolean).join(', ');
+    }
+  }
+  return order.districtProvince.trim() || '-';
 }
 
 /** Orders whose delivery date has already passed without reaching a done
@@ -451,13 +467,24 @@ export function computeRoute(state: AppState, actions: AppActions) {
   const archivedCount = state.routeOrders.filter((o) => o.archived).length;
   const canArchive = state.session ? canEditOrder(state.session.role) : false;
 
+  // Cancelled orders clutter the default view (most of what staff need to
+  // act on is never "ยกเลิก"), so the "ทั้งหมด" status tab excludes them —
+  // only picking the "ยกเลิก" tab itself reveals them. statusValues (which
+  // decides which tabs even exist) is still built off visibleOrders, not
+  // workingOrders, so the "ยกเลิก" tab keeps showing up as a choice; every
+  // count/filter-option/table below this point, though, runs off
+  // workingOrders so nothing quietly still counts hidden cancelled rows into
+  // a "total" figure.
+  const CANCELLED_STATUS = 'ยกเลิก';
+  const workingOrders = visibleOrders.filter((o) => (state.routeStatusFilter === CANCELLED_STATUS ? o.status === CANCELLED_STATUS : o.status !== CANCELLED_STATUS));
+
   const statusValues = Array.from(new Set(visibleOrders.map((o) => o.status).filter(Boolean))).sort();
   // อำเภอ,จังหวัด has far more distinct values than the old route-letter
   // filter did — a dropdown, not a chip row, is what keeps that many options
   // usable (chips only make sense for a handful of values).
-  const districtProvinceValues = Array.from(new Set(visibleOrders.map((o) => o.districtProvince.trim()).filter(Boolean))).sort();
+  const districtProvinceValues = Array.from(new Set(workingOrders.map((o) => o.districtProvince.trim()).filter(Boolean))).sort();
 
-  const filtered = visibleOrders.filter((o) => {
+  const filtered = workingOrders.filter((o) => {
     if (state.routeFilterValue !== 'all') {
       const dp = o.districtProvince.trim();
       if (state.routeFilterValue === 'other' ? dp !== '' : dp !== state.routeFilterValue) return false;
@@ -476,7 +503,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
   const makeTabs = (values: string[], selected: string, onSelect: (v: string) => void) =>
     ['all', ...values].map((v) => ({
       key: v,
-      label: v === 'all' ? 'ทั้งหมด' : v,
+      label: v === 'all' ? 'ทั้งหมด (ไม่รวมยกเลิก)' : v,
       style:
         v === selected
           ? { ...chipBase, background: 'var(--color-accent)', color: '#fff' }
@@ -484,10 +511,10 @@ export function computeRoute(state: AppState, actions: AppActions) {
       go: () => onSelect(v),
     }));
 
-  const countForDistrict = (dp: string) => visibleOrders.filter((o) => o.districtProvince.trim() === dp).length;
-  const noDistrictCount = visibleOrders.filter((o) => o.districtProvince.trim() === '').length;
+  const countForDistrict = (dp: string) => workingOrders.filter((o) => o.districtProvince.trim() === dp).length;
+  const noDistrictCount = workingOrders.filter((o) => o.districtProvince.trim() === '').length;
   const districtProvinceOptions = [
-    { value: 'all', label: `ทั้งหมด (${visibleOrders.length})` },
+    { value: 'all', label: `ทั้งหมด (${workingOrders.length})` },
     ...districtProvinceValues.map((dp) => ({ value: dp, label: `${dp} (${countForDistrict(dp)})` })),
     ...(noDistrictCount > 0 ? [{ value: 'other', label: `ไม่ระบุ (${noDistrictCount})` }] : []),
   ];
@@ -523,7 +550,6 @@ export function computeRoute(state: AppState, actions: AppActions) {
   }
 
   const rows = filtered.map((o) => {
-    const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
     const batchStamp = batchStampByOrderNo.get(o.orderNo) ?? null;
     const skusForOrder = orderSkus.get(o.orderNo);
     const hasPromoItem = skusForOrder ? Array.from(skusForOrder).some((sku) => activePromoSkus.has(sku)) : false;
@@ -542,11 +568,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
       );
     return {
       route: routeZoneLetter(o.route) || '—',
-      zoneName: zone.zoneName,
-      zoneColor: zone.color,
-      zoneReason: zone.reason,
-      zoneSource: zone.source,
-      zoneMismatch: zone.route !== '—' && routeZoneLetter(o.route) !== '' && routeZoneLetter(o.route) !== zone.route,
+      districtProvince: districtProvinceLabel(o, state.geocodeCache),
       orderNo: o.orderNo,
       archived: o.archived,
       selected: state.routeSelectedOrderNos.includes(o.orderNo),
@@ -582,15 +604,6 @@ export function computeRoute(state: AppState, actions: AppActions) {
       batchAssignedAtText: batchStamp ? formatThaiShortDate(new Date(batchStamp.createdAt)) : null,
     };
   });
-
-  const zoneLegend = state.zoneRules.map((z) => ({
-    id: z.id,
-    name: z.name,
-    color: z.color,
-    count: filtered.filter((o) => resolveZone(state.zoneRules, o, state.geocodeCache).zoneId === z.id).length,
-  }));
-  const unzonedCount = filtered.filter((o) => resolveZone(state.zoneRules, o, state.geocodeCache).zoneId === null).length;
-  const mismatchCount = rows.filter((r) => r.zoneMismatch).length;
 
   // Split into two groups so warehouse staff can see at a glance which
   // orders still need a delivery date scheduled, separate from ones already
@@ -640,10 +653,6 @@ export function computeRoute(state: AppState, actions: AppActions) {
     rowsWithDate,
     resultCount: filtered.length,
     isEmpty: filtered.length === 0,
-    zoneLegend,
-    unzonedCount,
-    unassignedColor: UNASSIGNED_COLOR,
-    mismatchCount,
     stuckOrders,
     stuckCount: stuckOrders.length,
 
