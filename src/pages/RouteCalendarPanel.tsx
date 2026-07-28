@@ -38,9 +38,11 @@ export function RouteCalendarPanel({ state, actions }: { state: AppState; action
     setMonth(now.getMonth());
   };
 
+  /** This panel now lives on the Dashboard page, so jumping to a batch's full
+   * record also has to switch pages (route: 'planner'), not just the tab. */
   const openBatchInHistory = (batchId: string) => {
     setSelectedDayKey(null);
-    actions.patch({ plannerTab: 'history', batchRouteQ: batchId });
+    actions.patch({ route: 'planner', plannerTab: 'history', batchRouteQ: batchId });
   };
 
   return (
@@ -68,7 +70,7 @@ export function RouteCalendarPanel({ state, actions }: { state: AppState; action
                     onClick={() => d.hasData && setSelectedDayKey(d.dayKey)}
                     disabled={!d.hasData}
                     style={{
-                      textAlign: 'left', padding: '7px 8px', minHeight: 86, borderRadius: 9,
+                      textAlign: 'left', padding: '7px 8px', minHeight: 128, borderRadius: 9,
                       border: 0, cursor: d.hasData ? 'pointer' : 'default', fontFamily: 'var(--font-body)',
                       background: d.isToday ? 'var(--color-accent-900)' : d.inMonth ? 'var(--color-bg)' : 'transparent',
                       boxShadow: d.isToday ? 'inset 0 0 0 1px var(--color-accent-700)' : d.hasData ? 'inset 0 0 0 1px var(--color-divider)' : 'none',
@@ -82,6 +84,10 @@ export function RouteCalendarPanel({ state, actions }: { state: AppState; action
                         <span style={{ fontSize: 10.5, color: 'var(--color-neutral-400)' }}>{d.orderCount} ออเดอร์ · {d.batchCount} batch</span>
                         <span style={{ fontSize: 10.5, color: 'var(--color-neutral-300)', fontVariantNumeric: 'tabular-nums' }}>{d.totalText}</span>
                         <span style={{ fontSize: 9.5, color: 'var(--color-neutral-500)' }}>สด {d.cashText} · โอน {d.transferText}</span>
+                        <span style={{ fontSize: 9.5, color: 'var(--color-neutral-500)' }}>prepaid {d.prepaidText} · รถ {d.vehicleCount} คัน</span>
+                        {d.statusSummaryText && (
+                          <span style={{ fontSize: 9.5, color: 'var(--color-neutral-500)', whiteSpace: 'normal', lineHeight: 1.3 }}>{d.statusSummaryText}</span>
+                        )}
                       </>
                     )}
                   </button>
@@ -116,6 +122,16 @@ export function RouteCalendarPanel({ state, actions }: { state: AppState; action
                     </div>
                   </>
                 )}
+                {detail.hasPrepaid && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                    <span style={{ color: 'var(--color-neutral-500)' }} title="จ่ายล่วงหน้าผ่านระบบ Unii ก่อนหน้านี้แล้ว — ไม่ใช่เงินที่คนขับต้องเก็บ"><i className="ph ph-credit-card" style={{ marginRight: 4 }} />โอนจ่าย prepaid (ไม่ใช่ COD)</span>
+                    <span style={{ fontVariantNumeric: 'tabular-nums' }}>{detail.prepaidText}</span>
+                  </div>
+                )}
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                  <span style={{ color: 'var(--color-neutral-500)' }}><i className="ph ph-truck" style={{ marginRight: 4 }} />จำนวนรถที่ใช้งาน</span>
+                  <span>{detail.vehicleCount} คัน</span>
+                </div>
                 {detail.unassignedCount > 0 && (
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
                     <span style={{ color: 'var(--st-warn-fg)' }}><i className="ph ph-warning" style={{ marginRight: 4 }} />ยังไม่จัดลงรถ</span>
@@ -123,6 +139,20 @@ export function RouteCalendarPanel({ state, actions }: { state: AppState; action
                   </div>
                 )}
               </div>
+
+              {detail.statusBreakdown.length > 0 && (
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, color: 'var(--color-neutral-400)' }}>สถานะออเดอร์</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {detail.statusBreakdown.map((s) => (
+                      <div key={s.status} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                        <span style={{ color: 'var(--color-neutral-400)' }}>{s.status}</span>
+                        <b>{s.count}</b>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div>
                 <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, color: 'var(--color-neutral-400)' }}>Batch Route ({detail.batches.length})</div>

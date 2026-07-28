@@ -245,6 +245,8 @@ export function computeDashboard(state: AppState, actions: AppActions) {
   return {
     apiOrdersLoading: state.apiOrdersLoading,
     apiOrdersError: state.apiOrdersError,
+    dashboardTab: state.dashboardTab,
+    setDashboardTab: (tab: 'overview' | 'calendar') => actions.patch({ dashboardTab: tab }),
     q: state.q,
     onSearch: (v: string) => actions.patch({ q: v }),
     resultCount: list.length,
@@ -1345,7 +1347,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
 
     // Batch Route — "Assign"/"ยืนยันรูท" confirmation step
     plannerTab: state.plannerTab,
-    setPlannerTab: (tab: 'plan' | 'history' | 'calendar') => actions.patch({ plannerTab: tab }),
+    setPlannerTab: (tab: 'plan' | 'history') => actions.patch({ plannerTab: tab }),
     canAssign: canEdit && !!state.plannerDate,
     assignDialogOpen: state.assignDialogOpen,
     assignableVehicles: assignableVehicles.map((v) => ({ id: v.id, name: v.name, stopCount: v.stopCount, totalText: v.totalText })),
@@ -1567,6 +1569,15 @@ export interface RouteCalendarDay {
   totalText: string;
   cashText: string;
   transferText: string;
+  /** Prepaid (non-COD, already settled via Unii before delivery) total —
+   * distinct from the COD "โอน" figure above, which is COD money the driver
+   * collects by transfer at the door. */
+  prepaidText: string;
+  /** Distinct vehicles with a confirmed batch for this day (0 if none assigned yet). */
+  vehicleCount: number;
+  /** Top 2-3 statuses by order count, formatted for the small calendar cell
+   * (e.g. "ส่งสำเร็จ 12 · กำลังจัดส่ง 3") — the popup shows every status. */
+  statusSummaryText: string;
 }
 
 /** Month grid + per-day summary (order count, batch count, cash/transfer
@@ -1600,14 +1611,31 @@ export function computeRouteCalendar(state: AppState, year: number, month: numbe
     let totalSales = 0;
     let cashExpected = 0;
     let transferTotal = 0;
+    // Prepaid = anything NOT flagged COD. This app's only payment-type
+    // signal is the sheet's "การจ่ายเงิน" column (see isCodPayment) — it
+    // already reads as a binary "collect at the door" vs "already settled"
+    // split, so no separate sheet field is needed to know this figure; a
+    // dedicated prepaid/paid-status column would only be worth adding if a
+    // future paymentType value stops mapping cleanly to one side or the other.
+    let prepaidTotal = 0;
+    const statusCounts = new Map<string, number>();
     for (const o of dayOrders) {
       totalSales += o.totalAmount;
-      if (!isCodPayment(o.paymentType)) continue;
-      const method = state.routeCodMethod[o.orderNo] ?? 'cash';
-      if (method === 'transfer') transferTotal += o.totalAmount;
-      else cashExpected += o.totalAmount;
+      const statusLabel = o.status || 'ไม่ระบุสถานะ';
+      statusCounts.set(statusLabel, (statusCounts.get(statusLabel) ?? 0) + 1);
+      if (isCodPayment(o.paymentType)) {
+        const method = state.routeCodMethod[o.orderNo] ?? 'cash';
+        if (method === 'transfer') transferTotal += o.totalAmount;
+        else cashExpected += o.totalAmount;
+      } else {
+        prepaidTotal += o.totalAmount;
+      }
     }
-    return { dayOrders, dayBatches, totalSales, cashExpected, transferTotal };
+    const vehicleCount = new Set(dayBatches.map((b) => b.vehicleId)).size;
+    const statusBreakdown = Array.from(statusCounts.entries())
+      .map(([status, count]) => ({ status, count }))
+      .sort((a, b) => b.count - a.count);
+    return { dayOrders, dayBatches, totalSales, cashExpected, transferTotal, prepaidTotal, vehicleCount, statusBreakdown };
   };
 
   const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -1618,7 +1646,7 @@ export function computeRouteCalendar(state: AppState, year: number, month: numbe
   for (let i = 0; i < totalCells; i++) {
     const d = new Date(year, month, 1 - firstWeekday + i);
     const key = dayKey(d);
-    const { dayOrders, dayBatches, totalSales, cashExpected, transferTotal } = daySummary(key);
+    const { dayOrders, dayBatches, totalSales, cashExpected, transferTotal, prepaidTotal, vehicleCount, statusBreakdown } = daySummary(key);
     allDays.push({
       dayKey: key,
       dayNum: d.getDate(),
@@ -1630,6 +1658,12 @@ export function computeRouteCalendar(state: AppState, year: number, month: numbe
       totalText: fmt(totalSales),
       cashText: fmt(cashExpected),
       transferText: fmt(transferTotal),
+      prepaidText: fmt(prepaidTotal),
+      vehicleCount,
+      statusSummaryText: statusBreakdown
+        .slice(0, 3)
+        .map((s) => `${s.status} ${s.count}`)
+        .join(' · '),
     });
   }
 
@@ -1639,7 +1673,7 @@ export function computeRouteCalendar(state: AppState, year: number, month: numbe
   /** Full popup detail for one day, computed on demand (only when a day is
    * actually clicked) rather than for all ~35 cells up front. */
   const dayDetail = (key: string) => {
-    const { dayOrders, dayBatches, totalSales, cashExpected, transferTotal } = daySummary(key);
+    const { dayOrders, dayBatches, totalSales, cashExpected, transferTotal, prepaidTotal, vehicleCount, statusBreakdown } = daySummary(key);
     const unassignedCount = dayOrders.filter((o) => !assignedOrderNos.has(o.orderNo)).length;
     const d = dayKeyToDate(key);
     return {
@@ -1651,6 +1685,10 @@ export function computeRouteCalendar(state: AppState, year: number, month: numbe
       cashText: fmt(cashExpected),
       transferText: fmt(transferTotal),
       hasCod: cashExpected > 0 || transferTotal > 0,
+      prepaidText: fmt(prepaidTotal),
+      hasPrepaid: prepaidTotal > 0,
+      vehicleCount,
+      statusBreakdown,
       batches: dayBatches
         .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
         .map((b) => ({

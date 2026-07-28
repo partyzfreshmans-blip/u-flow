@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { OrderDetailModal } from '../components/OrderDetailModal';
 import { computeDashboard } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
+import { RouteCalendarPanel } from './RouteCalendarPanel';
 
 type DashboardRow = ReturnType<typeof computeDashboard>['orders'][number];
 
@@ -94,6 +95,19 @@ export function DashboardPage({ state, actions }: { state: AppState; actions: Ap
         </div>
       )}
 
+      <div className="seg" style={{ marginBottom: 16, width: 'fit-content' }}>
+        <label className="seg-opt">
+          <input type="radio" name="dashboardTab" checked={v.dashboardTab === 'overview'} onChange={() => v.setDashboardTab('overview')} /><i className="ph ph-squares-four" />ภาพรวม
+        </label>
+        <label className="seg-opt">
+          <input type="radio" name="dashboardTab" checked={v.dashboardTab === 'calendar'} onChange={() => v.setDashboardTab('calendar')} /><i className="ph ph-calendar-blank" />Route Calendar
+        </label>
+      </div>
+
+      {v.dashboardTab === 'calendar' ? (
+        <RouteCalendarPanel state={state} actions={actions} />
+      ) : (
+        <>
       <div className="card elev-sm" style={{ marginBottom: 22, gap: 10 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <span style={{ fontWeight: 600, fontSize: 14 }}><i className="ph ph-calendar-check" style={{ marginRight: 6, color: 'var(--color-accent-300)' }} />พยากรณ์ 7 วันข้างหน้า</span>
@@ -155,6 +169,8 @@ export function DashboardPage({ state, actions }: { state: AppState; actions: Ap
           <div style={{ padding: 26, textAlign: 'center', color: 'var(--color-neutral-500)', fontSize: 12.5 }}>ไม่พบออเดอร์ที่ตรงกับตัวกรอง</div>
         )}
       </div>
+        </>
+      )}
 
       <OrderDetailModal state={state} actions={actions} />
     </div>

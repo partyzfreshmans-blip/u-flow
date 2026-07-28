@@ -68,6 +68,9 @@ export interface AppState {
   apiOrdersError: string | null;
   q: string;
   statusFilter: string;
+  /** Sub-tab on the Dashboard page: the usual order list/stats view, or the
+   * Route Calendar month view (moved here from the Planner page). */
+  dashboardTab: 'overview' | 'calendar';
 
   // 7-day delivery forecast (built from routeOrders, shown on the dashboard)
   forecastStatusFilter: string;
@@ -147,8 +150,10 @@ export interface AppState {
    * re-locks everything, which is the safer default. */
   batchRouteUnlocked: Record<string, boolean>;
   batchRouteQ: string;
-  /** Sub-tab on the Planner page: the live plan, or the Batch Route history. */
-  plannerTab: 'plan' | 'history' | 'calendar';
+  /** Sub-tab on the Planner page: the live plan, or the Batch Route history.
+   * (Route Calendar used to live here too — it's now its own tab on the
+   * Dashboard page, see dashboardTab above.) */
+  plannerTab: 'plan' | 'history';
   assignDialogOpen: boolean;
   assignSelectedVehicleIds: string[];
   /** Set when one or more background "คนส่ง" (column N) stamp/clear writes
@@ -380,6 +385,7 @@ export const initialState: AppState = {
   apiOrdersError: null,
   q: '',
   statusFilter: 'all',
+  dashboardTab: 'overview',
 
   forecastStatusFilter: 'all',
 

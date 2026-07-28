@@ -2,7 +2,6 @@ import { useState } from 'react';
 import { computePlanner } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 import { BatchRouteHistoryPanel } from './BatchRouteHistoryPanel';
-import { RouteCalendarPanel } from './RouteCalendarPanel';
 import { RouteMap } from './RouteMap';
 
 interface DragPayload {
@@ -111,16 +110,11 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
           <label className="seg-opt">
             <input type="radio" name="plannerTab" checked={v.plannerTab === 'history'} onChange={() => v.setPlannerTab('history')} /><i className="ph ph-clock-counter-clockwise" />ประวัติ Batch Route
           </label>
-          <label className="seg-opt">
-            <input type="radio" name="plannerTab" checked={v.plannerTab === 'calendar'} onChange={() => v.setPlannerTab('calendar')} /><i className="ph ph-calendar-blank" />Route Calendar
-          </label>
         </div>
       )}
 
       {v.plannerTab === 'history' && v.canEdit ? (
         <BatchRouteHistoryPanel state={state} actions={actions} />
-      ) : v.plannerTab === 'calendar' && v.canEdit ? (
-        <RouteCalendarPanel state={state} actions={actions} />
       ) : (
         <>
       {/* overdue / no-delivery-date attention banner */}
