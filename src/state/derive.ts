@@ -611,6 +611,11 @@ export function computeRoute(state: AppState, actions: AppActions) {
         stLabel: o.status || '—',
         stStyle: sheetStatusStyle(o.status),
         viewItems: () => actions.openOrderDetail(o.orderNo, o.customer, o),
+        // Same shared selection pool the main table's rows use (see below) —
+        // the archive feature is one selection set / one toolbar / one
+        // confirm dialog regardless of which table a checkbox was ticked in.
+        selected: state.routeSelectedOrderNos.includes(o.orderNo),
+        toggleSelect: () => actions.toggleRouteSelect(o.orderNo, state.routeSelectedOrderNos),
       };
     })
     .sort((a, b) => b.daysLate - a.daysLate);

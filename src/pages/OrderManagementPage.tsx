@@ -333,7 +333,14 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
         />
       )}
 
-      {v.stuckCount > 0 && (
+      {v.stuckCount > 0 && (() => {
+        const stuckOrderNos = v.stuckOrders.map((o) => o.orderNo);
+        const stuckAllSelected = stuckOrderNos.length > 0 && stuckOrderNos.every((no) => v.selectedOrderNos.includes(no));
+        const toggleStuckSelectAll = () => {
+          if (stuckAllSelected) v.setSelection(v.selectedOrderNos.filter((no) => !stuckOrderNos.includes(no)));
+          else v.setSelection(Array.from(new Set([...v.selectedOrderNos, ...stuckOrderNos])));
+        };
+        return (
         <div className="card elev-sm" style={{ marginBottom: 18, gap: 10, boxShadow: 'inset 0 0 0 1px var(--st-bad-fg)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <i className="ph ph-warning-fill" style={{ color: 'var(--st-bad-fg)', fontSize: 17 }} />
@@ -341,11 +348,15 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
           </div>
           <table className="table">
             <thead>
-              <tr><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th>วันที่จะจัดส่ง</th><th style={{ textAlign: 'center' }}>ล่าช้า</th><th>สถานะ</th><th></th></tr>
+              <tr>
+                {canEdit && <th style={{ width: 26 }}><input type="checkbox" checked={stuckAllSelected} onChange={toggleStuckSelectAll} /></th>}
+                <th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th>วันที่จะจัดส่ง</th><th style={{ textAlign: 'center' }}>ล่าช้า</th><th>สถานะ</th><th></th>
+              </tr>
             </thead>
             <tbody>
               {v.stuckOrders.map((o) => (
                 <tr key={o.orderNo}>
+                  {canEdit && <td><input type="checkbox" checked={o.selected} onChange={o.toggleSelect} /></td>}
                   <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12.5 }}>{o.orderNo}</td>
                   <td>{o.customer}</td>
                   <td style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{o.plannedDeliveryDate}</td>
@@ -357,7 +368,8 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
             </tbody>
           </table>
         </div>
-      )}
+        );
+      })()}
 
       {v.isEmpty && !v.routeOrdersLoading && (
         <div className="card elev-sm" style={{ padding: 26, textAlign: 'center', color: 'var(--color-neutral-500)', fontSize: 12.5 }}>ไม่พบคำสั่งซื้อที่ตรงกับตัวกรอง</div>
