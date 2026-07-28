@@ -305,11 +305,12 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
           else v.setSelection(Array.from(new Set([...v.selectedOrderNos, ...stuckOrderNos])));
         };
         return (
-        <div className="card elev-sm" style={{ marginBottom: 18, gap: 10, boxShadow: 'inset 0 0 0 1px var(--st-bad-fg)' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <i className="ph ph-warning-fill" style={{ color: 'var(--st-bad-fg)', fontSize: 17 }} />
-            <span style={{ fontWeight: 600, fontSize: 14 }}>ออเดอร์ตกหล่น — เลยวันจัดส่งแล้วแต่ยังไม่สำเร็จ ({v.stuckCount})</span>
+        <div className="card elev-sm" style={{ padding: '4px 14px 8px', marginBottom: 18 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 2px 8px', fontWeight: 600, fontSize: 13.5, color: 'var(--st-warn-fg)' }}>
+            <i className="ph ph-calendar-x" />
+            ออเดอร์ตกหล่น — เลยวันจัดส่งแล้วแต่ยังไม่สำเร็จ ({v.stuckCount})
           </div>
+          <div className="table-scroll">
           <table className="table">
             <thead>
               <tr>
@@ -331,6 +332,7 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
               ))}
             </tbody>
           </table>
+          </div>
         </div>
         );
       })()}
