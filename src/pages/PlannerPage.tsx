@@ -411,7 +411,10 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                         <td style={{ textAlign: 'center', fontFamily: 'ui-monospace, monospace', fontSize: 12, color: 'var(--color-accent-200)' }}>{s.loadCode}</td>
                         <td>
                           {s.customer}
-                          <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', maxWidth: 210, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.orderNo} · {s.address}</div>
+                          <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', maxWidth: 210, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {s.locationSource === 'override' && <i className="ph ph-map-pin-fill" style={{ color: 'var(--st-ok-fg)', marginRight: 3 }} title="พิกัดถูกแก้ไขแล้ว" />}
+                            {s.orderNo} · {s.address}
+                          </div>
                         </td>
                         <td style={{ maxWidth: 85, overflow: 'hidden' }}>
                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, whiteSpace: 'nowrap', maxWidth: 85, overflow: 'hidden', textOverflow: 'ellipsis' }} title={s.zoneName}>
@@ -568,9 +571,10 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                         </div>
                         <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', marginTop: 1 }}>{o.orderNo}</div>
                         <div
-                          title={o.address}
+                          title={o.locationSource === 'override' ? `${o.address} (พิกัดถูกแก้ไขแล้ว)` : o.address}
                           style={{ fontSize: 11, color: 'var(--color-neutral-400)', maxWidth: 320, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                         >
+                          {o.locationSource === 'override' && <i className="ph ph-map-pin-fill" style={{ color: 'var(--st-ok-fg)', marginRight: 3 }} />}
                           {o.address}
                         </div>
                       </td>

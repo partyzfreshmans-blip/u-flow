@@ -15,6 +15,7 @@ import { DEFAULT_VEHICLES, loadRoutePlan, loadVehicles, saveRoutePlan, saveVehic
 import { DEFAULT_ZONE_RULES, loadZoneRules, saveZoneRules, type ZoneRule } from '../data/zoneConfig';
 import { coordKey, loadGeocodeCache, saveGeocodeCache, type GeocodeCache } from '../data/geocodeCache';
 import { reverseGeocode } from '../data/sources/geocoding';
+import { resolveRouteOrderLocations } from '../data/customerLocation';
 import { GEOCODE_MIN_INTERVAL_MS } from '../config/geocoding';
 import { loadRouteCodState, saveRouteCodState } from '../data/routeCod';
 import { addDays, dayKey, dayKeyToDate, isoToSheetDateText, sheetDateToDayKey, todayDayKey } from '../data/dateUtils';
@@ -949,21 +950,22 @@ export function useAppStore() {
     });
   }, []);
 
-  // Background batch-geocode: once routeOrders has loaded, reverse-geocode
-  // every unique coordinate not already in the cache (paced at
-  // GEOCODE_MIN_INTERVAL_MS so this never bursts past Nominatim's rate
-  // limit), updating the cache — and every row using it — one coordinate at
-  // a time rather than blocking the page until the whole batch finishes.
-  // Guarded by a ref (not a state flag) so it only ever runs once even if
-  // this effect re-fires for an unrelated reason.
+  // Background batch-geocode: once routeOrders (and customers, so any
+  // corrected coordinate is already resolved — see resolveRouteOrderLocations)
+  // has loaded, reverse-geocode every unique coordinate not already in the
+  // cache (paced at GEOCODE_MIN_INTERVAL_MS so this never bursts past
+  // Nominatim's rate limit), updating the cache — and every row using it —
+  // one coordinate at a time rather than blocking the page until the whole
+  // batch finishes. Guarded by a ref (not a state flag) so it only ever runs
+  // once even if this effect re-fires for an unrelated reason.
   const geocodeBatchStarted = useRef(false);
   useEffect(() => {
-    if (state.routeOrders.length === 0 || geocodeBatchStarted.current) return;
+    if (state.routeOrders.length === 0 || state.customersLoading || geocodeBatchStarted.current) return;
 
     const localCache: GeocodeCache = { ...state.geocodeCache };
     const seen = new Set<string>();
     const toFetch: { key: string; lat: number; lng: number }[] = [];
-    for (const o of state.routeOrders) {
+    for (const o of resolveRouteOrderLocations(state.routeOrders, state.customers)) {
       if (o.lat == null || o.lng == null) continue;
       const key = coordKey(o.lat, o.lng);
       if (localCache[key] || seen.has(key)) continue;
@@ -995,7 +997,7 @@ export function useAppStore() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.routeOrders.length]);
+  }, [state.routeOrders.length, state.customersLoading]);
 
   // Driver view offline support: retry any queued delivery marks whenever
   // connectivity returns, and keep trying periodically in case a request
@@ -1401,12 +1403,24 @@ export function useAppStore() {
       saveCustomerLatLng: (rowIndex: number, name: string, phone: string, lat: number, lng: number, originalLat: number | null, originalLng: number | null) => {
         dispatch({ type: 'patch', patch: { custEditSaving: true, custEditError: null } });
         updateCsMasterLatLng(name, phone, lat, lng)
-          .then(() => {
+          .then(async () => {
             invalidateSheetCache(CS_MASTER_CSV_URL);
             dispatch({ type: 'updateCustomerLatLng', rowIndex, lat, lng });
             dispatch({ type: 'patch', patch: { custEditSaving: false, custEditRowIndex: null } });
             const originalText = originalLat != null && originalLng != null ? `${originalLat.toFixed(5)}, ${originalLng.toFixed(5)}` : 'ไม่มีข้อมูล';
             logActivity('แก้ไขพิกัดลูกค้า', `${name} · จาก ${originalText} → ${lat.toFixed(5)}, ${lng.toFixed(5)}`);
+            // Eagerly geocode the corrected coordinate (same as the Planner's
+            // own location editor) so every order for this customer picks up
+            // the right อำเภอ/จังหวัด immediately — this coordinate now
+            // overrides theirs everywhere via resolveRouteOrderLocations, so
+            // there's no separate cache entry to invalidate, just a new one
+            // to add for the corrected pin.
+            const result = await reverseGeocode(lat, lng);
+            if (result) {
+              const cache: GeocodeCache = { ...loadGeocodeCache(), [coordKey(lat, lng)]: { ...result, fetchedAt: Date.now() } };
+              saveGeocodeCache(cache);
+              dispatch({ type: 'patch', patch: { geocodeCache: cache } });
+            }
           })
           .catch((err: unknown) => {
             const message = err instanceof Error ? err.message : 'บันทึกพิกัดไม่สำเร็จ';

@@ -7,6 +7,7 @@ import { loadCode } from '../data/vehicles';
 import { nextBatchId, type BatchRoute } from '../data/batchRoutes';
 import { resolveZone, UNASSIGNED_COLOR } from '../data/zoneConfig';
 import { coordKey, type GeocodeCache } from '../data/geocodeCache';
+import { resolveRouteOrderLocations } from '../data/customerLocation';
 import { avgPricePerPiece, detectUnit } from '../data/sources/promotionsSheet';
 import { addDays, dayKey, dayKeyToDate, daysBetweenKeys, formatOrderedAt, formatThaiShortDate, formatThaiWeekdayDate, sheetDateTimeToMs, sheetDateToDayKey, suggestedDeliveryDayKey, todayDayKey } from '../data/dateUtils';
 import { badgeStyle, DELIVERY_DONE_STATUSES, fmt, sheetStatusStyle } from './helpers';
@@ -461,12 +462,17 @@ export function routeZoneLetter(route: string): string {
 
 export function computeRoute(state: AppState, actions: AppActions) {
   const rq = state.routeQ.trim().toLowerCase();
+  // Customer-corrected coordinates (see src/data/customerLocation.ts) always
+  // win over the raw CS_Lat/CS_Long from Unii — resolved once here so every
+  // downstream use (reverse-geocode input for the district/province column
+  // below) sees the corrected pin, not the stale one.
+  const routeOrders = resolveRouteOrderLocations(state.routeOrders, state.customers);
   // "แสดงออเดอร์ที่จัดเก็บแล้ว" is a binary view switch, not just another
   // filter chip — OFF (default) shows the normal working set, ON shows only
   // the archived pile, so the two never mix in one table and every other
   // filter/option below only ever reflects whichever side is currently shown.
-  const visibleOrders = state.routeOrders.filter((o) => (state.routeArchivedFilter ? o.archived : !o.archived));
-  const archivedCount = state.routeOrders.filter((o) => o.archived).length;
+  const visibleOrders = routeOrders.filter((o) => (state.routeArchivedFilter ? o.archived : !o.archived));
+  const archivedCount = routeOrders.filter((o) => o.archived).length;
   const canArchive = state.session ? canEditOrder(state.session.role) : false;
 
   // Cancelled orders clutter the default view (most of what staff need to
@@ -771,14 +777,19 @@ export function computePlanner(state: AppState, actions: AppActions) {
     if (added.length > 0) actions.stampCourierOrders(added, { vehicleId, vehicleName: b.vehicleName, batchId: b.id });
   };
 
-  const wh = state.routeOrders.find((o) => o.whLat != null && o.whLng != null);
+  // Customer-corrected coordinates always win over the raw CS_Lat/CS_Long
+  // from Unii (see src/data/customerLocation.ts) — resolved once here so map
+  // pins, distance, and Google Maps links all use the same corrected pin.
+  const routeOrders = resolveRouteOrderLocations(state.routeOrders, state.customers);
+
+  const wh = routeOrders.find((o) => o.whLat != null && o.whLng != null);
   const warehouse = wh && wh.whLat != null && wh.whLng != null ? { lat: wh.whLat, lng: wh.whLng } : null;
 
   // Plan the selected day's outstanding work: anything not yet delivered or
   // cancelled, scoped to the chosen delivery date when one is picked.
   // Archived orders are excluded so staff can't accidentally route stale/bad
   // data that was deliberately hidden via the Order Management archive action.
-  const candidates = state.routeOrders.filter((o) => {
+  const candidates = routeOrders.filter((o) => {
     if (o.archived) return false;
     if (DELIVERY_DONE_STATUSES.includes(o.status)) return false;
     if (state.plannerDate && effectiveDeliveryDayKey(o) !== state.plannerDate) return false;
@@ -798,17 +809,26 @@ export function computePlanner(state: AppState, actions: AppActions) {
   // noDeliveryDate/isOverdue flags below (set the same way here) narrow
   // that down to precisely the flagged subset.
   const today = todayDayKey();
-  const unassignedAnyDate = state.routeOrders.filter((o) => !o.archived && !DELIVERY_DONE_STATUSES.includes(o.status) && !assignedTo.has(o.orderNo));
+  const unassignedAnyDate = routeOrders.filter((o) => !o.archived && !DELIVERY_DONE_STATUSES.includes(o.status) && !assignedTo.has(o.orderNo));
   const noDeliveryDateCount = unassignedAnyDate.filter((o) => effectiveDeliveryDayKey(o) === null).length;
   const overdueUnassignedCount = unassignedAnyDate.filter((o) => {
     const key = effectiveDeliveryDayKey(o);
     return key !== null && key < today;
   }).length;
 
+  // distanceFromWhKm ("far_from_wh") is a static figure Unii computed once
+  // from its own raw coordinate — trustworthy only for customers who were
+  // never corrected. Once a customer has a corrected pin, that stale figure
+  // could be wrong, so recompute live from the corrected coordinate instead
+  // of trusting the sheet's number.
   const distanceOf = (o: (typeof candidates)[number]) =>
-    o.distanceFromWhKm ?? (warehouse && o.lat != null && o.lng != null ? haversineKm(warehouse.lat, warehouse.lng, o.lat, o.lng) : 0);
+    o.locationSource === 'override'
+      ? warehouse && o.lat != null && o.lng != null
+        ? haversineKm(warehouse.lat, warehouse.lng, o.lat, o.lng)
+        : 0
+      : (o.distanceFromWhKm ?? (warehouse && o.lat != null && o.lng != null ? haversineKm(warehouse.lat, warehouse.lng, o.lat, o.lng) : 0));
 
-  const byOrderNo = new Map(state.routeOrders.map((o) => [o.orderNo, o]));
+  const byOrderNo = new Map(routeOrders.map((o) => [o.orderNo, o]));
   const vehicleNameById = new Map(vehicleSource.map((v) => [v.id, v.name]));
 
   /** Moves an order between vehicles (or reorders within one), splicing it
@@ -929,6 +949,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
         noteText: o.note.trim() || '—',
         lat: o.lat,
         lng: o.lng,
+        locationSource: o.locationSource,
         selected: state.plannerSelectedOrderNos.includes(o.orderNo),
         toggleSelect: () => actions.togglePlannerSelect(o.orderNo, state.plannerSelectedOrderNos),
         editLocation: () => actions.openEditOrderLocation(o),
@@ -1000,10 +1021,18 @@ export function computePlanner(state: AppState, actions: AppActions) {
           zoneColor: zone.color,
           distanceText: `${distanceOf(o).toFixed(1)} กม.`,
           mapLink: o.mapLink,
-          // Falls back to a plain Google Maps search link built from lat/lng
-          // when the sheet's own mapLink is blank, so the driver-view
-          // navigate button always has somewhere to go.
-          googleMapsUrl: o.mapLink || (o.lat != null && o.lng != null ? `https://www.google.com/maps/search/?api=1&query=${o.lat},${o.lng}` : ''),
+          locationSource: o.locationSource,
+          // A corrected coordinate always wins the navigate link too — the
+          // sheet's own mapLink was generated by Unii from the same stale
+          // coordinate this override fixes, so trusting it here would send
+          // the driver right back to the wrong spot. Only customers who were
+          // never corrected fall back to mapLink, then a plain Google Maps
+          // search link built from lat/lng, so the button always has
+          // somewhere to go.
+          googleMapsUrl:
+            o.locationSource === 'override' && o.lat != null && o.lng != null
+              ? `https://www.google.com/maps/search/?api=1&query=${o.lat},${o.lng}`
+              : o.mapLink || (o.lat != null && o.lng != null ? `https://www.google.com/maps/search/?api=1&query=${o.lat},${o.lng}` : ''),
           isCod: isCodPayment(o.paymentType),
           codMethod: state.routeCodMethod[o.orderNo] ?? 'cash',
           codCollected: state.routeCodCollected[o.orderNo] ?? '',
@@ -1396,7 +1425,11 @@ export function computeDriverBooking(state: AppState, actions: AppActions) {
   const canBook = role ? canBookStop(role) : false;
   const username = state.session?.username ?? '';
 
-  const candidates = state.routeOrders.filter((o) => {
+  // Customer-corrected coordinates always win over the raw Unii ones — see
+  // src/data/customerLocation.ts.
+  const routeOrders = resolveRouteOrderLocations(state.routeOrders, state.customers);
+
+  const candidates = routeOrders.filter((o) => {
     if (o.archived) return false;
     if (DELIVERY_DONE_STATUSES.includes(o.status)) return false;
     if (state.plannerDate && effectiveDeliveryDayKey(o) !== state.plannerDate) return false;
@@ -1405,9 +1438,14 @@ export function computeDriverBooking(state: AppState, actions: AppActions) {
   const assignedOrderNos = new Set(Object.values(state.routePlan).flat());
   const unassigned = candidates.filter((o) => !assignedOrderNos.has(o.orderNo));
 
-  const wh = state.routeOrders.find((o) => o.whLat != null && o.whLng != null);
+  const wh = routeOrders.find((o) => o.whLat != null && o.whLng != null);
   const warehouse = wh && wh.whLat != null && wh.whLng != null ? { lat: wh.whLat, lng: wh.whLng } : null;
-  const distanceOf = (o: RouteOrder) => o.distanceFromWhKm ?? (warehouse && o.lat != null && o.lng != null ? haversineKm(warehouse.lat, warehouse.lng, o.lat, o.lng) : 0);
+  const distanceOf = (o: (typeof candidates)[number]) =>
+    o.locationSource === 'override'
+      ? warehouse && o.lat != null && o.lng != null
+        ? haversineKm(warehouse.lat, warehouse.lng, o.lat, o.lng)
+        : 0
+      : (o.distanceFromWhKm ?? (warehouse && o.lat != null && o.lng != null ? haversineKm(warehouse.lat, warehouse.lng, o.lat, o.lng) : 0));
 
   // Both pending and already-confirmed requests lock a stop from this view —
   // once confirmed it's about to become part of a real routePlan/batch
