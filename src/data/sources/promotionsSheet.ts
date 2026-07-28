@@ -126,7 +126,7 @@ export function formatTiersTerm(tiers: PromoTier[], unit: PromoUnit): string {
 function rowToPromo(row: Record<string, string>): Promo | null {
   const sku = (row['SKU'] ?? '').trim();
   const status = (row['Status'] ?? '').trim();
-  if (!sku || status !== 'Active') return null;
+  if (!sku) return null;
 
   const productName = (row['Product Name'] ?? '').trim();
   const promoPrice = toNumber(row['Promotion Price']);
@@ -156,7 +156,7 @@ function rowToPromo(row: Record<string, string>): Promo | null {
     skuName: productName,
     type: packUnits.length > 0 ? 'ราคาต่อหน่วยบรรจุ' : tiers.length > 1 ? 'ลดขั้นบันได' : 'ลดราคา',
     period: start && end ? `${start} – ${end}` : '',
-    st: 'active',
+    st: status || 'ไม่ระบุ',
     unit,
     tiers,
     packUnits,
@@ -164,7 +164,10 @@ function rowToPromo(row: Record<string, string>): Promo | null {
   };
 }
 
-export async function fetchActivePromotions(): Promise<Promo[]> {
+/** Every row in the tab, any Status — filtering to a particular status
+ * (Active, Inactive, ...) is a UI concern (see computePromo's status
+ * filter), not something this fetch should decide unilaterally. */
+export async function fetchPromotions(): Promise<Promo[]> {
   const rows = await fetchSheetRows(CSV_URL);
   return rows.map(rowToPromo).filter((p): p is Promo => p !== null);
 }

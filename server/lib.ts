@@ -19,6 +19,7 @@ import { createSessionToken, verifySessionToken } from './session.js';
 export const CS_MASTER_GID = Number(SHEET_TABS.csMaster.gid);
 export const ROUTE_ORDERS_GID = Number(SHEET_TABS.routeOrders.gid);
 export const PROMOTIONS_GID = Number(SHEET_TABS.promotions.gid);
+export const SKU_DETAIL_GID = Number(SHEET_TABS.skuDetail.gid);
 
 // Columns in the CS Master tab: A=ชื่อ B=เบอร์ C=ที่อยู่ D=ละ(lat) E=ลอง(lng)
 const LAT_COLUMN = 'D';
@@ -69,6 +70,14 @@ const PROMO_PRICE_HEADER = 'Promotion Price';
 const PROMO_BOX_PRICE_HEADER = 'Box Price';
 const PROMO_SINGLE_PRICE_HEADER = 'Single Price';
 const PROMO_PERIOD_HEADER = 'Period (วัน)';
+
+// Columns in the "SKU Detail" tab, same header-name lookup approach.
+const LINE_ITEM_ORDER_NO_HEADER = 'เลขคำสั่งซื้อ';
+const LINE_ITEM_NO_HEADER = 'No.';
+const LINE_ITEM_SKU_HEADER = 'SKU';
+// No dedicated column exists yet — bootstrapped the same way ARCHIVED_HEADER
+// is, as a brand-new column appended past the sheet's current last column.
+const LINE_ITEM_PROMO_SKU_HEADER = 'Promo SKU';
 
 export interface ApiResult {
   status: number;
@@ -1067,6 +1076,96 @@ export async function handleUpsertPromotion(token: string | null, body: unknown)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
     console.error('[promotions/upsert]', message);
+    return { status: 500, body: { error: message } };
+  }
+}
+
+/**
+ * Confirms (or clears, when promoSku === '') that one specific order line
+ * used a given promotion — explicit staff confirmation only, never inferred
+ * from a matching price, so usage stats can never silently include an
+ * unconfirmed coincidence. Matched by the line's own "No." when given (the
+ * most precise identity for a single row); falls back to an orderNo+SKU pair
+ * otherwise, refusing (same as every other handler here) if that pair is
+ * ambiguous rather than guessing which row to touch.
+ */
+export async function handleLinkLineItemPromo(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (!['administrator', 'manager', 'admin_staff'].includes(payload.role)) {
+    return { status: 403, body: { error: 'ไม่มีสิทธิ์แก้ไขรายการสินค้า' } };
+  }
+
+  const { orderNo, sku, no, promoSku } = (body ?? {}) as Record<string, unknown>;
+  if (typeof orderNo !== 'string' || orderNo.trim() === '') return { status: 400, body: { error: 'ต้องระบุเลขคำสั่งซื้อ' } };
+  if (typeof sku !== 'string' || sku.trim() === '') return { status: 400, body: { error: 'ต้องระบุ SKU' } };
+  if (typeof promoSku !== 'string') return { status: 400, body: { error: 'promoSku ต้องเป็นข้อความ (ว่าง = ยกเลิกผูก)' } };
+  if (no !== undefined && typeof no !== 'string') return { status: 400, body: { error: 'no ต้องเป็นข้อความ' } };
+
+  try {
+    const sheets = await getSheetsClient();
+    const title = await resolveSheetTitle(sheets, SKU_DETAIL_GID);
+
+    const current = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${title}!A:Z` });
+    const rows = current.data.values ?? [];
+    const header = rows[0] ?? [];
+    const headerAt = (name: string) => header.findIndex((h) => String(h ?? '').trim() === name);
+
+    const orderNoCol = headerAt(LINE_ITEM_ORDER_NO_HEADER);
+    if (orderNoCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${LINE_ITEM_ORDER_NO_HEADER}" ในชีท` } };
+    const skuCol = headerAt(LINE_ITEM_SKU_HEADER);
+    if (skuCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${LINE_ITEM_SKU_HEADER}" ในชีท` } };
+    const noCol = headerAt(LINE_ITEM_NO_HEADER);
+
+    const wantedOrderNo = orderNo.trim();
+    const wantedSku = sku.trim();
+    const wantedNo = typeof no === 'string' ? no.trim() : '';
+
+    let targetRow: number;
+    if (wantedNo && noCol !== -1) {
+      const matches: number[] = [];
+      for (let i = 1; i < rows.length; i++) {
+        if (String(rows[i]?.[noCol] ?? '').trim() === wantedNo) matches.push(i + 1);
+      }
+      if (matches.length === 0) return { status: 404, body: { error: `ไม่พบรายการ No. "${wantedNo}" ในชีท SKU Detail` } };
+      if (matches.length > 1) {
+        return { status: 409, body: { error: `พบ No. "${wantedNo}" ซ้ำกัน ${matches.length} แถว — โปรดแก้ไขในชีทโดยตรง` } };
+      }
+      targetRow = matches[0];
+    } else {
+      const matches: number[] = [];
+      for (let i = 1; i < rows.length; i++) {
+        if (String(rows[i]?.[orderNoCol] ?? '').trim() === wantedOrderNo && String(rows[i]?.[skuCol] ?? '').trim() === wantedSku) matches.push(i + 1);
+      }
+      if (matches.length === 0) return { status: 404, body: { error: `ไม่พบรายการสินค้า SKU "${wantedSku}" ในออเดอร์ "${wantedOrderNo}"` } };
+      if (matches.length > 1) {
+        return { status: 409, body: { error: `พบ SKU "${wantedSku}" ซ้ำกัน ${matches.length} แถวในออเดอร์นี้ — โปรดแก้ไขในชีทโดยตรง` } };
+      }
+      targetRow = matches[0];
+    }
+
+    let promoSkuCol = headerAt(LINE_ITEM_PROMO_SKU_HEADER);
+    if (promoSkuCol === -1) {
+      promoSkuCol = header.length;
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: MAIN_SHEET_ID,
+        range: `${title}!${columnLetter(promoSkuCol)}1`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[LINE_ITEM_PROMO_SKU_HEADER]] },
+      });
+    }
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: MAIN_SHEET_ID,
+      range: `${title}!${columnLetter(promoSkuCol)}${targetRow}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [[promoSku.trim()]] },
+    });
+
+    return { status: 200, body: { ok: true, updatedRow: targetRow } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+    console.error('[sku-detail/link-promo]', message);
     return { status: 500, body: { error: message } };
   }
 }

@@ -1,9 +1,10 @@
 import { canEditPage } from '../config/permissions';
-import { computePromo } from '../state/derive';
+import { computePromo, computePromoUsage } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 
 export function PromoPage({ state, actions }: { state: AppState; actions: AppActions }) {
   const v = computePromo(state, actions);
+  const u = computePromoUsage(state, actions);
   const canEdit = state.session ? canEditPage(state.session.role, 'promo') : false;
   const saving = v.promoSaveStatus?.state === 'saving';
 
@@ -22,6 +23,14 @@ export function PromoPage({ state, actions }: { state: AppState; actions: AppAct
           <i className="ph ph-warning-fill" style={{ flex: 'none' }} />โหลดโปรโมชั่นไม่สำเร็จ: {v.promosError}
         </div>
       )}
+
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
+        {v.statusChips.map((c) => (
+          <button key={c.key} style={c.style} onClick={c.go}>
+            {c.label}<span style={{ opacity: 0.6, marginLeft: 6 }}>{c.count}</span>
+          </button>
+        ))}
+      </div>
 
       <div className="card elev-sm" style={{ padding: '4px 14px 8px' }}>
         <div className="table-scroll">
@@ -61,11 +70,14 @@ export function PromoPage({ state, actions }: { state: AppState; actions: AppAct
                 </td>
                 <td style={{ fontSize: 12.5, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums' }}>{p.period}</td>
                 <td><span style={p.stStyle}>{p.stLabel}</span></td>
-                <td style={{ textAlign: 'right' }}>{canEdit && <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={p.edit}>แก้ไข</button>}</td>
+                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                  <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={p.viewUsage}>ดูสถิติการใช้งาน</button>
+                  {canEdit && <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={p.edit}>แก้ไข</button>}
+                </td>
               </tr>
             ))}
             {v.promos.length === 0 && !v.promosLoading && (
-              <tr><td colSpan={7} style={{ textAlign: 'center', padding: 26, color: 'var(--color-neutral-500)', fontSize: 12.5 }}>ไม่พบโปรโมชั่นที่ Active อยู่</td></tr>
+              <tr><td colSpan={7} style={{ textAlign: 'center', padding: 26, color: 'var(--color-neutral-500)', fontSize: 12.5 }}>ไม่พบโปรโมชั่นที่ตรงกับตัวกรอง</td></tr>
             )}
           </tbody>
         </table>
@@ -213,6 +225,74 @@ export function PromoPage({ state, actions }: { state: AppState; actions: AppAct
                   'สร้างโปรโมชั่น'
                 )}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {u.open && (
+        <div className="dialog-backdrop" onClick={u.close}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()} style={{ width: 'min(560px, 100%)' }}>
+            <div className="dialog-title">สถิติการใช้งาน — {u.sku}</div>
+            <div style={{ fontSize: 12.5, color: 'var(--color-neutral-400)', marginTop: -6 }}>{u.promoName}</div>
+            <div className="dialog-body" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {u.isEmpty ? (
+                <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-neutral-500)', fontSize: 13 }}>
+                  <i className="ph ph-tray" style={{ fontSize: 22, display: 'block', marginBottom: 8 }} />
+                  ยังไม่มีการใช้งาน
+                </div>
+              ) : (
+                <>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 11 }}>
+                    <div className="card" style={{ gap: 4 }}>
+                      <span className="card-kicker">ใช้ไปทั้งหมด</span>
+                      <div style={{ fontFamily: 'var(--font-heading)', fontWeight: 600, fontSize: 24 }}>{u.totalUses} ออเดอร์</div>
+                    </div>
+                    <div className="card" style={{ gap: 4 }}>
+                      <span className="card-kicker">ยอดขายรวม</span>
+                      <div style={{ fontFamily: 'var(--font-heading)', fontWeight: 600, fontSize: 24 }}>{u.totalRevenueText}</div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>ออเดอร์ที่ใช้โปรนี้</div>
+                    <div className="table-scroll">
+                      <table className="table table-compact">
+                        <thead>
+                          <tr><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th>วันที่สั่ง</th><th style={{ textAlign: 'right' }}>จำนวน</th><th style={{ textAlign: 'right' }}>ยอดรวม</th><th></th></tr>
+                        </thead>
+                        <tbody>
+                          {u.orderRows.map((o, i) => (
+                            <tr key={i}>
+                              <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12.5 }}>{o.orderNo}</td>
+                              <td>{o.customer}</td>
+                              <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)' }}>{o.orderedAtText}</td>
+                              <td style={{ textAlign: 'right' }}>{o.qtyText}</td>
+                              <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{o.totalText}</td>
+                              <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 11.5 }} onClick={o.viewOrder}>ดูออเดอร์</button></td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>ลูกค้าที่สั่ง</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {u.customerRows.map((c, i) => (
+                        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, padding: '4px 2px' }}>
+                          <span>{c.customer}</span>
+                          <b>{c.count} ครั้ง</b>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="dialog-actions">
+              <button className="btn btn-secondary" onClick={u.close}>ปิด</button>
             </div>
           </div>
         </div>

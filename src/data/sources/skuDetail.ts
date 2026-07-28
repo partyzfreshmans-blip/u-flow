@@ -26,6 +26,10 @@ function rowToLineItem(row: Record<string, string>): OrderLineItem | null {
     unitPrice: toNumber(row['ราคา/หน่วย']),
     discount: toNumber(row['ส่วนลด']),
     lineTotal: toNumber(row['ยอดรวมรายการ']),
+    // No dedicated column exists in this tab yet — the backend bootstraps one
+    // named exactly "Promo SKU" the first time someone confirms a line uses a
+    // promotion (see server/lib.ts). Until then this just reads blank.
+    promoSku: (row['Promo SKU'] ?? '').trim(),
   };
 }
 

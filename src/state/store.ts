@@ -2,11 +2,12 @@ import { useEffect, useMemo, useReducer, useRef } from 'react';
 import { fetchApiImportOrders } from '../data/sources/apiImportOrders';
 import { CS_MASTER_CSV_URL, fetchCsMasterCustomers } from '../data/sources/csMaster';
 import { updateCsMasterLatLng } from '../data/sources/csMasterWrite';
-import { avgPricePerPiece, fetchActivePromotions, formatPackUnitsTerm, formatTiersTerm, PROMOTIONS_CSV_URL } from '../data/sources/promotionsSheet';
+import { avgPricePerPiece, fetchPromotions, formatPackUnitsTerm, formatTiersTerm, PROMOTIONS_CSV_URL } from '../data/sources/promotionsSheet';
 import { upsertPromotion } from '../data/sources/promotionsWrite';
 import { fetchRouteOrders } from '../data/sources/routeOrders';
 import { invalidateSheetCache } from '../data/sources/sheetCsv';
 import { fetchAllOrderLineItems, fetchOrderLineItems, fetchOrderLineItemsForOrders } from '../data/sources/skuDetail';
+import { linkLineItemPromo as apiLinkLineItemPromo } from '../data/sources/skuDetailWrite';
 import { fetchSkusFromSheet } from '../data/sources/skuSheet';
 import { attachmentKey, loadAttachments, saveAttachments, uploadToDrive, type AttachmentIndex } from '../data/sources/attachments';
 import { emptyLine, loadReceivingLog, receivingFolderKey, saveReceivingLog, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
@@ -75,9 +76,12 @@ export interface AppState {
   orderDetailOpen: boolean;
   orderDetailOrderNo: string;
   orderDetailCustomer: string;
-  orderDetailLines: { sku: string; name: string; unit: string; qty: number; unitPrice: number; discount: number; lineTotal: number }[];
+  orderDetailLines: { no: string; sku: string; name: string; unit: string; qty: number; unitPrice: number; discount: number; lineTotal: number; promoSku: string }[];
   orderDetailLoading: boolean;
   orderDetailError: string | null;
+  /** Keyed by `${orderNo}|${no || sku}` — save status for confirming/clearing
+   * one line's promo-use link, shown inline next to that line. */
+  lineItemPromoStatus: Record<string, OrderSaveStatus>;
   /** true when the opened order has a matching "คำสั่งซื้อ" row to edit/save against. */
   orderEditAvailable: boolean;
   orderEditDraft: OrderEditDraft;
@@ -201,11 +205,14 @@ export interface AppState {
   codVehicleFilter: string;
   codMobile: boolean;
 
-  // promo ("โปรโมชั่น" tab, Active rows only)
+  // promo ("โปรโมชั่น" tab — every row, filtered client-side by status)
   promos: Promo[];
   promosLoading: boolean;
   promosError: string | null;
   promoQ: string;
+  /** 'all' or a raw Status value (e.g. 'Active'). Defaults to 'Active' so
+   * the page's default view matches the old Active-only behavior. */
+  promoStatusFilter: string;
   promoModal: boolean;
   /** null = creating a new promotion; a Promo = editing that existing row in
    * place (matched by its SKU — the SKU field is locked while editing).
@@ -229,6 +236,8 @@ export interface AppState {
     packUnits: PromoPackUnit[];
   };
   promoSaveStatus: OrderSaveStatus | null;
+  /** SKU of the promo whose usage-stats panel is open; null = closed. */
+  promoUsageSku: string | null;
 
   // all order line items ("SKU Detail" tab, unfiltered) — used to flag which
   // orders on the Order Management page contain an actively-promoted SKU.
@@ -375,6 +384,7 @@ export const initialState: AppState = {
   orderDetailLines: [],
   orderDetailLoading: false,
   orderDetailError: null,
+  lineItemPromoStatus: {},
   orderEditAvailable: false,
   orderEditDraft: { plannedDeliveryDate: '', note: '', wantsTaxInvoice: false },
   orderEditOriginal: { plannedDeliveryDate: '', note: '', wantsTaxInvoice: false },
@@ -444,10 +454,12 @@ export const initialState: AppState = {
   promosLoading: true,
   promosError: null,
   promoQ: '',
+  promoStatusFilter: 'Active',
   promoModal: false,
   promoEditingOriginal: null,
   promoForm: DEFAULT_PROMO_FORM,
   promoSaveStatus: null,
+  promoUsageSku: null,
 
   orderLineItems: [],
   orderLineItemsLoading: true,
@@ -518,9 +530,11 @@ export type Action =
   | { type: 'openEditSku'; sku: Sku }
   | { type: 'saveSku' }
   | { type: 'applyPromoSaved'; promo: Promo }
+  | { type: 'applyLineItemPromoLink'; orderNo: string; sku: string; no: string; promoSku: string }
   | { type: 'updateCustomerLatLng'; rowIndex: number; lat: number; lng: number }
   | { type: 'updateOrderLocation'; orderNo: string; lat: number; lng: number }
   | { type: 'setOrderSaveStatus'; orderNo: string; status: OrderSaveStatus | null }
+  | { type: 'setLineItemPromoStatus'; key: string; status: OrderSaveStatus | null }
   | { type: 'applyOrderEdit'; orderNo: string; plannedDeliveryDateSheetText: string | null; note: string | null; wantsTaxInvoice: boolean | null }
   | { type: 'applyDeliveryMark'; orderNo: string; statusText: string; completedDateText: string }
   | { type: 'applyPickLotStatus'; orderNo: string; statusText: string }
@@ -569,6 +583,22 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, promos, promoModal: false, promoEditingOriginal: null, promoForm: DEFAULT_PROMO_FORM };
     }
 
+    case 'applyLineItemPromoLink': {
+      // Written back successfully — patch both the currently-open detail
+      // modal's lines (if it's this same order) and the shared orderLineItems
+      // collection every page's promo-usage lookups read from, so usage
+      // stats reflect it immediately without a refetch.
+      const matchLine = (no: string, sku: string) => (action.no ? no === action.no : sku === action.sku);
+      const orderDetailLines =
+        state.orderDetailOrderNo === action.orderNo
+          ? state.orderDetailLines.map((l) => (matchLine(l.no, l.sku) ? { ...l, promoSku: action.promoSku } : l))
+          : state.orderDetailLines;
+      const orderLineItems = state.orderLineItems.map((l) =>
+        l.orderNo === action.orderNo && matchLine(l.no, l.sku) ? { ...l, promoSku: action.promoSku } : l,
+      );
+      return { ...state, orderDetailLines, orderLineItems };
+    }
+
     case 'updateCustomerLatLng': {
       const arr = state.customers.map((c) => (c.rowIndex === action.rowIndex ? { ...c, lat: action.lat, lng: action.lng } : c));
       return { ...state, customers: arr };
@@ -584,6 +614,13 @@ function reducer(state: AppState, action: Action): AppState {
       if (action.status === null) delete next[action.orderNo];
       else next[action.orderNo] = action.status;
       return { ...state, orderSaveStatus: next };
+    }
+
+    case 'setLineItemPromoStatus': {
+      const next = { ...state.lineItemPromoStatus };
+      if (action.status === null) delete next[action.key];
+      else next[action.key] = action.status;
+      return { ...state, lineItemPromoStatus: next };
     }
 
     case 'applyOrderEdit': {
@@ -812,7 +849,7 @@ export function useAppStore() {
 
   useEffect(() => {
     let cancelled = false;
-    fetchActivePromotions()
+    fetchPromotions()
       .then((promos) => {
         if (!cancelled) {
           dispatch({ type: 'patch', patch: { promos, promosLoading: false, promosError: null } });
@@ -1115,6 +1152,8 @@ export function useAppStore() {
           },
         }),
       closePromo: () => dispatch({ type: 'patch', patch: { promoModal: false, promoSaveStatus: null } }),
+      openPromoUsage: (sku: string) => dispatch({ type: 'patch', patch: { promoUsageSku: sku } }),
+      closePromoUsage: () => dispatch({ type: 'patch', patch: { promoUsageSku: null } }),
       /** Writes to the real "โปรโมชั่น" sheet; local state only updates after
        * that succeeds, same promise as saveOrderEdit above. `editingOriginal`
        * is passed in explicitly (rather than closed over) per this file's
@@ -1159,7 +1198,10 @@ export function useAppStore() {
               skuName: name,
               type: usingPackUnits ? 'ราคาต่อหน่วยบรรจุ' : tiers.length > 1 ? 'ลดขั้นบันได' : form.type,
               period,
-              st: 'active',
+              // Matches what handleUpsertPromotion always writes to the
+              // Status column server-side — must be this exact capitalization
+              // to match the raw sheet value everywhere else compares against.
+              st: 'Active',
               unit: usingPackUnits ? packUnits[0].label : form.unit,
               tiers: usingPackUnits ? [] : tiers,
               packUnits: usingPackUnits ? packUnits : [],
@@ -1202,7 +1244,7 @@ export function useAppStore() {
               type: 'patch',
               patch: {
                 orderDetailLoading: false,
-                orderDetailLines: lines.map((l) => ({ sku: l.sku, name: l.productName, unit: l.unit, qty: l.qty, unitPrice: l.unitPrice, discount: l.discount, lineTotal: l.lineTotal })),
+                orderDetailLines: lines.map((l) => ({ no: l.no, sku: l.sku, name: l.productName, unit: l.unit, qty: l.qty, unitPrice: l.unitPrice, discount: l.discount, lineTotal: l.lineTotal, promoSku: l.promoSku })),
               },
             });
           })
@@ -1212,6 +1254,26 @@ export function useAppStore() {
           });
       },
       closeOrderDetail: () => dispatch({ type: 'patch', patch: { orderDetailOpen: false } }),
+      /** Confirms (promoSku set) or clears (promoSku '') that one order line
+       * used a promotion, writing back to the real "SKU Detail" sheet first —
+       * local state only updates after that succeeds, same promise as every
+       * other write-back action here. `no` identifies the exact line when
+       * known (falls back to matching by SKU within the order server-side). */
+      linkLineItemPromo: (orderNo: string, sku: string, no: string, promoSku: string) => {
+        const key = `${orderNo}|${no || sku}`;
+        dispatch({ type: 'setLineItemPromoStatus', key, status: { state: 'saving' } });
+        apiLinkLineItemPromo({ orderNo, sku, no: no || undefined, promoSku })
+          .then(() => {
+            dispatch({ type: 'applyLineItemPromoLink', orderNo, sku, no, promoSku });
+            dispatch({ type: 'setLineItemPromoStatus', key, status: { state: 'saved' } });
+            setTimeout(() => dispatch({ type: 'setLineItemPromoStatus', key, status: null }), 2500);
+            logActivity(promoSku ? 'ยืนยันใช้โปรโมชั่น' : 'ยกเลิกใช้โปรโมชั่น', `${sku}${promoSku ? ` · โปร ${promoSku}` : ''}`, orderNo);
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'บันทึกไม่สำเร็จ';
+            dispatch({ type: 'setLineItemPromoStatus', key, status: { state: 'error', message } });
+          });
+      },
 
       setOrderEditDraft: (draft: OrderEditDraft) => dispatch({ type: 'patch', patch: { orderEditDraft: draft } }),
       /** Writes to the real "คำสั่งซื้อ" sheet via the backend; local state is
@@ -1550,7 +1612,7 @@ export function useAppStore() {
           fetchApiImportOrders(),
           fetchRouteOrders(),
           fetchAllOrderLineItems(),
-          fetchActivePromotions(),
+          fetchPromotions(),
           fetchCsMasterCustomers(),
           fetchSkusFromSheet(),
         ]);

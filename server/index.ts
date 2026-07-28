@@ -14,6 +14,7 @@ import {
   handleLogin,
   handleMe,
   handleReverseGeocode,
+  handleLinkLineItemPromo,
   handleUpdateCsMasterLocation,
   handleUpdateRouteOrder,
   handleUpdateUser,
@@ -67,6 +68,11 @@ app.post('/api/route-orders/update', async (req, res) => {
 
 app.post('/api/promotions/upsert', async (req, res) => {
   const { status, body } = await handleUpsertPromotion(bearerToken(req.headers.authorization), req.body);
+  res.status(status).json(body);
+});
+
+app.post('/api/sku-detail/link-promo', async (req, res) => {
+  const { status, body } = await handleLinkLineItemPromo(bearerToken(req.headers.authorization), req.body);
   res.status(status).json(body);
 });
 

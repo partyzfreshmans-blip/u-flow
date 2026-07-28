@@ -31,7 +31,7 @@ export function OrderDetailModal({ state, actions }: { state: AppState; actions:
           {!v.loading && !v.error && v.lines.length > 0 && (
             <table className="table">
               <thead>
-                <tr><th>SKU</th><th>สินค้า</th><th>หน่วย</th><th style={{ textAlign: 'right' }}>จำนวน</th><th style={{ textAlign: 'right' }}>ราคา/หน่วย</th><th style={{ textAlign: 'right' }}>ยอดรวม</th></tr>
+                <tr><th>SKU</th><th>สินค้า</th><th>หน่วย</th><th style={{ textAlign: 'right' }}>จำนวน</th><th style={{ textAlign: 'right' }}>ราคา/หน่วย</th><th style={{ textAlign: 'right' }}>ยอดรวม</th><th>โปรโมชั่น</th></tr>
               </thead>
               <tbody>
                 {v.lines.map((l, i) => (
@@ -42,6 +42,31 @@ export function OrderDetailModal({ state, actions }: { state: AppState; actions:
                     <td style={{ textAlign: 'right' }}>{l.qty}</td>
                     <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{l.unitPriceText}</td>
                     <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{l.lineTotalText}</td>
+                    <td style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>
+                      {l.linkSaving ? (
+                        <i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite', color: 'var(--color-neutral-400)' }} title="กำลังบันทึก..." />
+                      ) : l.linkedPromoSku ? (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, color: 'var(--st-ok-fg)' }} title={l.isConfirmed ? undefined : 'ราคาปัจจุบันไม่ตรงกับโปรนี้แล้ว'}>
+                            <i className="ph ph-check-circle-fill" />ใช้โปร {l.linkedPromoSku}
+                          </span>
+                          {v.canEditRole && (
+                            <button className="btn btn-ghost" style={{ fontSize: 10.5, padding: '2px 6px' }} onClick={l.unconfirmPromo}>ยกเลิก</button>
+                          )}
+                        </span>
+                      ) : l.matchedPromoSku ? (
+                        v.canEditRole ? (
+                          <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={l.confirmPromo}>
+                            <i className="ph ph-tag" />ยืนยันใช้โปร {l.matchedPromoSku}
+                          </button>
+                        ) : (
+                          <span style={{ color: 'var(--color-neutral-500)' }}>ราคาตรงกับโปร {l.matchedPromoSku}</span>
+                        )
+                      ) : (
+                        <span style={{ color: 'var(--color-neutral-600)' }}>—</span>
+                      )}
+                      {l.linkError && <div style={{ color: 'var(--st-bad-fg)', marginTop: 2 }}>{l.linkError}</div>}
+                    </td>
                   </tr>
                 ))}
               </tbody>

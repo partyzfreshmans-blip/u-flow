@@ -16,9 +16,7 @@ export interface Order {
   sync: SyncStatus;
 }
 
-// ---------- Promotions ("โปรโมชั่น" tab, Active rows only) ----------
-export type PromoStatus = 'active' | 'upcoming' | 'expired';
-
+// ---------- Promotions ("โปรโมชั่น" tab — every row, not just Active) ----------
 /** Units a promotion price can be quoted per. The sheet quotes prices per
  * หีบ/ลัง most often, but singles and paired deals also occur. */
 export const PROMO_UNITS = ['ชิ้น', 'คู่', 'แพ็ค', 'ลัง', 'หีบ'] as const;
@@ -56,7 +54,10 @@ export interface Promo {
   skuName: string;
   type: string;
   period: string;
-  st: PromoStatus;
+  /** Raw "Status" column text from the sheet (e.g. "Active", "Inactive") —
+   * kept verbatim rather than normalized into a fixed set, since the sheet
+   * is the source of truth for what values exist. */
+  st: string;
   /** Unit the promotion price applies to. */
   unit: PromoUnit;
   /** Volume steps, ascending by minQty. A single-step promo has one entry.
@@ -182,6 +183,11 @@ export interface OrderLineItem {
   unitPrice: number;
   discount: number;
   lineTotal: number;
+  /** SKU of the promotion this line was explicitly confirmed as using, '' if
+   * none. Parsed from a bootstrapped "Promo SKU" column — see
+   * skuDetailWrite.ts. Never inferred from matching price alone — only set
+   * when staff explicitly confirm it for this exact line. */
+  promoSku: string;
 }
 
 // ---------- Customers: "CS Master" tab (read + lat/lng write-back) ----------

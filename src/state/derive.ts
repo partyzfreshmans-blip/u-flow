@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react';
 import { orders } from '../data/mockData';
 import type { PickLot } from '../data/pickLots';
-import { PROMO_UNITS, type ApiImportOrder, type Order, type OrderLineItem, type PromoPackUnit, type PromoStatus, type PromoUnit, type RouteOrder } from '../data/types';
+import { PROMO_UNITS, type ApiImportOrder, type Order, type OrderLineItem, type Promo, type PromoPackUnit, type PromoUnit, type RouteOrder } from '../data/types';
 import { lineDiff, lineNetTotal, receivingFolderKey, recordHasDiscrepancy, recordTotal, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { loadCode } from '../data/vehicles';
 import { nextBatchId, type BatchRoute } from '../data/batchRoutes';
@@ -363,6 +363,16 @@ export function computeUserManagement(state: AppState, actions: AppActions) {
 }
 
 // ---------- ORDER DETAIL (line items — "SKU Detail" tab) ----------
+/** Whether `price` matches one of this promo's known price points (any tier
+ * or packaging-unit price), within a cent of rounding slack — the signal
+ * used to decide whether to offer "confirm this line used this promo" at
+ * all. Never the sole basis for recording usage; staff still have to
+ * explicitly confirm it per line. */
+function promoPriceMatches(promo: Promo, price: number): boolean {
+  const points = promo.packUnits.length > 0 ? promo.packUnits.map((u) => u.price) : promo.tiers.map((t) => t.price);
+  return points.some((p) => Math.abs(p - price) < 0.01);
+}
+
 export function computeOrderDetail(state: AppState, actions: AppActions) {
   const total = state.orderDetailLines.reduce((a, l) => a + l.lineTotal, 0);
   const orderNo = state.orderDetailOrderNo;
@@ -375,7 +385,28 @@ export function computeOrderDetail(state: AppState, actions: AppActions) {
     customer: state.orderDetailCustomer,
     loading: state.orderDetailLoading,
     error: state.orderDetailError,
-    lines: state.orderDetailLines.map((l) => ({ ...l, unitPriceText: fmt(l.unitPrice), lineTotalText: fmt(l.lineTotal) })),
+    lines: state.orderDetailLines.map((l) => {
+      const unitPriceText = fmt(l.unitPrice);
+      const lineTotalText = fmt(l.lineTotal);
+      const key = `${orderNo}|${l.no || l.sku}`;
+      const linkStatus = state.lineItemPromoStatus[key];
+      // Only Active promos, and only when the price actually charged matches
+      // one of that promo's real price points — never a guess from SKU alone.
+      const matchedPromo = state.promos.find((p) => p.sku === l.sku && p.st === 'Active' && promoPriceMatches(p, l.unitPrice));
+      const isConfirmed = l.promoSku !== '' && l.promoSku === matchedPromo?.sku;
+      return {
+        ...l,
+        unitPriceText,
+        lineTotalText,
+        matchedPromoSku: matchedPromo?.sku ?? null,
+        isConfirmed,
+        linkedPromoSku: l.promoSku || null,
+        linkSaving: linkStatus?.state === 'saving',
+        linkError: linkStatus?.state === 'error' ? (linkStatus.message ?? 'บันทึกไม่สำเร็จ') : null,
+        confirmPromo: () => actions.linkLineItemPromo(orderNo, l.sku, l.no, matchedPromo!.sku),
+        unconfirmPromo: () => actions.linkLineItemPromo(orderNo, l.sku, l.no, ''),
+      };
+    }),
     isEmpty: !state.orderDetailLoading && !state.orderDetailError && state.orderDetailLines.length === 0,
     totalText: fmt(total),
 
@@ -461,10 +492,11 @@ export function computeRoute(state: AppState, actions: AppActions) {
     ...(noDistrictCount > 0 ? [{ value: 'other', label: `ไม่ระบุ (${noDistrictCount})` }] : []),
   ];
 
-  // Active promo SKUs (state.promos is already filtered to Active-only) cross
-  // referenced against each order's line items, so staff can see at a glance
-  // which orders include a promoted product without opening every one.
-  const activePromoSkus = new Set(state.promos.map((p) => p.sku));
+  // Active promo SKUs — state.promos now holds every status (see computePromo's
+  // status filter), so this explicitly narrows to Active before cross
+  // referencing against each order's line items, so staff can see at a
+  // glance which orders include a promoted product without opening every one.
+  const activePromoSkus = new Set(state.promos.filter((p) => p.st === 'Active').map((p) => p.sku));
   const orderSkus = new Map<string, Set<string>>();
   for (const li of state.orderLineItems) {
     let set = orderSkus.get(li.orderNo);
@@ -1908,20 +1940,44 @@ export function computeCod(state: AppState, actions: AppActions) {
 }
 
 // ---------- PROMO ----------
-const promoMeta: Record<PromoStatus, [string, Parameters<typeof badgeStyle>[0]]> = {
-  active: ['Active', 'ok'],
-  upcoming: ['Upcoming', 'info'],
-  expired: ['Expired', 'neutral'],
+// Raw "Status" column text from the sheet, e.g. "Active"/"Inactive" — kept
+// verbatim (see Promo.st) rather than normalized, so this only styles the
+// values actually observed and falls back to neutral for anything else.
+const promoStatusKind: Record<string, Parameters<typeof badgeStyle>[0]> = {
+  Active: 'ok',
+  Inactive: 'neutral',
 };
+function promoStatusStyle(status: string) {
+  return badgeStyle(promoStatusKind[status] ?? 'warn');
+}
 
 export function computePromo(state: AppState, actions: AppActions) {
   const pq = state.promoQ.trim().toLowerCase();
+
+  // Status filter chips, counts computed against the full unfiltered set
+  // (mirroring computeDashboard's statusChips) so the numbers next to each
+  // chip stay stable while searching — only the table rows narrow.
+  const presentStatuses = Array.from(new Set(state.promos.map((p) => p.st).filter(Boolean))).sort();
+  const countForStatus = (s: string) => (s === 'all' ? state.promos.length : state.promos.filter((p) => p.st === s).length);
+  const chipBase: CSSProperties = { border: 0, cursor: 'pointer', fontFamily: 'var(--font-body)', fontSize: 12.5, padding: '6px 13px', borderRadius: 20, fontWeight: 500 };
+  const statusChips = ['all', ...presentStatuses].map((k) => ({
+    key: k,
+    label: k === 'all' ? 'ทั้งหมด' : k,
+    count: countForStatus(k),
+    style:
+      k === state.promoStatusFilter
+        ? { ...chipBase, background: 'var(--color-accent)', color: '#fff' }
+        : { ...chipBase, background: 'var(--color-surface)', color: 'var(--color-neutral-300)', boxShadow: 'inset 0 0 0 1px var(--color-divider)' },
+    go: () => actions.patch({ promoStatusFilter: k }),
+  }));
+
   const rows = state.promos
+    .filter((p) => state.promoStatusFilter === 'all' || p.st === state.promoStatusFilter)
     .filter((p) => !pq || p.sku.toLowerCase().includes(pq) || p.skuName.toLowerCase().includes(pq) || p.name.toLowerCase().includes(pq))
     .map((p) => ({
       ...p,
-      stLabel: promoMeta[p.st][0],
-      stStyle: badgeStyle(promoMeta[p.st][1]),
+      stLabel: p.st,
+      stStyle: promoStatusStyle(p.st),
       typeStyle: badgeStyle(p.packUnits.length > 0 ? 'info' : p.tiers.length > 1 ? 'info' : 'accent'),
       isStepped: p.tiers.length > 1,
       isPackUnits: p.packUnits.length > 0,
@@ -1936,6 +1992,7 @@ export function computePromo(state: AppState, actions: AppActions) {
         avgText: `฿${avgPricePerPiece(u).toFixed(2)}/ชิ้น`,
       })),
       edit: () => actions.openEditPromo(p),
+      viewUsage: () => actions.openPromoUsage(p.sku),
     }));
 
   const f = state.promoForm;
@@ -1951,7 +2008,9 @@ export function computePromo(state: AppState, actions: AppActions) {
     promosError: state.promosError,
     promoQ: state.promoQ,
     onPromoSearch: (v: string) => actions.patch({ promoQ: v }),
+    statusChips,
     promos: rows,
+    isEmpty: rows.length === 0,
     promoModalOpen: state.promoModal,
     promoForm: f,
     isEditingPromo: isEditing,
@@ -2021,6 +2080,60 @@ export function computePromo(state: AppState, actions: AppActions) {
     canSavePromo,
     promoSaveStatus: state.promoSaveStatus,
     savePromo: () => actions.savePromo(f, state.promoEditingOriginal),
+  };
+}
+
+/** Usage stats for one promo, sourced entirely from orderLineItems.promoSku —
+ * lines explicitly confirmed by staff (see computeOrderDetail's
+ * confirmPromo), never inferred from matching price/date alone. */
+export function computePromoUsage(state: AppState, actions: AppActions) {
+  const sku = state.promoUsageSku;
+  if (!sku) return { open: false as const };
+
+  const promo = state.promos.find((p) => p.sku === sku) ?? null;
+  const usedLines = state.orderLineItems.filter((l) => l.promoSku === sku);
+
+  // One row per order even if the SKU appears on more than one line within
+  // it (rare, but sum rather than duplicate rows for the same order).
+  const byOrder = new Map<string, { orderNo: string; customer: string; qty: number; total: number; orderedAt: string }>();
+  for (const l of usedLines) {
+    const cur = byOrder.get(l.orderNo);
+    if (cur) {
+      cur.qty += l.qty;
+      cur.total += l.lineTotal;
+    } else {
+      byOrder.set(l.orderNo, { orderNo: l.orderNo, customer: l.customer, qty: l.qty, total: l.lineTotal, orderedAt: l.orderedAt });
+    }
+  }
+  const orders = Array.from(byOrder.values()).sort((a, b) => (a.orderedAt < b.orderedAt ? 1 : -1));
+
+  const byCustomer = new Map<string, number>();
+  for (const o of orders) byCustomer.set(o.customer, (byCustomer.get(o.customer) ?? 0) + 1);
+
+  const totalRevenue = orders.reduce((a, o) => a + o.total, 0);
+
+  return {
+    open: true as const,
+    sku,
+    promoName: promo?.skuName || promo?.name || sku,
+    close: () => actions.closePromoUsage(),
+    totalUses: orders.length,
+    totalRevenueText: fmt(totalRevenue),
+    isEmpty: orders.length === 0,
+    orderRows: orders.map((o) => ({
+      orderNo: o.orderNo,
+      customer: o.customer,
+      qtyText: o.qty.toLocaleString('en-US'),
+      totalText: fmt(o.total),
+      orderedAtText: o.orderedAt ? formatOrderedAt(o.orderedAt) : '—',
+      viewOrder: () => {
+        actions.closePromoUsage();
+        actions.openOrderDetail(o.orderNo, o.customer, state.routeOrders.find((r) => r.orderNo === o.orderNo));
+      },
+    })),
+    customerRows: Array.from(byCustomer.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([customer, count]) => ({ customer, count })),
   };
 }
 
