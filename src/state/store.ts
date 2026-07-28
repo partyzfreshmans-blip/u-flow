@@ -151,6 +151,11 @@ export interface AppState {
   plannerTab: 'plan' | 'history' | 'calendar';
   assignDialogOpen: boolean;
   assignSelectedVehicleIds: string[];
+  /** Set when one or more background "คนส่ง" (column N) stamp/clear writes
+   * from an Assign or batch edit failed — surfaced as a dismissible warning
+   * on the Planner page. The batch itself is never rolled back for this;
+   * it's a "go check/retry" notice, not a blocker. */
+  courierStampWarning: string | null;
   /** orderNo whose "ตรวจสอบ/แก้ไขโลเคชั่น" modal is open; null = closed. */
   orderLocationOrderNo: string | null;
   orderLocationLat: string;
@@ -421,6 +426,7 @@ export const initialState: AppState = {
   batchRouteQ: '',
   plannerTab: 'plan',
   assignDialogOpen: false,
+  courierStampWarning: null,
   assignSelectedVehicleIds: [],
   orderLocationOrderNo: null,
   orderLocationLat: '',
@@ -1055,6 +1061,36 @@ export function useAppStore() {
         dispatch({ type: 'patch', patch: { batchRoutes: list } });
         saveBatchRoutes(list);
       },
+      /** Best-effort background write of column N ("คนส่ง") in the คำสั่งซื้อ
+       * sheet after a batch Assign or edit — fires once per order via
+       * Promise.allSettled (not Promise.all) so one bad row can't hide the
+       * rest having written fine, and never blocks or rolls back the batch
+       * itself (which is already committed to local state by the time this
+       * runs). Any failures surface as a dismissible courierStampWarning
+       * instead of silently vanishing. Pass stamp=null to clear the column
+       * (order pulled out of its batch) instead of setting it. */
+      stampCourierOrders: (orderNos: string[], stamp: { vehicleId: string; vehicleName: string; batchId: string } | null) => {
+        if (orderNos.length === 0) return;
+        Promise.allSettled(
+          orderNos.map((orderNo) =>
+            stamp
+              ? updateRouteOrder({ orderNo, courierVehicleId: stamp.vehicleId, courierVehicleName: stamp.vehicleName, courierBatchId: stamp.batchId })
+              : updateRouteOrder({ orderNo, clearCourierStamp: true }),
+          ),
+        ).then((results) => {
+          const failed = orderNos.filter((_, i) => results[i].status === 'rejected');
+          if (failed.length === 0) return;
+          const firstReason = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
+          const reasonText = firstReason?.reason instanceof Error ? firstReason.reason.message : 'บันทึกไม่สำเร็จ';
+          dispatch({
+            type: 'patch',
+            patch: {
+              courierStampWarning: `เขียนคอลัมน์ "คนส่ง" ไม่สำเร็จ ${failed.length}/${orderNos.length} ออเดอร์ (${failed.join(', ')}) — ${reasonText} — ลองใหม่ได้จากหน้าวางแผนจัดรูท`,
+            },
+          });
+        });
+      },
+      dismissCourierStampWarning: () => dispatch({ type: 'patch', patch: { courierStampWarning: null } }),
       saveRouteCod: (collected: Record<string, string>, method: Record<string, 'cash' | 'transfer'>) => {
         saveRouteCodState({ collected, method });
         dispatch({ type: 'patch', patch: { routeCodCollected: collected, routeCodMethod: method } });

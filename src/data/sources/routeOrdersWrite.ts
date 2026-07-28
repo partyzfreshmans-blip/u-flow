@@ -13,6 +13,16 @@ export interface RouteOrderUpdatePayload {
   status?: string;
   /** Hides/unhides the order from normal operational views without deleting it. */
   archived?: boolean;
+  /** Stamps column N ("คนส่ง") with "{driver}/{vehicle}/{batchId}" after a
+   * batch Assign or edit — pass all three together to set it. The driver's
+   * name is resolved server-side from the Users tab (not sent from here),
+   * since listing users is admin/manager-only and admin_staff can also run
+   * the Planner. */
+  courierVehicleId?: string;
+  courierVehicleName?: string;
+  courierBatchId?: string;
+  /** Blanks column N back out — an order pulled out of its batch. */
+  clearCourierStamp?: boolean;
 }
 
 /**

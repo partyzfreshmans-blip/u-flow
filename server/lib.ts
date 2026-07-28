@@ -57,6 +57,13 @@ const TAX_INVOICE_FALLBACK_COLUMN_INDEX = 13; // column N, 0-based
 // special case above, so this one bootstraps as a brand-new column appended
 // right after whatever the sheet's last used column currently is.
 const ARCHIVED_HEADER = 'Archived';
+// "คนส่ง" (courier stamp: driver/vehicle/batch code) — column N of the real
+// sheet, blank on every row today. Looked up by header name first like every
+// other column here; only falls back to the fixed index below to bootstrap
+// the header the first time this ever writes, and even then only if that
+// column isn't already carrying some other unrelated header text.
+const COURIER_HEADER = 'คนส่ง';
+const COURIER_COLUMN_INDEX = 13; // column N, 0-based
 
 // Columns in the "โปรโมชั่น" tab — same header-name lookup approach as the
 // คำสั่งซื้อ tab above (never by fixed position).
@@ -755,7 +762,8 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
   const payload = verifySessionToken(token);
   if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
 
-  const { orderNo, plannedDeliveryDate, note, wantsTaxInvoice, markDelivered, status, archived } = (body ?? {}) as Record<string, unknown>;
+  const { orderNo, plannedDeliveryDate, note, wantsTaxInvoice, markDelivered, status, archived, courierVehicleId, courierVehicleName, courierBatchId, clearCourierStamp } =
+    (body ?? {}) as Record<string, unknown>;
 
   if (typeof orderNo !== 'string' || orderNo.trim() === '') {
     return { status: 400, body: { error: 'ต้องระบุเลขคำสั่งซื้อ' } };
@@ -776,13 +784,16 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
   } else if (!['administrator', 'manager', 'admin_staff'].includes(payload.role)) {
     return { status: 403, body: { error: 'ไม่มีสิทธิ์แก้ไขออเดอร์' } };
   }
+  const wantsCourierStamp = courierVehicleId !== undefined || courierVehicleName !== undefined || courierBatchId !== undefined;
   if (
     plannedDeliveryDate === undefined &&
     note === undefined &&
     wantsTaxInvoice === undefined &&
     markDelivered === undefined &&
     status === undefined &&
-    archived === undefined
+    archived === undefined &&
+    !wantsCourierStamp &&
+    clearCourierStamp === undefined
   ) {
     return { status: 400, body: { error: 'ไม่มีข้อมูลให้บันทึก' } };
   }
@@ -803,6 +814,15 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
   }
   if (archived !== undefined && typeof archived !== 'boolean') {
     return { status: 400, body: { error: 'archived ต้องเป็น true/false' } };
+  }
+  if (wantsCourierStamp && (typeof courierVehicleId !== 'string' || typeof courierVehicleName !== 'string' || typeof courierBatchId !== 'string' || !courierVehicleId.trim() || !courierVehicleName.trim() || !courierBatchId.trim())) {
+    return { status: 400, body: { error: 'courierVehicleId/courierVehicleName/courierBatchId ต้องระบุทั้งสามค่าเป็นข้อความที่ไม่ว่าง' } };
+  }
+  if (clearCourierStamp !== undefined && clearCourierStamp !== true) {
+    return { status: 400, body: { error: 'clearCourierStamp ต้องเป็น true เท่านั้น' } };
+  }
+  if (wantsCourierStamp && clearCourierStamp === true) {
+    return { status: 400, body: { error: 'ระบุ courierVehicleId/courierVehicleName/courierBatchId หรือ clearCourierStamp อย่างใดอย่างหนึ่งเท่านั้น' } };
   }
 
   let sheetDate: string | null = null;
@@ -884,6 +904,30 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
       // — just claim the next empty column past whatever's currently used.
       if (archivedCol === -1) archivedCol = header.length;
     }
+    let courierCol = -1;
+    let courierStampText = '';
+    if (wantsCourierStamp || clearCourierStamp === true) {
+      courierCol = headerAt(COURIER_HEADER);
+      if (courierCol === -1) {
+        const existing = String(header[COURIER_COLUMN_INDEX] ?? '').trim();
+        if (existing !== '') {
+          return {
+            status: 500,
+            body: { error: `ไม่พบคอลัมน์ "${COURIER_HEADER}" และคอลัมน์ N ก็มีชื่ออื่นอยู่แล้ว ("${existing}") — ต้องเพิ่มคอลัมน์นี้ในชีทเอง` },
+          };
+        }
+        courierCol = COURIER_COLUMN_INDEX;
+      }
+    }
+    if (wantsCourierStamp) {
+      // The driver's display name is just their username, resolved here
+      // (never sent from the frontend) since listing Users is admin/manager-
+      // only and admin_staff — who can also run the Planner and trigger this
+      // write — has no access to /api/users.
+      const users = await readUsers(sheets);
+      const driver = users.find((u) => u.active && u.role === 'driver' && u.driverVehicleId === courierVehicleId);
+      courierStampText = `${driver?.username ?? ''} / ${courierVehicleName as string} / ${courierBatchId as string}`;
+    }
 
     // Bootstrap the tax-invoice header the first time it's needed. Plain
     // values.update (not append) so it can never create a new row.
@@ -902,6 +946,15 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
         range: `${title}!${columnLetter(archivedCol)}1`,
         valueInputOption: 'RAW',
         requestBody: { values: [[ARCHIVED_HEADER]] },
+      });
+    }
+    // Bootstrap the "คนส่ง" header the first time it's needed, same pattern.
+    if ((wantsCourierStamp || clearCourierStamp === true) && headerAt(COURIER_HEADER) === -1) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: MAIN_SHEET_ID,
+        range: `${title}!${columnLetter(courierCol)}1`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[COURIER_HEADER]] },
       });
     }
 
@@ -947,6 +1000,22 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
         range: `${title}!${columnLetter(archivedCol)}${targetRow}`,
         valueInputOption: 'RAW',
         requestBody: { values: [[archived ? 'ใช่' : '']] },
+      });
+    }
+    if (wantsCourierStamp) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: MAIN_SHEET_ID,
+        range: `${title}!${columnLetter(courierCol)}${targetRow}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[courierStampText]] },
+      });
+    }
+    if (clearCourierStamp === true) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: MAIN_SHEET_ID,
+        range: `${title}!${columnLetter(courierCol)}${targetRow}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [['']] },
       });
     }
     if (markDelivered === true) {

@@ -750,6 +750,14 @@ export function computePlanner(state: AppState, actions: AppActions) {
     const updated: BatchRoute = { ...b, orderNos: newOrderNos, updatedAt: now, updatedBy: username };
     actions.setBatchRoutes(state.batchRoutes.map((x) => (x.id === b.id ? updated : x)));
     actions.logActivity('แก้ไข Batch Route', `${b.id} · ${desc}`);
+
+    // Column N ("คนส่ง") follows the batch's membership: an order pulled out
+    // gets it cleared, one newly added gets it stamped with this batch's own
+    // driver/vehicle/code — same stamp confirmAssign writes on first assign.
+    const removed = b.orderNos.filter((no) => !newOrderNos.includes(no));
+    const added = newOrderNos.filter((no) => !b.orderNos.includes(no));
+    if (removed.length > 0) actions.stampCourierOrders(removed, null);
+    if (added.length > 0) actions.stampCourierOrders(added, { vehicleId, vehicleName: b.vehicleName, batchId: b.id });
   };
 
   const wh = state.routeOrders.find((o) => o.whLat != null && o.whLng != null);
@@ -1244,6 +1252,9 @@ export function computePlanner(state: AppState, actions: AppActions) {
       };
       nextBatches = [...nextBatches, batch];
       actions.logActivity('ยืนยันรูท (สร้าง Batch Route)', `${id} · ${veh.name} · ${vehicleOrderNos.length} ออเดอร์ (${vehicleOrderNos.join(', ')})`);
+      // Stamp column N ("คนส่ง") on every order in this new batch — background,
+      // best-effort (see stampCourierOrders), never blocks the assign itself.
+      actions.stampCourierOrders(vehicleOrderNos, { vehicleId, vehicleName: veh.name, batchId: id });
     }
     actions.setBatchRoutes(nextBatches);
     actions.patch({ assignDialogOpen: false, assignSelectedVehicleIds: [] });
@@ -1253,6 +1264,8 @@ export function computePlanner(state: AppState, actions: AppActions) {
     loading: state.routeOrdersLoading,
     error: state.routeOrdersError,
     canEdit,
+    courierStampWarning: state.courierStampWarning,
+    dismissCourierStampWarning: () => actions.dismissCourierStampWarning(),
     vehicles,
     unassigned,
     unassignedCount: unassigned.length,
