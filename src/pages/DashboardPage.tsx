@@ -3,6 +3,7 @@ import { OrderDetailModal } from '../components/OrderDetailModal';
 import { computeDashboard } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 import { RouteCalendarPanel } from './RouteCalendarPanel';
+import { RouteMap } from './RouteMap';
 
 type DashboardRow = ReturnType<typeof computeDashboard>['orders'][number];
 
@@ -145,6 +146,103 @@ export function DashboardPage({ state, actions }: { state: AppState; actions: Ap
             <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)' }}>{s.sub}</div>
           </div>
         ))}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 22 }}>
+        <div className="card elev-sm" style={{ gap: 12 }}>
+          <div className="card-kicker">Daily Performance</div>
+          <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+            <div>
+              <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginBottom: 3 }}>Total Sales (วันนี้)</div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                <span style={{ fontFamily: 'var(--font-heading)', fontWeight: 600, fontSize: 27, lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>{v.dailyPerformance.totalSalesText}</span>
+                <span style={{ fontSize: 12.5, fontWeight: 600, color: v.dailyPerformance.salesChangeColor }}>{v.dailyPerformance.salesChangeText}</span>
+              </div>
+              <div style={{ fontSize: 10.5, color: 'var(--color-neutral-600)', marginTop: 2 }}>เทียบกับเมื่อวาน</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginBottom: 3 }}>Incomplete</div>
+              <div style={{ fontFamily: 'var(--font-heading)', fontWeight: 600, fontSize: 27, lineHeight: 1, color: v.dailyPerformance.incompleteCount > 0 ? 'var(--st-bad-fg)' : undefined }}>
+                {v.dailyPerformance.incompleteCount}
+              </div>
+              <div style={{ fontSize: 10.5, color: 'var(--color-neutral-600)', marginTop: 2 }}>ออเดอร์ตกหล่น</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="card elev-sm" style={{ gap: 12 }}>
+          <div className="card-kicker">Operational Status</div>
+          <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+            <div>
+              <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginBottom: 3 }}>Fleet Availability</div>
+              <div style={{ fontFamily: 'var(--font-heading)', fontWeight: 600, fontSize: 27, lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>
+                {v.operationalStatus.fleetAvailable} / {v.operationalStatus.fleetTotal}
+              </div>
+              <div style={{ fontSize: 10.5, color: 'var(--color-neutral-600)', marginTop: 2 }}>คันว่าง / รถทั้งหมด</div>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+              <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginBottom: 3 }}>Warehouse Capacity</div>
+              <div style={{ fontSize: 11.5, color: 'var(--color-neutral-600)', maxWidth: 220 }}>
+                <i className="ph ph-info" style={{ marginRight: 4 }} />ยังไม่มีข้อมูลความจุ/สต็อกคลังในระบบ — ข้ามการ์ดนี้ไว้ก่อน
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {v.activeBatchCards.length > 0 && (
+        <div className="card elev-sm" style={{ marginBottom: 22, gap: 12 }}>
+          <div style={{ fontWeight: 600, fontSize: 14 }}>
+            <i className="ph ph-truck" style={{ marginRight: 6, color: 'var(--color-accent-300)' }} />Batch การจัดส่งที่กำลังทำงาน ({v.activeBatchCards.length})
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
+            {v.activeBatchCards.map((b) => (
+              <div key={b.id} className="card" style={{ gap: 4, background: 'var(--color-bg)' }}>
+                <div style={{ fontWeight: 600, fontSize: 13 }}><i className="ph ph-truck" style={{ marginRight: 5, color: 'var(--color-accent-300)' }} />{b.vehicleName}</div>
+                <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', fontFamily: 'ui-monospace, monospace' }}>{b.id}</div>
+                <div style={{ fontSize: 12, marginTop: 4 }}>{b.orderCount} ออเดอร์ · {b.totalText}</div>
+                <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', marginTop: 2 }}>ออกจากคลัง {b.departedAtText}</div>
+              </div>
+            ))}
+          </div>
+          {v.activeBatchMapStops.length > 0 && (
+            <div style={{ height: 320, borderRadius: 9, overflow: 'hidden' }}>
+              <RouteMap stops={v.activeBatchMapStops} warehouse={v.warehouseForBatches} />
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="card elev-sm" style={{ marginBottom: 22, gap: 10, padding: '4px 14px 8px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 2px 8px', fontWeight: 600, fontSize: 13.5 }}>
+          <i className="ph ph-warning-fill" style={{ color: 'var(--st-bad-fg)' }} />
+          Incomplete Orders ({v.incompleteCount})
+          <button className="btn btn-ghost" style={{ marginLeft: 'auto', fontSize: 12 }} onClick={v.goToIncompleteOrders}>แสดงทั้งหมด<i className="ph ph-arrow-right" /></button>
+        </div>
+        {v.incompleteOrders.length === 0 ? (
+          <div style={{ padding: 18, textAlign: 'center', color: 'var(--st-ok-fg)', fontSize: 12.5 }}>
+            <i className="ph ph-check-circle-fill" style={{ marginRight: 5 }} />ไม่มีออเดอร์ตกหล่น
+          </div>
+        ) : (
+          <div className="table-scroll">
+            <table className="table">
+              <thead>
+                <tr><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th style={{ textAlign: 'center' }}>ล่าช้า</th><th>สถานะ</th><th></th></tr>
+              </thead>
+              <tbody>
+                {v.incompleteOrders.slice(0, 10).map((o) => (
+                  <tr key={o.orderNo}>
+                    <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12.5 }}>{o.orderNo}</td>
+                    <td>{o.customer}</td>
+                    <td style={{ textAlign: 'center', fontSize: 12, color: 'var(--st-bad-fg)', fontWeight: 600 }}>{o.daysLate} วัน</td>
+                    <td><span style={o.stStyle}>{o.stLabel}</span></td>
+                    <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={o.viewItems}>ดูรายการสินค้า</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>

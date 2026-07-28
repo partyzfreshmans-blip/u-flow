@@ -222,6 +222,103 @@ export function computeDashboard(state: AppState, actions: AppActions) {
   const assignedOrderNos = new Set(Object.values(state.routePlan).flat());
   const forecastStatusOptions = Array.from(new Set(state.routeOrders.map((o) => o.status).filter(Boolean))).sort();
 
+  // ---- Daily Performance: today's sales vs yesterday's, from the same
+  // "คำสั่งซื้อ" tab's own วันที่สั่ง (orderedDate) column every date filter
+  // elsewhere on this page already reads. ----
+  const yesterdayKey = dayKey(addDays(dayKeyToDate(today)!, -1));
+  const salesTotalFor = (dayK: string) =>
+    state.routeOrders.filter((o) => !o.archived && sheetDateToDayKey(o.orderedDate) === dayK).reduce((sum, o) => sum + o.totalAmount, 0);
+  const todaySalesTotal = salesTotalFor(today);
+  const yesterdaySalesTotal = salesTotalFor(yesterdayKey);
+  const salesChangePct = yesterdaySalesTotal > 0 ? ((todaySalesTotal - yesterdaySalesTotal) / yesterdaySalesTotal) * 100 : null;
+  const dailyPerformance = {
+    totalSalesText: fmt(todaySalesTotal),
+    // null (no valid yesterday base to compare against) reads as "ใหม่" — a
+    // literal 0% would misleadingly claim "no change" when there's simply
+    // nothing to divide by.
+    salesChangeText: salesChangePct == null ? (todaySalesTotal > 0 ? 'ใหม่' : '—') : `${salesChangePct >= 0 ? '+' : ''}${salesChangePct.toFixed(1)}%`,
+    salesChangeColor: salesChangePct == null ? 'var(--color-neutral-500)' : salesChangePct >= 0 ? 'var(--st-ok-fg)' : 'var(--st-bad-fg)',
+    incompleteCount: stuckRouteOrders(state, today).length,
+  };
+
+  // ---- Operational Status: fleet availability from the same vehicles/batch
+  // data the Planner and Batch Route history already read. Warehouse
+  // Capacity has no backing data anywhere in this system (no stock/space
+  // field on any sheet) — skipped rather than shown with a made-up number;
+  // see the summary for what a real implementation would need. ----
+  const resolvedForBatches = resolveRouteOrderLocations(state.routeOrders, state.customers);
+  const byOrderNoForBatches = new Map(resolvedForBatches.map((o) => [o.orderNo, o]));
+  // A batch is "active" while it isn't closed out on COD and still has at
+  // least one order that hasn't reached a done status — the same two facts
+  // the COD Clearing and Batch Route History pages already track per batch.
+  const activeBatches = state.batchRoutes.filter((b) => {
+    if (b.codClosed) return false;
+    const deliveredCount = b.orderNos.filter((no) => DELIVERY_DONE_STATUSES.includes(byOrderNoForBatches.get(no)?.status ?? '')).length;
+    return deliveredCount < b.orderNos.length;
+  });
+  const busyVehicleIds = new Set(activeBatches.map((b) => b.vehicleId));
+  const operationalStatus = {
+    fleetTotal: state.vehicles.length,
+    fleetAvailable: Math.max(0, state.vehicles.length - busyVehicleIds.size),
+  };
+
+  // ---- Active Delivery Batches: one card per batch still in progress,
+  // plus their combined pins on the same Leaflet map the Planner uses. ----
+  const activeBatchCards = activeBatches
+    .map((b) => {
+      const orders = b.orderNos.map((no) => byOrderNoForBatches.get(no)).filter((o): o is NonNullable<typeof o> => o != null);
+      return {
+        id: b.id,
+        vehicleName: b.vehicleName,
+        orderCount: b.orderNos.length,
+        totalText: fmt(orders.reduce((sum, o) => sum + o.totalAmount, 0)),
+        // No separate "left the warehouse" timestamp exists anywhere in this
+        // system — the batch's own createdAt (when it was Assigned) is the
+        // closest real fact and doubles as that fallback per spec.
+        departedAtText: formatDateTime(new Date(b.createdAt).getTime()),
+      };
+    })
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+  const whForBatches = resolvedForBatches.find((o) => o.whLat != null && o.whLng != null);
+  const warehouseForBatches = whForBatches && whForBatches.whLat != null && whForBatches.whLng != null ? { lat: whForBatches.whLat, lng: whForBatches.whLng } : null;
+  const rawActiveBatchStops = activeBatches.flatMap((b) => {
+    const vehicleIdx = state.vehicles.findIndex((v) => v.id === b.vehicleId);
+    const color = VEHICLE_PALETTE[(vehicleIdx < 0 ? 0 : vehicleIdx) % VEHICLE_PALETTE.length];
+    return b.orderNos
+      .map((no) => byOrderNoForBatches.get(no))
+      .filter((o): o is NonNullable<typeof o> => o != null && o.lat != null && o.lng != null)
+      .map((o) => ({
+        id: o.orderNo,
+        lat: o.lat as number,
+        lng: o.lng as number,
+        label: o.customer,
+        status: '',
+        color,
+        zoneName: `${b.vehicleName} · ${b.id}`,
+        pinLabel: null as string | null,
+        vehicleId: b.vehicleId as string | null,
+      }));
+  });
+  const { kept: activeBatchMapStops } = rejectOutlierStops(rawActiveBatchStops, warehouseForBatches);
+
+  // ---- Incomplete Orders: same stuck-order set the Order Management page's
+  // own "ออเดอร์ตกหล่น" table already shows, just reused here for a
+  // dashboard-level glance + a link to the full list. ----
+  const incompleteOrders = stuckRouteOrders(state, today)
+    .map((o) => {
+      const key = effectiveDeliveryDayKey(o)!;
+      return {
+        orderNo: o.orderNo,
+        customer: o.customer,
+        daysLate: Math.abs(daysBetweenKeys(key, today)),
+        stLabel: o.status || '—',
+        stStyle: sheetStatusStyle(o.status),
+        viewItems: () => actions.openOrderDetail(o.orderNo, o.customer, o),
+      };
+    })
+    .sort((a, b) => b.daysLate - a.daysLate);
+
   const forecastDays = Array.from({ length: 7 }, (_, i) => {
     const d = addDays(dayKeyToDate(today)!, i);
     const key = dayKey(d);
@@ -258,6 +355,14 @@ export function computeDashboard(state: AppState, actions: AppActions) {
     forecastDays,
     forecastStatusFilter: state.forecastStatusFilter,
     forecastStatusOptions,
+    dailyPerformance,
+    operationalStatus,
+    activeBatchCards,
+    activeBatchMapStops,
+    warehouseForBatches,
+    incompleteOrders,
+    incompleteCount: incompleteOrders.length,
+    goToIncompleteOrders: () => actions.patch({ route: 'route' }),
     onForecastStatusFilter: (v: string) => actions.patch({ forecastStatusFilter: v }),
   };
 }
@@ -557,6 +662,32 @@ export function computeRoute(state: AppState, actions: AppActions) {
     }
   }
 
+  // ---- "รอจัด Batch" (Waiting for Batching) — active orders never confirmed
+  // into any Batch Route yet, independent of this table's own search/date
+  // filters (same reasoning as stuckOrders below). "พร้อม batch" means the
+  // order already sits in some vehicle's routePlan, queued for that
+  // vehicle's next "ยืนยันรูท (Assign)"; "รอ batch" means it hasn't even
+  // been put on a vehicle yet.
+  const routePlanVehicleByOrderNo = new Map<string, string>();
+  for (const [vehicleId, orderNos] of Object.entries(state.routePlan)) {
+    for (const no of orderNos) routePlanVehicleByOrderNo.set(no, vehicleId);
+  }
+  const pendingBatchOrders = state.routeOrders
+    .filter((o) => !o.archived && !DELIVERY_DONE_STATUSES.includes(o.status) && !batchStampByOrderNo.has(o.orderNo))
+    .sort((a, b) => (sheetDateTimeToMs(b.orderedAtText) ?? 0) - (sheetDateTimeToMs(a.orderedAtText) ?? 0))
+    .map((o) => ({
+      orderNo: o.orderNo,
+      customer: o.customer,
+      route: routeZoneLetter(o.route) || '—',
+      amtText: fmt(o.totalAmount),
+      itemCountText: o.itemCount.toLocaleString('en-US'),
+      orderedAtText: formatOrderedAt(o.orderedAtText),
+      stLabel: o.status || '—',
+      stStyle: sheetStatusStyle(o.status),
+      batchReady: routePlanVehicleByOrderNo.has(o.orderNo),
+      viewItems: () => actions.openOrderDetail(o.orderNo, o.customer, o),
+    }));
+
   const rows = filtered.map((o) => {
     const batchStamp = batchStampByOrderNo.get(o.orderNo) ?? null;
     const skusForOrder = orderSkus.get(o.orderNo);
@@ -663,6 +794,8 @@ export function computeRoute(state: AppState, actions: AppActions) {
     isEmpty: filtered.length === 0,
     stuckOrders,
     stuckCount: stuckOrders.length,
+    pendingBatchOrders,
+    pendingBatchCount: pendingBatchOrders.length,
 
     // ---- archive feature ----
     archivedFilter: state.routeArchivedFilter,
