@@ -3,7 +3,7 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { DRIVE_ROOT_FOLDER_ENV, driveFolderPath, isAllowedFile, type AttachmentScope } from '../src/config/drive.js';
 import { GEOCODE_MIN_INTERVAL_MS, NOMINATIM_REVERSE_URL, NOMINATIM_USER_AGENT } from '../src/config/geocoding.js';
-import { MAIN_SHEET_ID, SHEET_TABS } from '../src/config/sheets.js';
+import { isRouteOrdersTabConfigured, MAIN_SHEET_ID, ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE, SHEET_TABS } from '../src/config/sheets.js';
 import { createSessionToken, verifySessionToken } from './session.js';
 
 // Shared core for the backend that needs Google credentials: the CS Master
@@ -1258,6 +1258,249 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
     console.error('[route-orders/update]', message);
+    return { status: 500, body: { error: message } };
+  }
+}
+
+// ---------- คำสั่งซื้อ VS sync (API Import -> คำสั่งซื้อ VS, matched by Order UID) ----------
+// Replaces the old "คำสั่งซื้อ" tab's row-position-based VLOOKUP/IMPORTRANGE
+// formula, which broke whenever API Import got a new row inserted above
+// existing ones (new orders usually sort to the top): every formula shifted
+// down one row, so staff-entered Route/note/tax-invoice/delivery-date ended
+// up stamped onto the wrong order. This sync is triggered by the app's own
+// "Sync" button (see actions.syncNow in store.ts) and matches strictly by
+// Order UID — never row position — so an insert anywhere in API Import can
+// never misalign anything here again.
+const API_IMPORT_ORDER_UID_HEADER = 'Order UID';
+const API_IMPORT_CUSTOMER_HEADER = 'ลูกค้า';
+const API_IMPORT_ITEM_COUNT_HEADER = 'จำนวนรายการ';
+const API_IMPORT_TOTAL_AMOUNT_HEADER = 'ยอดขายรวม';
+const API_IMPORT_PAYMENT_TYPE_HEADER = 'ประเภทชำระเงิน';
+const API_IMPORT_STATUS_HEADER = 'สถานะ';
+const API_IMPORT_ORDERED_AT_HEADER = 'วันที่สั่ง';
+const API_IMPORT_DELIVERED_AT_HEADER = 'วันที่จัดส่ง';
+const API_IMPORT_COMPLETED_AT_HEADER = 'วันที่ส่งสำเร็จ';
+const API_IMPORT_UPDATED_AT_HEADER = 'วันที่อัปเดต';
+const API_IMPORT_DISTRICT_HEADER = 'อำเภอ';
+const API_IMPORT_PROVINCE_HEADER = 'จังหวัด';
+const API_IMPORT_ADDRESS_HEADER = 'ที่อยู่';
+const API_IMPORT_LAT_HEADER = 'Latitude';
+const API_IMPORT_LNG_HEADER = 'Longitude';
+const API_IMPORT_PHONE_HEADER = 'เบอร์โทร';
+
+// Destination headers in คำสั่งซื้อ VS that this sync refreshes from API
+// Import every run. Deliberately excludes every staff-entered/app-managed
+// column (Route, AutoR, วันที่จะจัดส่ง, ขอใบกำกับภาษี, สินค้าโปรโมชั่น, new
+// customer, หมายเหตุ, far_from_wh, wh_lat, wh_long, คนส่ง, Archived) — those
+// are left completely untouched on an existing row, and start blank on a
+// newly-appended one, exactly as a genuinely new order should.
+const CUSTOMER_HEADER = 'ชื่อลูกค้า';
+const ITEM_COUNT_HEADER = 'จำนวนรายการ';
+const TOTAL_AMOUNT_HEADER = 'ยอดขายรวม';
+const PAYMENT_TYPE_HEADER = 'การจ่ายเงิน';
+const ORDERED_DATE_HEADER = 'วันที่สั่ง';
+const COMPLETED_DATE_HEADER = 'วันที่ส่งสำเร็จ';
+const UPDATED_DATE_HEADER = 'วันที่อัปเดต';
+const DISTRICT_PROVINCE_HEADER = 'อำเภอ, จังหวัด';
+const ADDRESS_FROM_UNII_HEADER = 'ที่อยู่จาก Unii';
+const MAP_LINK_HEADER = 'Link';
+const CS_LAT_HEADER = 'CS_Lat';
+const CS_LONG_HEADER = 'CS_Long';
+const PHONE_NUMBER_HEADER = 'Phone Number';
+
+interface SyncRouteOrdersSummary {
+  created: number;
+  updated: number;
+  skipped: { orderUid: string; reason: string }[];
+}
+
+export interface RouteOrdersSyncPlan {
+  /** row/col are 0-based data indices — row within routeOrdersRows (add 1 for
+   * the 1-based sheet row), col a column index into the คำสั่งซื้อ VS header. */
+  cellUpdates: { row: number; col: number; value: string }[];
+  newRows: unknown[][];
+  summary: SyncRouteOrdersSummary;
+  missingApiImportHeaders: string[];
+  missingVsHeaders: string[];
+}
+
+/**
+ * The actual matching/diff logic, pure and I/O-free (no Sheets API calls) so
+ * it can be unit-tested directly against fixture rows — this is the one
+ * piece that absolutely must be correct, since the entire point of this
+ * sync is "never misalign a row again." `apiImportRows`/`routeOrdersRows`
+ * are raw values.get()-shaped 2D arrays (row 0 = header). Never writes
+ * anything itself — handleSyncRouteOrders below turns the returned plan
+ * into actual batchUpdate/append calls.
+ */
+export function computeRouteOrdersSyncPlan(apiImportRows: unknown[][], routeOrdersRows: unknown[][]): RouteOrdersSyncPlan {
+  const apiImportHeader = (apiImportRows[0] ?? []) as unknown[];
+  const aiAt = (name: string) => apiImportHeader.findIndex((h) => String(h ?? '').trim() === name);
+
+  const requiredApiImportHeaders = [
+    API_IMPORT_ORDER_UID_HEADER, API_IMPORT_CUSTOMER_HEADER, API_IMPORT_ITEM_COUNT_HEADER, API_IMPORT_TOTAL_AMOUNT_HEADER,
+    API_IMPORT_PAYMENT_TYPE_HEADER, API_IMPORT_STATUS_HEADER, API_IMPORT_ORDERED_AT_HEADER, API_IMPORT_DELIVERED_AT_HEADER,
+    API_IMPORT_COMPLETED_AT_HEADER, API_IMPORT_UPDATED_AT_HEADER, API_IMPORT_DISTRICT_HEADER, API_IMPORT_PROVINCE_HEADER,
+    API_IMPORT_ADDRESS_HEADER, API_IMPORT_LAT_HEADER, API_IMPORT_LNG_HEADER, API_IMPORT_PHONE_HEADER,
+  ];
+  const missingApiImportHeaders = requiredApiImportHeaders.filter((h) => aiAt(h) === -1);
+
+  const vsHeader = (routeOrdersRows[0] ?? []) as unknown[];
+  const vsAt = (name: string) => vsHeader.findIndex((h) => String(h ?? '').trim() === name);
+
+  const requiredVsHeaders = [
+    ORDER_NO_HEADER, CUSTOMER_HEADER, ITEM_COUNT_HEADER, TOTAL_AMOUNT_HEADER, PAYMENT_TYPE_HEADER, STATUS_HEADER,
+    ORDERED_DATE_HEADER, DELIVERED_TIMESTAMP_HEADER, COMPLETED_DATE_HEADER, UPDATED_DATE_HEADER, DISTRICT_PROVINCE_HEADER,
+    ADDRESS_FROM_UNII_HEADER, MAP_LINK_HEADER, CS_LAT_HEADER, CS_LONG_HEADER, PHONE_NUMBER_HEADER,
+  ];
+  const missingVsHeaders = requiredVsHeaders.filter((h) => vsAt(h) === -1);
+
+  const summary: SyncRouteOrdersSummary = { created: 0, updated: 0, skipped: [] };
+  const cellUpdates: { row: number; col: number; value: string }[] = [];
+  const newRows: unknown[][] = [];
+
+  if (missingApiImportHeaders.length > 0 || missingVsHeaders.length > 0) {
+    return { cellUpdates, newRows, summary, missingApiImportHeaders, missingVsHeaders };
+  }
+
+  const vsRowByOrderUid = new Map<string, number>(); // orderUid -> 0-based row index into routeOrdersRows
+  const duplicateOrderUids = new Set<string>();
+  const orderNoCol = vsAt(ORDER_NO_HEADER);
+  for (let i = 1; i < routeOrdersRows.length; i++) {
+    const uid = String((routeOrdersRows[i] as unknown[] | undefined)?.[orderNoCol] ?? '').trim();
+    if (!uid) continue;
+    if (vsRowByOrderUid.has(uid)) duplicateOrderUids.add(uid);
+    else vsRowByOrderUid.set(uid, i);
+  }
+
+  for (let i = 1; i < apiImportRows.length; i++) {
+    const r = (apiImportRows[i] ?? []) as unknown[];
+    const orderUid = String(r[aiAt(API_IMPORT_ORDER_UID_HEADER)] ?? '').trim();
+    if (!orderUid) continue;
+
+    if (duplicateOrderUids.has(orderUid)) {
+      summary.skipped.push({ orderUid, reason: 'พบเลขคำสั่งซื้อนี้ซ้ำกันหลายแถวในคำสั่งซื้อ VS — แก้ไขในชีทโดยตรงก่อน sync รอบต่อไป' });
+      continue;
+    }
+
+    const districtProvince = [String(r[aiAt(API_IMPORT_DISTRICT_HEADER)] ?? '').trim(), String(r[aiAt(API_IMPORT_PROVINCE_HEADER)] ?? '').trim()]
+      .filter(Boolean)
+      .join(', ');
+    const lat = String(r[aiAt(API_IMPORT_LAT_HEADER)] ?? '').trim();
+    const lng = String(r[aiAt(API_IMPORT_LNG_HEADER)] ?? '').trim();
+    const mapLink = lat && lng ? `https://www.google.com/maps/search/?api=1&query=${lat},${lng}` : '';
+
+    const refreshValues: Record<string, string> = {
+      [CUSTOMER_HEADER]: String(r[aiAt(API_IMPORT_CUSTOMER_HEADER)] ?? '').trim(),
+      [ITEM_COUNT_HEADER]: String(r[aiAt(API_IMPORT_ITEM_COUNT_HEADER)] ?? '').trim(),
+      [TOTAL_AMOUNT_HEADER]: String(r[aiAt(API_IMPORT_TOTAL_AMOUNT_HEADER)] ?? '').trim(),
+      [PAYMENT_TYPE_HEADER]: String(r[aiAt(API_IMPORT_PAYMENT_TYPE_HEADER)] ?? '').trim(),
+      [STATUS_HEADER]: String(r[aiAt(API_IMPORT_STATUS_HEADER)] ?? '').trim(),
+      [ORDERED_DATE_HEADER]: String(r[aiAt(API_IMPORT_ORDERED_AT_HEADER)] ?? '').trim(),
+      [DELIVERED_TIMESTAMP_HEADER]: String(r[aiAt(API_IMPORT_DELIVERED_AT_HEADER)] ?? '').trim(),
+      [COMPLETED_DATE_HEADER]: String(r[aiAt(API_IMPORT_COMPLETED_AT_HEADER)] ?? '').trim(),
+      [UPDATED_DATE_HEADER]: String(r[aiAt(API_IMPORT_UPDATED_AT_HEADER)] ?? '').trim(),
+      [DISTRICT_PROVINCE_HEADER]: districtProvince,
+      [ADDRESS_FROM_UNII_HEADER]: String(r[aiAt(API_IMPORT_ADDRESS_HEADER)] ?? '').trim(),
+      [CS_LAT_HEADER]: lat,
+      [CS_LONG_HEADER]: lng,
+      [PHONE_NUMBER_HEADER]: String(r[aiAt(API_IMPORT_PHONE_HEADER)] ?? '').trim(),
+      // Link is only ever refreshed when a coordinate is actually present —
+      // never blanks out a manually-fixed link when API Import has none.
+      ...(mapLink ? { [MAP_LINK_HEADER]: mapLink } : {}),
+    };
+
+    const existingRow = vsRowByOrderUid.get(orderUid);
+    if (existingRow != null) {
+      for (const [h, v] of Object.entries(refreshValues)) {
+        cellUpdates.push({ row: existingRow, col: vsAt(h), value: v });
+      }
+      summary.updated++;
+    } else {
+      const rowValues: unknown[] = new Array(vsHeader.length).fill('');
+      rowValues[orderNoCol] = orderUid;
+      for (const [h, v] of Object.entries(refreshValues)) rowValues[vsAt(h)] = v;
+      newRows.push(rowValues);
+      summary.created++;
+    }
+  }
+
+  return { cellUpdates, newRows, summary, missingApiImportHeaders, missingVsHeaders };
+}
+
+/** Any authenticated user can trigger this — same as clicking the existing
+ * "Sync" button already available to every role; the write is entirely
+ * deterministic (mirrors API Import 1:1 by Order UID), so there's no
+ * meaningful risk in letting any logged-in session run it, unlike a manual
+ * edit form. */
+export async function handleSyncRouteOrders(token: string | null): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (!isRouteOrdersTabConfigured()) return { status: 500, body: { error: ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE } };
+
+  try {
+    const sheets = await getSheetsClient();
+
+    const apiImportTitle = await resolveSheetTitle(sheets, Number(SHEET_TABS.apiImport.gid));
+    const routeOrdersTitle = await resolveSheetTitle(sheets, ROUTE_ORDERS_GID);
+
+    const [apiImportRes, routeOrdersRes] = await Promise.all([
+      sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${apiImportTitle}!A:Z` }),
+      sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${routeOrdersTitle}!A:AB` }),
+    ]);
+
+    const plan = computeRouteOrdersSyncPlan(apiImportRes.data.values ?? [], routeOrdersRes.data.values ?? []);
+    if (plan.missingApiImportHeaders.length > 0) {
+      return { status: 500, body: { error: `ไม่พบคอลัมน์ในแท็บ API Import: ${plan.missingApiImportHeaders.join(', ')}` } };
+    }
+    if (plan.missingVsHeaders.length > 0) {
+      return {
+        status: 500,
+        body: { error: `ไม่พบคอลัมน์ในแท็บ "คำสั่งซื้อ VS": ${plan.missingVsHeaders.join(', ')} — ตรวจสอบว่าคัดลอกหัวคอลัมน์มาครบจากแท็บ "คำสั่งซื้อ" เดิม` },
+      };
+    }
+
+    const { cellUpdates, newRows, summary } = plan;
+
+    // Batched in chunks so one oversized request can't fail the whole sync —
+    // each chunk's own failure is caught and reported rather than losing
+    // every update in that chunk silently.
+    const CHUNK_SIZE = 500;
+    for (let i = 0; i < cellUpdates.length; i += CHUNK_SIZE) {
+      const chunk = cellUpdates.slice(i, i + CHUNK_SIZE);
+      try {
+        await sheets.spreadsheets.values.batchUpdate({
+          spreadsheetId: MAIN_SHEET_ID,
+          requestBody: {
+            valueInputOption: 'USER_ENTERED',
+            data: chunk.map((u) => ({ range: `${routeOrdersTitle}!${columnLetter(u.col)}${u.row + 1}`, values: [[u.value]] })),
+          },
+        });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'อัปเดตแถวไม่สำเร็จ';
+        summary.skipped.push({ orderUid: '(หลายรายการ)', reason: `อัปเดต ${chunk.length} เซลล์ไม่สำเร็จ: ${message}` });
+      }
+    }
+
+    if (newRows.length > 0) {
+      try {
+        await sheets.spreadsheets.values.append({
+          spreadsheetId: MAIN_SHEET_ID,
+          range: `${routeOrdersTitle}!A:AB`,
+          valueInputOption: 'USER_ENTERED',
+          insertDataOption: 'INSERT_ROWS',
+          requestBody: { values: newRows },
+        });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'เพิ่มแถวใหม่ไม่สำเร็จ';
+        summary.skipped.push({ orderUid: '(หลายรายการ)', reason: `เพิ่ม ${newRows.length} แถวใหม่ไม่สำเร็จ: ${message}` });
+      }
+    }
+
+    return { status: 200, body: summary };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+    console.error('[route-orders/sync]', message);
     return { status: 500, body: { error: message } };
   }
 }

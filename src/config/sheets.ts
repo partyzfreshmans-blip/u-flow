@@ -5,9 +5,29 @@
 export const MAIN_SHEET_ID = '1m1Cb_BEwPjqF3CgXNssGgjyewIgPNw_BU4EkduuV59U';
 export const SKU_SHEET_ID = '1gfbuVcH88ugwXgar393voAfcdOsS_qoi9galIFbWNXM';
 
+/** Placeholder gid for a tab that hasn't been created/configured yet — never
+ * a real Google Sheets gid (those are always non-negative integers), so it
+ * can't accidentally collide with one. See ROUTE_ORDERS_TAB_NOT_CONFIGURED. */
+const GID_NOT_CONFIGURED = 'NOT_CONFIGURED';
+
 export const SHEET_TABS = {
   apiImport: { sheetId: MAIN_SHEET_ID, gid: '665542805' },
-  routeOrders: { sheetId: MAIN_SHEET_ID, gid: '0' },
+  // "คำสั่งซื้อ" (gid 0) used a row-position-based VLOOKUP/IMPORTRANGE
+  // formula to pull in API Import data, which broke (staff-entered Route/
+  // note/tax-invoice/delivery-date landing on the wrong order) whenever a
+  // new row was inserted above existing ones in API Import. Replaced by a
+  // new tab, "คำสั่งซื้อ VS", synced by the app itself via
+  // handleSyncRouteOrders (server/lib.ts) matching strictly by Order UID —
+  // never row position. The old "คำสั่งซื้อ" tab (gid 0) is kept as a
+  // read-only historical backup; nothing in this app reads or writes it
+  // anymore.
+  //
+  // GID_NOT_CONFIGURED until "คำสั่งซื้อ VS" is created in the Google Sheets
+  // UI and its real gid (from the tab's URL, #gid=XXXXX, when selected) is
+  // put here — every read/write path checks for this placeholder first and
+  // fails with a clear, actionable message instead of silently hitting the
+  // wrong tab or a confusing API error.
+  routeOrders: { sheetId: MAIN_SHEET_ID, gid: GID_NOT_CONFIGURED },
   skuDetail: { sheetId: MAIN_SHEET_ID, gid: '772187603' },
   promotions: { sheetId: MAIN_SHEET_ID, gid: '1999566312' },
   csMaster: { sheetId: MAIN_SHEET_ID, gid: '514841442' },
@@ -19,3 +39,14 @@ export type SheetTabKey = keyof typeof SHEET_TABS;
 export function csvExportUrl(tab: { sheetId: string; gid: string }): string {
   return `https://docs.google.com/spreadsheets/d/${tab.sheetId}/export?format=csv&gid=${tab.gid}`;
 }
+
+/** True until SHEET_TABS.routeOrders.gid is updated with the real gid of the
+ * "คำสั่งซื้อ VS" tab. Checked by both the frontend CSV read and every
+ * backend handler that touches this tab, so an un-updated config fails
+ * loudly and specifically instead of a confusing generic error. */
+export function isRouteOrdersTabConfigured(): boolean {
+  return (SHEET_TABS.routeOrders.gid as string) !== GID_NOT_CONFIGURED;
+}
+
+export const ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE =
+  'ยังไม่ได้ตั้งค่า gid ของแท็บ "คำสั่งซื้อ VS" — สร้างแท็บใน Google Sheets แล้วอัปเดต SHEET_TABS.routeOrders.gid ใน src/config/sheets.ts ก่อนใช้งาน';

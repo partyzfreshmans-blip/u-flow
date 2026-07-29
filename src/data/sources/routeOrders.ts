@@ -1,4 +1,4 @@
-import { SHEET_TABS, csvExportUrl } from '../../config/sheets';
+import { isRouteOrdersTabConfigured, ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE, SHEET_TABS, csvExportUrl } from '../../config/sheets';
 import type { RouteOrder } from '../types';
 import { fetchSheetRows } from './sheetCsv';
 
@@ -62,6 +62,7 @@ function rowToRouteOrder(row: Record<string, string>): RouteOrder | null {
 }
 
 export async function fetchRouteOrders(): Promise<RouteOrder[]> {
+  if (!isRouteOrdersTabConfigured()) throw new Error(ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE);
   const rows = await fetchSheetRows(CSV_URL);
   return rows.map(rowToRouteOrder).filter((o): o is RouteOrder => o !== null);
 }

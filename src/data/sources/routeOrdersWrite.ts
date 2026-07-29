@@ -1,4 +1,4 @@
-import { authHeaders, loadSession } from '../session';
+import { authHeaders, loadSession, type Session } from '../session';
 
 export interface RouteOrderUpdatePayload {
   orderNo: string;
@@ -27,7 +27,7 @@ export interface RouteOrderUpdatePayload {
 
 /**
  * Writes delivery date / note / tax-invoice fields back to the real
- * "คำสั่งซื้อ" Google Sheet via the backend (server/ locally, api/ on
+ * "คำสั่งซื้อ VS" Google Sheet tab via the backend (server/ locally, api/ on
  * Vercel), which holds the Service Account credential. The backend matches
  * the row by order number and updates it in place — it never appends a new row.
  */
@@ -47,4 +47,36 @@ export async function updateRouteOrder(payload: RouteOrderUpdatePayload): Promis
     const message = body && typeof body === 'object' && 'error' in body ? String((body as { error: unknown }).error) : null;
     throw new Error(message || `บันทึกไม่สำเร็จ (HTTP ${res.status})`);
   }
+}
+
+export interface SyncRouteOrdersResult {
+  created: number;
+  updated: number;
+  skipped: { orderUid: string; reason: string }[];
+}
+
+/**
+ * Triggers the backend's API Import -> "คำสั่งซื้อ VS" merge, matched
+ * strictly by Order UID (never row position) — see handleSyncRouteOrders in
+ * server/lib.ts. Called from actions.syncNow, before the CSV re-fetch of
+ * routeOrders, so that re-fetch reads the just-synced rows.
+ */
+export async function syncRouteOrdersVs(session: Session): Promise<SyncRouteOrdersResult> {
+  let res: Response;
+  try {
+    res = await fetch('/api/route-orders/sync', { method: 'POST', headers: authHeaders(session) });
+  } catch {
+    throw new Error('เชื่อมต่อ backend ไม่ได้ — ลองใหม่อีกครั้ง');
+  }
+  const body: unknown = await res.json().catch(() => null);
+  if (!res.ok) {
+    const message = body && typeof body === 'object' && 'error' in body ? String((body as { error: unknown }).error) : null;
+    throw new Error(message || `ซิงค์คำสั่งซื้อไม่สำเร็จ (HTTP ${res.status})`);
+  }
+  const b = (body ?? {}) as Record<string, unknown>;
+  return {
+    created: typeof b.created === 'number' ? b.created : 0,
+    updated: typeof b.updated === 'number' ? b.updated : 0,
+    skipped: Array.isArray(b.skipped) ? (b.skipped as { orderUid: string; reason: string }[]) : [],
+  };
 }

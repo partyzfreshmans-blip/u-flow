@@ -19,7 +19,7 @@ import { resolveRouteOrderLocations } from '../data/customerLocation';
 import { GEOCODE_MIN_INTERVAL_MS } from '../config/geocoding';
 import { loadRouteCodState, saveRouteCodState } from '../data/routeCod';
 import { addDays, dayKey, dayKeyToDate, isoToSheetDateText, sheetDateToDayKey, todayDayKey } from '../data/dateUtils';
-import { updateRouteOrder } from '../data/sources/routeOrdersWrite';
+import { syncRouteOrdersVs, updateRouteOrder } from '../data/sources/routeOrdersWrite';
 import { loadDriverQueue, saveDriverQueue } from '../data/driverQueue';
 import { loadPickLots, savePickLots, type PickLot, type PickLotLine } from '../data/pickLots';
 import { loadBatchRoutes, saveBatchRoutes, type BatchRoute } from '../data/batchRoutes';
@@ -30,7 +30,7 @@ import { fetchBatchRoutes as apiFetchBatchRoutes, upsertBatchRoutes as apiUpsert
 import { DELIVERY_FAILED_STATUS, PICK_CLOSED_STATUS } from './helpers';
 import type { AttachmentScope } from '../config/drive';
 import type { ApiImportOrder, CsMasterCustomer, OrderLineItem, Promo, PromoPackUnit, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
-import { csvExportUrl, SHEET_TABS } from '../config/sheets';
+import { csvExportUrl, isRouteOrdersTabConfigured, SHEET_TABS } from '../config/sheets';
 import { loadLastSyncAt, saveLastSyncAt } from '../data/syncMeta';
 import { appendNotificationEvents, loadNotificationEvents, loadNotificationReadIds, saveNotificationReadIds, type NotificationEvent } from '../data/notifications';
 import { appendActivityLog, loadActivityLog, type ActivityLogEntry } from '../data/activityLog';
@@ -1889,6 +1889,28 @@ export function useAppStore() {
       // without reading back potentially-stale state right after the await.
       syncNow: async (): Promise<{ ok: boolean; routeOrdersOk: boolean; failures: string[] }> => {
         dispatch({ type: 'patch', patch: { syncing: true } });
+
+        // API Import -> "คำสั่งซื้อ VS" merge (matched by Order UID) runs
+        // first and is awaited on its own, so the routeOrders CSV re-fetch
+        // just below always reads what this just wrote, not stale rows from
+        // before this sync. A failure here is folded into the same
+        // `failures` list as every other source below — one bad source
+        // never blocks the rest of Sync.
+        const routeOrdersSyncFailure: string | null = await (async () => {
+          if (!isRouteOrdersTabConfigured()) return null; // fetchRouteOrders below reports this once, no need to duplicate it here
+          const session = loadSession();
+          if (!session) return null;
+          try {
+            const result = await syncRouteOrdersVs(session);
+            if (result.skipped.length > 0) {
+              return `ข้าม ${result.skipped.length} รายการ (${result.skipped.map((s) => s.reason).join('; ')})`;
+            }
+            return null;
+          } catch (err: unknown) {
+            return err instanceof Error ? err.message : 'ซิงค์คำสั่งซื้อ (API Import → คำสั่งซื้อ VS) ไม่สำเร็จ';
+          }
+        })();
+
         [
           csvExportUrl(SHEET_TABS.apiImport),
           csvExportUrl(SHEET_TABS.routeOrders),
@@ -1910,6 +1932,8 @@ export function useAppStore() {
         const patch: Partial<AppState> = {};
         const failures: string[] = [];
         let anySucceeded = false;
+
+        if (routeOrdersSyncFailure) failures.push(`ซิงค์คำสั่งซื้อ (API Import → คำสั่งซื้อ VS): ${routeOrdersSyncFailure}`);
 
         if (apiOrdersR.status === 'fulfilled') {
           patch.apiOrders = apiOrdersR.value;
