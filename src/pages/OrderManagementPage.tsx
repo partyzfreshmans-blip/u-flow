@@ -82,6 +82,7 @@ function OrderTable({
   setSelection: (orderNos: string[]) => void;
 }) {
   const [shown, setShown] = useState(PAGE_SIZE);
+  const [collapsed, setCollapsed] = useState(false);
   const visible = rows.slice(0, shown);
   const allOrderNos = rows.map((r) => r.orderNo);
   const allSelected = allOrderNos.length > 0 && allOrderNos.every((no) => selectedOrderNos.includes(no));
@@ -91,10 +92,16 @@ function OrderTable({
   };
   return (
     <div className="card elev-sm" style={{ padding: '4px 14px 8px', marginBottom: 18 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 2px 8px', fontWeight: 600, fontSize: 13.5, color: tone === 'warn' ? 'var(--st-warn-fg)' : 'var(--color-neutral-200)' }}>
+      <button
+        onClick={() => setCollapsed(!collapsed)}
+        style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left', padding: '12px 2px 8px', border: 0, background: 'transparent', cursor: 'pointer', fontFamily: 'var(--font-body)', fontWeight: 600, fontSize: 13.5, color: tone === 'warn' ? 'var(--st-warn-fg)' : 'var(--color-neutral-200)' }}
+      >
+        <i className={collapsed ? 'ph ph-caret-right' : 'ph ph-caret-down'} />
         {tone === 'warn' && <i className="ph ph-calendar-x" />}
         {title} ({rows.length})
-      </div>
+      </button>
+      {!collapsed && (
+      <>
       <div className="table-scroll">
       <table className="table">
         <thead>
@@ -209,6 +216,8 @@ function OrderTable({
           </button>
         </div>
       )}
+      </>
+      )}
     </div>
   );
 }
@@ -229,6 +238,8 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
   ].join('|');
 
   const [pendingBatchDialogOpen, setPendingBatchDialogOpen] = useState(false);
+  const [pendingBatchCollapsed, setPendingBatchCollapsed] = useState(false);
+  const [stuckCollapsed, setStuckCollapsed] = useState(false);
   /** "Batch ทั้งหมดที่รอ" doesn't invent a new batch-creation path — it just
    * preselects every pending order into the Planner's existing multi-select
    * (plannerSelectedOrderNos) and drops the user there, where "จัดลงรถ" +
@@ -267,49 +278,57 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
       {v.pendingBatchCount > 0 && (
         <div className="card elev-sm" style={{ padding: '4px 14px 8px', marginBottom: 18 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 2px 8px', fontWeight: 600, fontSize: 13.5, color: 'var(--st-info-fg)', flexWrap: 'wrap' }}>
-            <i className="ph ph-truck" />
-            รอจัด Batch ({v.pendingBatchCount})
+            <button
+              onClick={() => setPendingBatchCollapsed(!pendingBatchCollapsed)}
+              style={{ display: 'flex', alignItems: 'center', gap: 8, border: 0, background: 'transparent', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-body)', fontWeight: 600, fontSize: 13.5, color: 'inherit' }}
+            >
+              <i className={pendingBatchCollapsed ? 'ph ph-caret-right' : 'ph ph-caret-down'} />
+              <i className="ph ph-truck" />
+              รอจัด Batch ({v.pendingBatchCount})
+            </button>
             {canEdit && (
               <button className="btn btn-primary" style={{ marginLeft: 'auto', fontSize: 12.5 }} onClick={() => setPendingBatchDialogOpen(true)}>
                 <i className="ph ph-package" />จัด Batch ทั้งหมดที่รอ
               </button>
             )}
           </div>
-          <div className="table-scroll">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Route</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th style={{ textAlign: 'right' }}>ยอดรวม</th>
-                  <th style={{ textAlign: 'center' }}>รายการ</th><th>เวลา</th><th>สถานะ</th><th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {v.pendingBatchOrders.map((o) => (
-                  <tr key={o.orderNo}>
-                    <td><span style={{ display: 'inline-flex', fontSize: 11, padding: '2px 8px', borderRadius: 5, background: 'var(--color-neutral-800)', color: 'var(--color-neutral-200)' }}>{o.route}</span></td>
-                    <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 500 }}>{o.orderNo}</td>
-                    <td>{o.customer}</td>
-                    <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{o.amtText}</td>
-                    <td style={{ textAlign: 'center' }}>{o.itemCountText}</td>
-                    <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.orderedAtText}</td>
-                    <td style={{ whiteSpace: 'nowrap' }}>
-                      <span style={o.stStyle}>{o.stLabel}</span>
-                      <span
-                        style={{
-                          marginLeft: 6, fontSize: 10, padding: '1px 6px', borderRadius: 5,
-                          background: o.batchReady ? 'var(--st-ok-bg)' : 'var(--st-warn-bg)',
-                          color: o.batchReady ? 'var(--st-ok-fg)' : 'var(--st-warn-fg)',
-                        }}
-                      >
-                        {o.batchReady ? 'พร้อม batch' : 'รอ batch'}
-                      </span>
-                    </td>
-                    <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={o.viewItems}>ดูสินค้า</button></td>
+          {!pendingBatchCollapsed && (
+            <div className="table-scroll">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Route</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th style={{ textAlign: 'right' }}>ยอดรวม</th>
+                    <th style={{ textAlign: 'center' }}>รายการ</th><th>เวลา</th><th>สถานะ</th><th></th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {v.pendingBatchOrders.map((o) => (
+                    <tr key={o.orderNo}>
+                      <td><span style={{ display: 'inline-flex', fontSize: 11, padding: '2px 8px', borderRadius: 5, background: 'var(--color-neutral-800)', color: 'var(--color-neutral-200)' }}>{o.route}</span></td>
+                      <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 500 }}>{o.orderNo}</td>
+                      <td>{o.customer}</td>
+                      <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{o.amtText}</td>
+                      <td style={{ textAlign: 'center' }}>{o.itemCountText}</td>
+                      <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.orderedAtText}</td>
+                      <td style={{ whiteSpace: 'nowrap' }}>
+                        <span style={o.stStyle}>{o.stLabel}</span>
+                        <span
+                          style={{
+                            marginLeft: 6, fontSize: 10, padding: '1px 6px', borderRadius: 5,
+                            background: o.batchReady ? 'var(--st-ok-bg)' : 'var(--st-warn-bg)',
+                            color: o.batchReady ? 'var(--st-ok-fg)' : 'var(--st-warn-fg)',
+                          }}
+                        >
+                          {o.batchReady ? 'พร้อม batch' : 'รอ batch'}
+                        </span>
+                      </td>
+                      <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={o.viewItems}>ดูสินค้า</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 
@@ -441,33 +460,39 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
         };
         return (
         <div className="card elev-sm" style={{ padding: '4px 14px 8px', marginBottom: 18 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 2px 8px', fontWeight: 600, fontSize: 13.5, color: 'var(--st-warn-fg)' }}>
+          <button
+            onClick={() => setStuckCollapsed(!stuckCollapsed)}
+            style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left', padding: '12px 2px 8px', border: 0, background: 'transparent', cursor: 'pointer', fontFamily: 'var(--font-body)', fontWeight: 600, fontSize: 13.5, color: 'var(--st-warn-fg)' }}
+          >
+            <i className={stuckCollapsed ? 'ph ph-caret-right' : 'ph ph-caret-down'} />
             <i className="ph ph-calendar-x" />
             ออเดอร์ตกหล่น — เลยวันจัดส่งแล้วแต่ยังไม่สำเร็จ ({v.stuckCount})
-          </div>
-          <div className="table-scroll">
-          <table className="table">
-            <thead>
-              <tr>
-                {canEdit && <th style={{ width: 26 }}><input type="checkbox" checked={stuckAllSelected} onChange={toggleStuckSelectAll} /></th>}
-                <th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th>วันที่จะจัดส่ง</th><th style={{ textAlign: 'center' }}>ล่าช้า</th><th>สถานะ</th><th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {v.stuckOrders.map((o) => (
-                <tr key={o.orderNo}>
-                  {canEdit && <td><input type="checkbox" checked={o.selected} onChange={o.toggleSelect} /></td>}
-                  <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12.5 }}>{o.orderNo}</td>
-                  <td>{o.customer}</td>
-                  <td style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{o.plannedDeliveryDate}</td>
-                  <td style={{ textAlign: 'center', fontSize: 12, color: 'var(--st-bad-fg)', fontWeight: 600 }}>{o.daysLate} วัน</td>
-                  <td><span style={o.stStyle}>{o.stLabel}</span></td>
-                  <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={o.viewItems}>ดูสินค้า</button></td>
+          </button>
+          {!stuckCollapsed && (
+            <div className="table-scroll">
+            <table className="table">
+              <thead>
+                <tr>
+                  {canEdit && <th style={{ width: 26 }}><input type="checkbox" checked={stuckAllSelected} onChange={toggleStuckSelectAll} /></th>}
+                  <th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th>วันที่จะจัดส่ง</th><th style={{ textAlign: 'center' }}>ล่าช้า</th><th>สถานะ</th><th></th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-          </div>
+              </thead>
+              <tbody>
+                {v.stuckOrders.map((o) => (
+                  <tr key={o.orderNo}>
+                    {canEdit && <td><input type="checkbox" checked={o.selected} onChange={o.toggleSelect} /></td>}
+                    <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12.5 }}>{o.orderNo}</td>
+                    <td>{o.customer}</td>
+                    <td style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{o.plannedDeliveryDate}</td>
+                    <td style={{ textAlign: 'center', fontSize: 12, color: 'var(--st-bad-fg)', fontWeight: 600 }}>{o.daysLate} วัน</td>
+                    <td><span style={o.stStyle}>{o.stLabel}</span></td>
+                    <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={o.viewItems}>ดูสินค้า</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            </div>
+          )}
         </div>
         );
       })()}
