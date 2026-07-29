@@ -8,9 +8,12 @@ import '@phosphor-icons/web/regular';
 import '@phosphor-icons/web/fill';
 import './styles/nocturne.css';
 import App from './App';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   </StrictMode>,
 );

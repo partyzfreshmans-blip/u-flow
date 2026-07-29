@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { NotificationBell } from './components/NotificationBell';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { formatDateTime, pageTitles } from './state/derive';
 import { useAppStore } from './state/store';
 import { canAccessPage, defaultRouteFor } from './config/permissions';
@@ -43,7 +44,11 @@ function App() {
 
   // Full-screen mobile view for drivers — no admin sidebar/header chrome.
   if (state.route === 'driver') {
-    return <DriverPage state={state} actions={actions} />;
+    return (
+      <ErrorBoundary key={state.route}>
+        <DriverPage state={state} actions={actions} />
+      </ErrorBoundary>
+    );
   }
 
   const [pageTitle, pageSub] = pageTitles[state.route];
@@ -88,18 +93,20 @@ function App() {
         </header>
 
         <div style={{ flex: 1, padding: '24px 26px 60px', overflow: 'auto' }}>
-          {state.route === 'dashboard' && <DashboardPage state={state} actions={actions} />}
-          {state.route === 'route' && <OrderManagementPage state={state} actions={actions} />}
-          {state.route === 'planner' && <PlannerPage state={state} actions={actions} />}
-          {state.route === 'pick' && <PickPage state={state} actions={actions} />}
-          {state.route === 'cod' && <CodPage state={state} actions={actions} />}
-          {state.route === 'promo' && <PromoPage state={state} actions={actions} />}
-          {state.route === 'grn' && <ReceivingPage state={state} actions={actions} />}
-          {state.route === 'sku' && <SkuPage state={state} actions={actions} />}
-          {state.route === 'customer' && <CustomerPage state={state} actions={actions} />}
-          {state.route === 'activity' && <ActivityLogPage state={state} actions={actions} />}
-          {state.route === 'settings' && <SettingsPage state={state} actions={actions} />}
-          {state.route === 'users' && <UserManagementPage state={state} actions={actions} />}
+          <ErrorBoundary key={state.route}>
+            {state.route === 'dashboard' && <DashboardPage state={state} actions={actions} />}
+            {state.route === 'route' && <OrderManagementPage state={state} actions={actions} />}
+            {state.route === 'planner' && <PlannerPage state={state} actions={actions} />}
+            {state.route === 'pick' && <PickPage state={state} actions={actions} />}
+            {state.route === 'cod' && <CodPage state={state} actions={actions} />}
+            {state.route === 'promo' && <PromoPage state={state} actions={actions} />}
+            {state.route === 'grn' && <ReceivingPage state={state} actions={actions} />}
+            {state.route === 'sku' && <SkuPage state={state} actions={actions} />}
+            {state.route === 'customer' && <CustomerPage state={state} actions={actions} />}
+            {state.route === 'activity' && <ActivityLogPage state={state} actions={actions} />}
+            {state.route === 'settings' && <SettingsPage state={state} actions={actions} />}
+            {state.route === 'users' && <UserManagementPage state={state} actions={actions} />}
+          </ErrorBoundary>
         </div>
       </main>
     </div>
