@@ -16,18 +16,13 @@ export const SHEET_TABS = {
   // formula to pull in API Import data, which broke (staff-entered Route/
   // note/tax-invoice/delivery-date landing on the wrong order) whenever a
   // new row was inserted above existing ones in API Import. Replaced by a
-  // new tab, "คำสั่งซื้อ VS", synced by the app itself via
+  // new tab, "คำสั่งซื้อ VS" (gid 848682054, a duplicate of the old tab with
+  // its existing data carried over), synced by the app itself via
   // handleSyncRouteOrders (server/lib.ts) matching strictly by Order UID —
   // never row position. The old "คำสั่งซื้อ" tab (gid 0) is kept as a
   // read-only historical backup; nothing in this app reads or writes it
   // anymore.
-  //
-  // GID_NOT_CONFIGURED until "คำสั่งซื้อ VS" is created in the Google Sheets
-  // UI and its real gid (from the tab's URL, #gid=XXXXX, when selected) is
-  // put here — every read/write path checks for this placeholder first and
-  // fails with a clear, actionable message instead of silently hitting the
-  // wrong tab or a confusing API error.
-  routeOrders: { sheetId: MAIN_SHEET_ID, gid: GID_NOT_CONFIGURED },
+  routeOrders: { sheetId: MAIN_SHEET_ID, gid: '848682054' },
   skuDetail: { sheetId: MAIN_SHEET_ID, gid: '772187603' },
   promotions: { sheetId: MAIN_SHEET_ID, gid: '1999566312' },
   csMaster: { sheetId: MAIN_SHEET_ID, gid: '514841442' },
