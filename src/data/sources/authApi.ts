@@ -39,18 +39,28 @@ export interface UserListRow {
 }
 
 export async function fetchUsers(session: Session): Promise<UserListRow[]> {
-  const res = await fetch('/api/users', { headers: authHeaders(session) });
+  let res: Response;
+  try {
+    res = await fetch('/api/users', { headers: authHeaders(session) });
+  } catch {
+    throw new Error('เชื่อมต่อ backend ไม่ได้ — ลองใหม่อีกครั้ง');
+  }
   const body = await readJson(res);
   if (!res.ok) throw new Error(errorMessage(body, `โหลดรายชื่อผู้ใช้ไม่สำเร็จ (HTTP ${res.status})`));
   return Array.isArray(body.users) ? (body.users as UserListRow[]) : [];
 }
 
 export async function createUser(session: Session, input: { username: string; password: string; role: Role; driverVehicleId: string }): Promise<void> {
-  const res = await fetch('/api/users/create', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders(session) },
-    body: JSON.stringify(input),
-  });
+  let res: Response;
+  try {
+    res = await fetch('/api/users/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(session) },
+      body: JSON.stringify(input),
+    });
+  } catch {
+    throw new Error('เชื่อมต่อ backend ไม่ได้ — ลองใหม่อีกครั้ง');
+  }
   const body = await readJson(res);
   if (!res.ok) throw new Error(errorMessage(body, `สร้างผู้ใช้ไม่สำเร็จ (HTTP ${res.status})`));
 }
@@ -59,11 +69,16 @@ export async function updateUser(
   session: Session,
   input: { username: string; role?: Role; active?: boolean; driverVehicleId?: string; newPassword?: string },
 ): Promise<void> {
-  const res = await fetch('/api/users/update', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders(session) },
-    body: JSON.stringify(input),
-  });
+  let res: Response;
+  try {
+    res = await fetch('/api/users/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(session) },
+      body: JSON.stringify(input),
+    });
+  } catch {
+    throw new Error('เชื่อมต่อ backend ไม่ได้ — ลองใหม่อีกครั้ง');
+  }
   const body = await readJson(res);
   if (!res.ok) throw new Error(errorMessage(body, `แก้ไขผู้ใช้ไม่สำเร็จ (HTTP ${res.status})`));
 }

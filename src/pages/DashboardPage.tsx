@@ -206,7 +206,7 @@ export function DashboardPage({ state, actions }: { state: AppState; actions: Ap
             ))}
           </div>
           {v.activeBatchMapStops.length > 0 && (
-            <div style={{ height: 320, borderRadius: 9, overflow: 'hidden' }}>
+            <div style={{ height: 320, borderRadius: 9, overflow: 'hidden', position: 'relative' }}>
               <RouteMap stops={v.activeBatchMapStops} warehouse={v.warehouseForBatches} />
             </div>
           )}
