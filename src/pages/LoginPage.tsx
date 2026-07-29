@@ -4,6 +4,7 @@ import type { AppActions, AppState } from '../state/store';
 export function LoginPage({ state, actions }: { state: AppState; actions: AppActions }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -28,14 +29,27 @@ export function LoginPage({ state, actions }: { state: AppState; actions: AppAct
         </div>
         <div className="field">
           <label>Password</label>
-          <input
-            className="input"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            disabled={state.authLoading}
-            autoComplete="current-password"
-          />
+          <div style={{ position: 'relative' }}>
+            <input
+              className="input"
+              type={showPassword ? 'text' : 'password'}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              disabled={state.authLoading}
+              autoComplete="current-password"
+              style={{ paddingRight: 38 }}
+            />
+            <button
+              type="button"
+              className="btn btn-icon btn-ghost"
+              onClick={() => setShowPassword((v) => !v)}
+              tabIndex={-1}
+              aria-label={showPassword ? 'ซ่อนรหัสผ่าน' : 'แสดงรหัสผ่าน'}
+              style={{ position: 'absolute', right: 2, top: '50%', transform: 'translateY(-50%)' }}
+            >
+              <i className={showPassword ? 'ph ph-eye-slash' : 'ph ph-eye'} />
+            </button>
+          </div>
         </div>
 
         {state.authError && (

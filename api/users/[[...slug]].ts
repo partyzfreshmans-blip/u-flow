@@ -1,14 +1,15 @@
 import { handleCreateUser, handleListUsers, handleUpdateUser } from '../../server/lib.js';
 import { bearerToken } from '../../server/session.js';
+import { routeSlug } from '../_routing.js';
 import type { ApiRequest, ApiResponse } from '../_types.js';
 
 // Consolidates api/users/index.ts + api/users/create.ts + api/users/update.ts
 // into one Vercel Serverless Function — see api/auth/[[...slug]].ts for why
-// (Hobby plan's 12-function-per-deployment cap). Same external URLs
+// (Hobby plan's 12-function-per-deployment cap) and why the sub-path comes
+// from req.url via routeSlug rather than req.query.slug. Same external URLs
 // (/api/users, /api/users/create, /api/users/update), zero frontend changes.
 export default async function handler(req: ApiRequest, res: ApiResponse) {
-  const slugParam = req.query.slug;
-  const slug = Array.isArray(slugParam) ? slugParam.join('/') : (slugParam ?? '');
+  const slug = routeSlug(req, '/api/users');
   const token = bearerToken(req.headers.authorization);
 
   if (slug === '' && req.method === 'GET') {
