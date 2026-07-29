@@ -110,7 +110,12 @@ export interface Sku {
   location: string;
 }
 
-// ---------- Dashboard / "API Import" tab: newest, not-yet-routed orders ----------
+// ---------- "API Import" tab: the one raw source of truth for order data,
+// straight from Unii. Every column the tab has is captured — named fields
+// for everything the app currently knows about, plus `raw` holding the
+// complete original row keyed by its exact header text, so a column nobody
+// has written code for yet is still sitting in state, ready the moment
+// something needs it (no re-fetch, no code change to "start capturing" it). ----------
 export interface ApiImportOrder {
   no: string;
   orderUid: string;
@@ -118,6 +123,8 @@ export interface ApiImportOrder {
    * รอชำระเงิน / ได้รับแล้ว / ยกเลิก — shown verbatim, not translated into an enum. */
   status: string;
   paymentType: string;
+  /** Payment-received flag straight from Unii ("ชำระเงินแล้ว"), separate from
+   * the order status itself — a paid order can still be "กำลังดำเนินการ". */
   paid: string;
   itemCount: number;
   totalAmount: number;
@@ -129,35 +136,85 @@ export interface ApiImportOrder {
   orderedAt: string;
   deliveredAt: string;
   completedAt: string;
+  /** Raw tax-invoice request text as Unii sent it — the app's own override
+   * (see StaffOrderInfo.taxInvoiceOverride) takes precedence when staff have
+   * explicitly set one; this is only the fallback/default. */
   wantsTaxInvoice: string;
   updatedAt: string;
   lat: number | null;
   lng: number | null;
+  /** Distance from warehouse and the warehouse's own coordinate, if this tab
+   * carries them (columns observed under these exact snake_case names,
+   * unlike every other column here — apparently passed through by Unii
+   * without a Thai relabel). Null when the tab doesn't have them for this row;
+   * downstream code always has a haversine fallback once a customer
+   * coordinate is known, so this is a "when available" optimization only. */
+  distanceFromWhKm: number | null;
+  whLat: number | null;
+  whLng: number | null;
+  /** The complete row exactly as Papa Parse returned it, header text -> cell
+   * text, with every column the tab has today — including any not named
+   * above. The single guarantee this redesign is built around: nothing from
+   * API Import is ever silently dropped, whether or not the app has a typed
+   * field for it yet. */
+  raw: Record<string, string>;
 }
 
-// ---------- Route planning / delivery history: "คำสั่งซื้อ" tab ----------
-export interface RouteOrder {
-  /** Effective route: the manual "Route" column if set, else the "AutoR" column. */
-  route: string;
+// ---------- "คำสั่งซื้อ VS" tab: ONLY what staff enter through this app's own
+// UI — never a copy of anything already in API Import. Order UID is the sole
+// key; a row may not exist yet for a brand new order, which just means none
+// of these fields have been set (see joinRouteOrders). ----------
+export interface StaffOrderInfo {
+  orderUid: string;
+  /** ISO YYYY-MM-DD once set via the "วันที่จะจัดส่ง" field, '' until then. */
   plannedDeliveryDate: string;
+  note: string;
+  /** null = staff never touched this — the joined order falls back to
+   * ApiImportOrder.wantsTaxInvoice. Set explicitly once edited here. */
+  taxInvoiceOverride: boolean | null;
+  /** App-driven delivery outcome ("กำลังจัดส่ง" on pick-lot close, "ส่งสำเร็จ" on
+   * mark-delivered, "ส่งไม่สำเร็จ" on a driver's failed-delivery report) — kept
+   * apart from ApiImportOrder.status (Unii's own field, this app never writes
+   * to it) precisely so this rewrite doesn't have to give up any of those
+   * three existing write-back actions. '' until any of them has fired once. */
+  operationalStatus: string;
+  /** Sheet datetime text for whenever operationalStatus was last set — pairs
+   * with it (e.g. "delivered at" in driver/history views), '' until then. */
+  operationalStatusAt: string;
+  /** "{driver}/{vehicle}/{batchId}" stamped by a Batch Route Assign/edit, '' once
+   * the order leaves every batch. */
+  courierStamp: string;
+  archived: boolean;
+  /** Free-text "new customer" annotation some staff keep maintaining directly
+   * in the sheet — the app has never had an edit control for this, so it's
+   * read-only here, but the column stays so that existing habit isn't broken. */
+  newCustomer: string;
+}
+
+// ---------- Route planning / delivery history / order management: the
+// runtime JOIN of ApiImportOrder + StaffOrderInfo by Order UID (see
+// joinRouteOrders) — every page in the app reads this, never the two source
+// types directly, so there is exactly one place "what does staff data win
+// over Unii data, and vice versa" gets decided. ----------
+export interface RouteOrder {
   orderedAtText: string;
   customer: string;
   orderNo: string;
   itemCount: number;
   totalAmount: number;
   paymentType: string;
+  /** ApiImportOrder.status, unless StaffOrderInfo.operationalStatus has ever
+   * been set (mark-delivered/delivery-failed/pick-lot-close) — that's this
+   * app's own record of an outcome Unii's pipeline may not yet reflect. */
   status: string;
+  plannedDeliveryDate: string;
   note: string;
   isNewCustomer: string;
   orderedDate: string;
   deliveredDate: string;
   completedDate: string;
   updatedDate: string;
-  /** Parsed from a bootstrapped "ขอใบกำกับภาษี" column — see routeOrdersWrite.ts. */
   wantsTaxInvoice: boolean;
-  /** Parsed from a bootstrapped "Archived" column — see routeOrdersWrite.ts. Hides
-   * the order from normal operational views (Order Management, Planner, Pick,
-   * Dashboard) without deleting any data; toggled via the archive/unarchive UI. */
   archived: boolean;
   districtProvince: string;
   addressFromUnii: string;
@@ -168,6 +225,10 @@ export interface RouteOrder {
   distanceFromWhKm: number | null;
   whLat: number | null;
   whLng: number | null;
+  /** "{driver}/{vehicle}/{batchId}" — see StaffOrderInfo.courierStamp. Not
+   * currently read by any page (batch/vehicle assignment is read live off
+   * state.batchRoutes instead), kept for parity with what's written. */
+  courierStamp: string;
 }
 
 // ---------- Order line items: "SKU Detail" tab ----------

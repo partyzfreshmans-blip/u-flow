@@ -569,15 +569,6 @@ export function computeOrderDetail(state: AppState, actions: AppActions) {
 
 // ---------- ROUTE PLANNING / DELIVERY HISTORY ("คำสั่งซื้อ" tab) ----------
 
-/** The sheet's Route/AutoR column mixes zone letters with trip numbers
- * ("A", "B1523", "a1908", "2345", "รับเอง/1020"). Only the leading letter is
- * the delivery zone, so that is what the UI filters on — otherwise the filter
- * lists well over a thousand one-off trip codes. */
-export function routeZoneLetter(route: string): string {
-  const m = (route ?? '').trim().match(/^([A-Za-z])/);
-  return m ? m[1].toUpperCase() : '';
-}
-
 export function computeRoute(state: AppState, actions: AppActions) {
   const rq = state.routeQ.trim().toLowerCase();
   // Customer-corrected coordinates (see src/data/customerLocation.ts) always
@@ -691,7 +682,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
     .map((o) => ({
       orderNo: o.orderNo,
       customer: o.customer,
-      route: routeZoneLetter(o.route) || '—',
+      route: resolveZone(state.zoneRules, o, state.geocodeCache).route,
       amtText: fmt(o.totalAmount),
       itemCountText: o.itemCount.toLocaleString('en-US'),
       orderedAtText: formatOrderedAt(o.orderedAtText),
@@ -720,7 +711,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
         { plannedDeliveryDate: sheetDateToDayKey(o.plannedDeliveryDate) ?? '', note: o.note, wantsTaxInvoice: o.wantsTaxInvoice },
       );
     return {
-      route: routeZoneLetter(o.route) || '—',
+      route: resolveZone(state.zoneRules, o, state.geocodeCache).route,
       districtProvince: districtProvinceLabel(o, state.geocodeCache),
       orderNo: o.orderNo,
       archived: o.archived,

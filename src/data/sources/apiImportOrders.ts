@@ -40,6 +40,13 @@ function rowToOrder(row: Record<string, string>): ApiImportOrder | null {
     updatedAt: (row['วันที่อัปเดต'] ?? '').trim(),
     lat: toLatLng(row['Latitude']),
     lng: toLatLng(row['Longitude']),
+    // Observed under these exact snake_case names (unlike every other column
+    // here) — likely passed through by Unii without a Thai relabel. Optional:
+    // null when this tab doesn't carry them, same as if they were never read.
+    distanceFromWhKm: toLatLng(row['far_from_wh']),
+    whLat: toLatLng(row['wh_lat']),
+    whLng: toLatLng(row['wh_long']),
+    raw: row,
   };
 }
 

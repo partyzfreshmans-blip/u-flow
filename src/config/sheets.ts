@@ -11,23 +11,51 @@ export const SKU_SHEET_ID = '1gfbuVcH88ugwXgar393voAfcdOsS_qoi9galIFbWNXM';
 const GID_NOT_CONFIGURED = 'NOT_CONFIGURED';
 
 export const SHEET_TABS = {
+  // The one raw source of truth for order data, straight from Unii — read
+  // live every time (src/data/sources/apiImportOrders.ts), never synced
+  // anywhere else. Every column this tab has gets captured (named fields for
+  // known ones, a `raw` passthrough for everything else).
   apiImport: { sheetId: MAIN_SHEET_ID, gid: '665542805' },
-  // "คำสั่งซื้อ" (gid 0) used a row-position-based VLOOKUP/IMPORTRANGE
-  // formula to pull in API Import data, which broke (staff-entered Route/
-  // note/tax-invoice/delivery-date landing on the wrong order) whenever a
-  // new row was inserted above existing ones in API Import. Replaced by a
-  // new tab, "คำสั่งซื้อ VS" (gid 848682054, a duplicate of the old tab with
-  // its existing data carried over), synced by the app itself via
-  // handleSyncRouteOrders (server/lib.ts) matching strictly by Order UID —
-  // never row position. The old "คำสั่งซื้อ" tab (gid 0) is kept as a
-  // read-only historical backup; nothing in this app reads or writes it
-  // anymore.
+  // "คำสั่งซื้อ" (gid 0) used a row-position-based VLOOKUP/IMPORTRANGE formula
+  // to pull in API Import data, which broke (staff-entered fields landing on
+  // the wrong order) whenever a new row was inserted above existing ones in
+  // API Import. Its replacement, "คำสั่งซื้อ VS" (this key, gid 848682054),
+  // first tried fixing that by syncing API Import's columns into this tab by
+  // Order UID — but that just traded one class of bug for another (a sync
+  // that has to rewrite the entire sheet's history every run to catch every
+  // status change is itself fragile and slow). This tab now holds ONLY data
+  // staff enter through this app's own UI — see STAFF_ORDER_INFO_HEADERS for
+  // its exact columns — and nothing here is ever a copy of an API Import
+  // column. joinRouteOrders (src/data/sources/routeOrders.ts) combines the
+  // two by Order UID at render time instead: no sync step, no "did the last
+  // sync actually finish" question, no columns that can silently drift out
+  // of alignment. The old "คำสั่งซื้อ" tab (gid 0) is kept as a read-only
+  // historical backup; nothing in this app reads or writes it anymore.
   routeOrders: { sheetId: MAIN_SHEET_ID, gid: '848682054' },
   skuDetail: { sheetId: MAIN_SHEET_ID, gid: '772187603' },
   promotions: { sheetId: MAIN_SHEET_ID, gid: '1999566312' },
   csMaster: { sheetId: MAIN_SHEET_ID, gid: '514841442' },
   skuMaster: { sheetId: SKU_SHEET_ID, gid: '0' },
 } as const;
+
+/** Exact header text and left-to-right order for "คำสั่งซื้อ VS" under the
+ * new staff-only layout — the single source of truth both the frontend
+ * reader (staffOrderInfo.ts) and the backend writer (server/lib.ts) key off
+ * of by name, never by column position. Order UID is the join key against
+ * API Import; every other column is something staff enter through this
+ * app's own UI (see src/data/types.ts's StaffOrderInfo for what each one
+ * means) — nothing here duplicates a column API Import already has. */
+export const STAFF_ORDER_INFO_HEADERS = [
+  'Order UID',
+  'วันที่จะจัดส่ง',
+  'หมายเหตุ',
+  'ขอใบกำกับภาษี',
+  'สถานะการดำเนินงาน',
+  'เวลาที่บันทึกสถานะ',
+  'คนส่ง',
+  'Archived',
+  'new customer',
+] as const;
 
 export type SheetTabKey = keyof typeof SHEET_TABS;
 

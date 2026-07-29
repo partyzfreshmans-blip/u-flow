@@ -1,68 +1,71 @@
-import { isRouteOrdersTabConfigured, ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE, SHEET_TABS, csvExportUrl } from '../../config/sheets';
-import type { RouteOrder } from '../types';
-import { fetchSheetRows } from './sheetCsv';
+// The runtime join: API Import (the one raw source of truth for order data)
+// combined with คำสั่งซื้อ VS (staff-entered-only overlay), by Order UID, into
+// the RouteOrder every page in the app actually reads. Replaces the old
+// sync-two-sheets-together design — there is no longer any "did the last
+// sync actually finish, and did it write every column" question, because
+// nothing is ever copied between the two tabs; this just reads both, fresh,
+// every time, and joins them in memory.
+import { isRouteOrdersTabConfigured, ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE } from '../../config/sheets';
+import type { ApiImportOrder, RouteOrder, StaffOrderInfo } from '../types';
+import { fetchApiImportOrders } from './apiImportOrders';
+import { fetchStaffOrderInfo } from './staffOrderInfo';
 
-const CSV_URL = csvExportUrl(SHEET_TABS.routeOrders);
-
-function toNumber(v: string | undefined): number {
-  const cleaned = (v ?? '').replace(/,/g, '').trim();
-  const n = Number(cleaned);
-  return Number.isFinite(n) ? n : 0;
+function parseYesNo(text: string): boolean {
+  return /^(ใช่|yes|true|y)$/i.test(text.trim());
 }
 
-function toFloatOrNull(v: string | undefined): number | null {
-  const s = (v ?? '').trim();
-  if (!s) return null;
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
+/**
+ * Pure join, no I/O — unit-testable directly against fixture arrays. A
+ * brand new order with no คำสั่งซื้อ VS row yet just gets every staff-entered
+ * field defaulted (blank note/delivery-date, not archived, no operational
+ * status override) rather than being excluded or erroring.
+ */
+export function joinRouteOrders(apiImportOrders: ApiImportOrder[], staffInfos: StaffOrderInfo[]): RouteOrder[] {
+  const staffByUid = new Map(staffInfos.map((s) => [s.orderUid, s]));
+  return apiImportOrders.map((o): RouteOrder => {
+    const staff: StaffOrderInfo | undefined = staffByUid.get(o.orderUid);
+    const districtProvince = [o.district, o.province].filter(Boolean).join(', ');
+    const mapLink = o.lat != null && o.lng != null ? `https://www.google.com/maps/search/?api=1&query=${o.lat},${o.lng}` : '';
+    return {
+      orderedAtText: o.orderedAt,
+      customer: o.customer,
+      orderNo: o.orderUid,
+      itemCount: o.itemCount,
+      totalAmount: o.totalAmount,
+      paymentType: o.paymentType,
+      // The app's own operational outcome (mark-delivered/delivery-failed/
+      // pick-lot-close) wins once it's ever been set — that's this app's own
+      // record of something Unii's own pipeline may not yet reflect.
+      status: staff?.operationalStatus || o.status,
+      plannedDeliveryDate: staff?.plannedDeliveryDate ?? '',
+      note: staff?.note ?? '',
+      isNewCustomer: staff?.newCustomer ?? '',
+      orderedDate: o.orderedAt,
+      deliveredDate: o.deliveredAt,
+      completedDate: o.completedAt,
+      updatedDate: o.updatedAt,
+      wantsTaxInvoice: staff?.taxInvoiceOverride ?? parseYesNo(o.wantsTaxInvoice),
+      archived: staff?.archived ?? false,
+      districtProvince,
+      addressFromUnii: o.address,
+      mapLink,
+      lat: o.lat,
+      lng: o.lng,
+      phone: o.phone,
+      distanceFromWhKm: o.distanceFromWhKm,
+      whLat: o.whLat,
+      whLng: o.whLng,
+      courierStamp: staff?.courierStamp ?? '',
+    };
+  });
 }
 
-function rowToRouteOrder(row: Record<string, string>): RouteOrder | null {
-  const orderNo = (row['เลขคำสั่งซื้อ'] ?? '').trim();
-  if (!orderNo) return null;
-  // "Route" is a manual override; when blank, the system-assigned "AutoR" applies.
-  const manualRoute = (row['Route'] ?? '').trim();
-  const autoRoute = (row['AutoR'] ?? '').trim();
-  const districtProvince = (row['อำเภอ, จังหวัด'] ?? '').trim();
-  const addressFromUnii = (row['ที่อยู่จาก Unii'] ?? '').trim();
-  return {
-    route: manualRoute || autoRoute || '—',
-    plannedDeliveryDate: (row['วันที่จะจัดส่ง'] ?? '').trim(),
-    orderedAtText: (row['วันเวลาที่สั่ง'] ?? '').trim(),
-    customer: (row['ชื่อลูกค้า'] ?? '').trim(),
-    orderNo,
-    itemCount: toNumber(row['จำนวนรายการ']),
-    totalAmount: toNumber(row['ยอดขายรวม']),
-    paymentType: (row['การจ่ายเงิน'] ?? '').trim(),
-    status: (row['Status'] ?? '').trim(),
-    note: (row['หมายเหตุ'] ?? '').trim(),
-    isNewCustomer: (row['new customer'] ?? '').trim(),
-    orderedDate: (row['วันที่สั่ง'] ?? '').trim(),
-    deliveredDate: (row['วันที่จัดส่ง'] ?? '').trim(),
-    completedDate: (row['วันที่ส่งสำเร็จ'] ?? '').trim(),
-    updatedDate: (row['วันที่อัปเดต'] ?? '').trim(),
-    // No clean boolean column exists in this tab yet — the backend bootstraps
-    // one named exactly "ขอใบกำกับภาษี" the first time someone saves the
-    // toggle (see server/index.ts). Until then this just reads blank/false.
-    wantsTaxInvoice: /^(ใช่|yes|true|y)$/i.test((row['ขอใบกำกับภาษี'] ?? '').trim()),
-    // Same bootstrapped-column pattern, this time for the Archive feature — the
-    // backend creates a column named exactly "Archived" the first time someone
-    // archives an order (see server/lib.ts).
-    archived: /^(ใช่|yes|true|y)$/i.test((row['Archived'] ?? '').trim()),
-    districtProvince,
-    addressFromUnii,
-    mapLink: (row['Link'] ?? '').trim(),
-    lat: toFloatOrNull(row['CS_Lat']),
-    lng: toFloatOrNull(row['CS_Long']),
-    phone: (row['Phone Number'] ?? '').trim(),
-    distanceFromWhKm: toFloatOrNull(row['far_from_wh']),
-    whLat: toFloatOrNull(row['wh_lat']),
-    whLng: toFloatOrNull(row['wh_long']),
-  };
-}
-
+/** Reads both sources live and joins them — the one function every page
+ * should call for order data. Kept under this name (unchanged from the old
+ * sync-based design) so every existing call site — the mount effect and
+ * actions.syncNow in store.ts — needed no changes at all. */
 export async function fetchRouteOrders(): Promise<RouteOrder[]> {
   if (!isRouteOrdersTabConfigured()) throw new Error(ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE);
-  const rows = await fetchSheetRows(CSV_URL);
-  return rows.map(rowToRouteOrder).filter((o): o is RouteOrder => o !== null);
+  const [apiImportOrders, staffInfos] = await Promise.all([fetchApiImportOrders(), fetchStaffOrderInfo()]);
+  return joinRouteOrders(apiImportOrders, staffInfos);
 }

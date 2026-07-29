@@ -17,7 +17,6 @@ import {
   handleReverseGeocode,
   handleLinkLineItemPromo,
   handleUpdateCsMasterLocation,
-  handleSyncRouteOrders,
   handleUpdateRouteOrder,
   handleUpdateUser,
   handleUpsertBatchRoutes,
@@ -66,11 +65,6 @@ app.post('/api/cs-master/update-location', async (req, res) => {
 
 app.post('/api/route-orders/update', async (req, res) => {
   const { status, body } = await handleUpdateRouteOrder(bearerToken(req.headers.authorization), req.body);
-  res.status(status).json(body);
-});
-
-app.post('/api/route-orders/sync', async (req, res) => {
-  const { status, body } = await handleSyncRouteOrders(bearerToken(req.headers.authorization));
   res.status(status).json(body);
 });
 

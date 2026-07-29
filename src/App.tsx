@@ -84,15 +84,6 @@ function App() {
             >
               <i className={state.syncError ? 'ph ph-warning-fill' : 'ph ph-calendar-blank'} />
               {state.lastSyncAt ? `อัปเดตล่าสุด ${formatDateTime(state.lastSyncAt)}` : 'ยังไม่เคย sync'}
-              {state.lastRouteOrdersSyncSummary && !state.syncError && (
-                <span
-                  style={{ display: 'inline-flex', alignItems: 'center', gap: 3, padding: '1px 7px', borderRadius: 20, background: 'var(--color-neutral-800)', fontSize: 11 }}
-                  title="ผลซิงค์ API Import → คำสั่งซื้อ VS ครั้งล่าสุด"
-                >
-                  <i className="ph ph-git-merge" />
-                  ออเดอร์ใหม่ {state.lastRouteOrdersSyncSummary.created} · อัปเดต {state.lastRouteOrdersSyncSummary.updated}
-                </span>
-              )}
             </div>
             <button className="btn btn-icon btn-secondary" title="Sync ข้อมูลจาก Google Sheet" disabled={state.syncing} onClick={() => actions.syncNow()}>
               <i className="ph ph-arrows-clockwise" style={{ fontSize: 16, animation: state.syncing ? 'spin .8s linear infinite' : undefined }} />

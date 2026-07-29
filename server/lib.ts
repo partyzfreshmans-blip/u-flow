@@ -3,7 +3,7 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { DRIVE_ROOT_FOLDER_ENV, driveFolderPath, isAllowedFile, type AttachmentScope } from '../src/config/drive.js';
 import { GEOCODE_MIN_INTERVAL_MS, NOMINATIM_REVERSE_URL, NOMINATIM_USER_AGENT } from '../src/config/geocoding.js';
-import { isRouteOrdersTabConfigured, MAIN_SHEET_ID, ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE, SHEET_TABS } from '../src/config/sheets.js';
+import { isRouteOrdersTabConfigured, MAIN_SHEET_ID, ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE, SHEET_TABS, STAFF_ORDER_INFO_HEADERS } from '../src/config/sheets.js';
 import { createSessionToken, verifySessionToken } from './session.js';
 
 // Shared core for the backend that needs Google credentials: the CS Master
@@ -27,48 +27,33 @@ const LNG_COLUMN = 'E';
 const NAME_COLUMN_INDEX = 0;
 const PHONE_COLUMN_INDEX = 1;
 
-// Columns in the "คำสั่งซื้อ" tab, looked up by header text each request (not
-// by position) so a future column reorder in the sheet doesn't silently write
-// to the wrong cell.
-const ORDER_NO_HEADER = 'เลขคำสั่งซื้อ';
-const NOTE_HEADER = 'หมายเหตุ';
-// "วันที่จะจัดส่ง" (planned delivery date) — NOT the sheet's separate
-// "วันที่จัดส่ง" column, which is a datetime stamped once a driver actually
-// delivers and would be corrupted by a manually-picked future date.
-const DELIVERY_DATE_HEADER = 'วันที่จะจัดส่ง';
-const TAX_INVOICE_HEADER = 'ขอใบกำกับภาษี';
-const STATUS_HEADER = 'Status';
-// "วันที่จัดส่ง" is the delivery-completion timestamp (see DELIVERY_DATE_HEADER
-// above) — exactly what should be stamped when a driver marks a stop done.
-const DELIVERED_TIMESTAMP_HEADER = 'วันที่จัดส่ง';
+// Columns in "คำสั่งซื้อ VS" under its new, staff-data-only layout — see
+// config/sheets.ts's STAFF_ORDER_INFO_HEADERS for the single source of truth
+// on exact header text/order (the user sets these up by hand in the real
+// sheet). Looked up by header text each request, never by position, so a
+// future column reorder in the sheet doesn't silently write to the wrong cell.
+const [
+  STAFF_ORDER_UID_HEADER,
+  STAFF_DELIVERY_DATE_HEADER,
+  STAFF_NOTE_HEADER,
+  STAFF_TAX_INVOICE_HEADER,
+  STAFF_OPERATIONAL_STATUS_HEADER,
+  STAFF_OPERATIONAL_STATUS_AT_HEADER,
+  STAFF_COURIER_HEADER,
+  STAFF_ARCHIVED_HEADER,
+] = STAFF_ORDER_INFO_HEADERS;
 const DELIVERED_STATUS_VALUE = 'ส่งสำเร็จ';
 // Not a done state — deliberately excluded from DELIVERY_DONE_STATUSES on
 // the frontend (see src/state/helpers.ts) so a failed stop keeps showing up
 // in stuck-order/incomplete tracking until someone resolves it (redeliver,
 // cancel, etc.), same as any other still-open order.
 export const DELIVERY_FAILED_STATUS_VALUE = 'ส่งไม่สำเร็จ';
-// Real status vocabulary observed in the sheet — a small allowlist so a
+// This app's own operational-status vocabulary — a small allowlist so a
 // caller passing an arbitrary `status` string (e.g. batch picking closing a
-// lot) can't accidentally write a typo/garbage value into the column.
-const KNOWN_STATUS_VALUES = ['รอยืนยันออเดอร์', 'กำลังดำเนินการ', 'รอชำระเงิน', 'กำลังจัดส่ง', DELIVERED_STATUS_VALUE, 'ได้รับแล้ว', 'ยกเลิก', DELIVERY_FAILED_STATUS_VALUE];
-// The real sheet has no dedicated boolean tax-invoice column — only a legacy
-// field ("ใบกำกับภาษี/หมายเหตุเดิม") that mixes it with old free-text notes
-// and already holds real note content on some rows, so it's not safe to
-// overwrite. The column right after it is blank in every row today; claim it
-// by labelling its header on first write, and refuse if that ever turns out
-// not to be true anymore (someone typed something else into it since).
-const TAX_INVOICE_FALLBACK_COLUMN_INDEX = 13; // column N, 0-based
-// Archive feature — no legacy blank column to reuse like the tax-invoice
-// special case above, so this one bootstraps as a brand-new column appended
-// right after whatever the sheet's last used column currently is.
-const ARCHIVED_HEADER = 'Archived';
-// "คนส่ง" (courier stamp: driver/vehicle/batch code) — column N of the real
-// sheet, blank on every row today. Looked up by header name first like every
-// other column here; only falls back to the fixed index below to bootstrap
-// the header the first time this ever writes, and even then only if that
-// column isn't already carrying some other unrelated header text.
-const COURIER_HEADER = 'คนส่ง';
-const COURIER_COLUMN_INDEX = 13; // column N, 0-based
+// lot) can't accidentally write a typo/garbage value into the column. Never
+// includes API Import's own status text (รอยืนยันออเดอร์/กำลังดำเนินการ/etc.)
+// since this app never writes to that column at all anymore.
+const KNOWN_OPERATIONAL_STATUS_VALUES = ['กำลังจัดส่ง', DELIVERED_STATUS_VALUE, DELIVERY_FAILED_STATUS_VALUE];
 
 // Columns in the "โปรโมชั่น" tab — same header-name lookup approach as the
 // คำสั่งซื้อ tab above (never by fixed position).
@@ -137,21 +122,6 @@ function daysBetweenIso(startIso: string, endIso: string): number {
 function nowSheetDateTime(): string {
   const d = new Date();
   return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
-}
-
-/** Parses the same "M/D/YYYY[ H:MM[:SS]]" text nowSheetDateTime writes into
- * a comparable epoch-ms value — used to pick the freshest of several API
- * Import rows sharing one Order UID (see computeRouteOrdersSyncPlan).
- * Returns 0 for blank/unparseable text so a row with no timestamp never
- * outranks one that has a real one. */
-function sheetDateTimeToMs(text: string): number {
-  const s = text.trim();
-  if (!s) return 0;
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
-  if (!m) return 0;
-  const [, mo, d, y, h, mi, se] = m;
-  const date = new Date(Number(y), Number(mo) - 1, Number(d), Number(h ?? 0), Number(mi ?? 0), Number(se ?? 0));
-  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
 }
 
 function getServiceAccountCredentials(): { client_email: string; private_key: string } {
@@ -989,6 +959,14 @@ export async function handleUpdateCsMasterLocation(token: string | null, body: u
   }
 }
 
+/**
+ * Create-or-update a "คำสั่งซื้อ VS" row for one order, matched purely by
+ * Order UID — an existing row gets its changed fields updated in place; a
+ * brand new order (no row yet, since this tab is now populated lazily, only
+ * once staff actually enter something for it) gets a fresh row appended.
+ * This tab holds ONLY what staff enter through this app's own UI — never a
+ * copy of anything API Import already has (see config/sheets.ts).
+ */
 export async function handleUpdateRouteOrder(token: string | null, body: unknown): Promise<ApiResult> {
   const payload = verifySessionToken(token);
   if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
@@ -997,8 +975,9 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
     (body ?? {}) as Record<string, unknown>;
 
   if (typeof orderNo !== 'string' || orderNo.trim() === '') {
-    return { status: 400, body: { error: 'ต้องระบุเลขคำสั่งซื้อ' } };
+    return { status: 400, body: { error: 'ต้องระบุ Order UID' } };
   }
+  if (!isRouteOrdersTabConfigured()) return { status: 500, body: { error: ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE } };
   // Different fields on this one endpoint serve different features with
   // different permission requirements: markDelivered and the
   // DELIVERY_FAILED_STATUS_VALUE status are the driver's own actions from
@@ -1045,8 +1024,8 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
   if (markDelivered !== undefined && markDelivered !== true) {
     return { status: 400, body: { error: 'markDelivered ต้องเป็น true เท่านั้น' } };
   }
-  if (status !== undefined && (typeof status !== 'string' || !KNOWN_STATUS_VALUES.includes(status))) {
-    return { status: 400, body: { error: `status ต้องเป็นค่าที่รู้จัก (${KNOWN_STATUS_VALUES.join(', ')})` } };
+  if (status !== undefined && (typeof status !== 'string' || !KNOWN_OPERATIONAL_STATUS_VALUES.includes(status))) {
+    return { status: 400, body: { error: `status ต้องเป็นค่าที่รู้จัก (${KNOWN_OPERATIONAL_STATUS_VALUES.join(', ')})` } };
   }
   if (archived !== undefined && typeof archived !== 'boolean') {
     return { status: 400, body: { error: 'archived ต้องเป็น true/false' } };
@@ -1076,84 +1055,63 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
 
     const current = await sheets.spreadsheets.values.get({
       spreadsheetId: MAIN_SHEET_ID,
-      range: `${title}!A:AB`,
+      range: `${title}!A:Z`,
     });
     const rows = current.data.values ?? [];
     const header = rows[0] ?? [];
     const headerAt = (name: string) => header.findIndex((h) => String(h ?? '').trim() === name);
 
-    const orderNoCol = headerAt(ORDER_NO_HEADER);
-    if (orderNoCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${ORDER_NO_HEADER}" ในชีท` } };
+    const uidCol = headerAt(STAFF_ORDER_UID_HEADER);
+    if (uidCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_ORDER_UID_HEADER}" ในชีท` } };
 
     const wanted = orderNo.trim();
     const matches: number[] = [];
     for (let i = 1; i < rows.length; i++) {
-      if (String(rows[i]?.[orderNoCol] ?? '').trim() === wanted) matches.push(i + 1); // sheet rows are 1-based
+      if (String(rows[i]?.[uidCol] ?? '').trim() === wanted) matches.push(i + 1); // sheet rows are 1-based
     }
-    if (matches.length === 0) return { status: 404, body: { error: `ไม่พบคำสั่งซื้อ "${wanted}" ในชีทคำสั่งซื้อ` } };
     if (matches.length > 1) {
-      return { status: 409, body: { error: `พบเลขคำสั่งซื้อ "${wanted}" ซ้ำกัน ${matches.length} แถว (แถว ${matches.join(', ')}) — โปรดแก้ไขในชีทโดยตรง` } };
+      return { status: 409, body: { error: `พบ Order UID "${wanted}" ซ้ำกัน ${matches.length} แถว (แถว ${matches.join(', ')}) — โปรดแก้ไขในชีทโดยตรง` } };
     }
-    const targetRow = matches[0];
+    const targetRow: number | null = matches[0] ?? null;
 
     // Resolve every target column up front so a missing column fails the
     // whole request before anything is written, rather than leaving a
-    // partial edit behind.
+    // partial edit behind. Every header is expected to already exist (the
+    // real sheet is set up by hand with STAFF_ORDER_INFO_HEADERS) — no
+    // bootstrap-a-new-column fallback needed anymore.
     let deliveryDateCol = -1;
     if (sheetDate !== null) {
-      deliveryDateCol = headerAt(DELIVERY_DATE_HEADER);
-      if (deliveryDateCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${DELIVERY_DATE_HEADER}" ในชีท` } };
+      deliveryDateCol = headerAt(STAFF_DELIVERY_DATE_HEADER);
+      if (deliveryDateCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_DELIVERY_DATE_HEADER}" ในชีท` } };
     }
     let noteCol = -1;
     if (typeof note === 'string') {
-      noteCol = headerAt(NOTE_HEADER);
-      if (noteCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${NOTE_HEADER}" ในชีท` } };
+      noteCol = headerAt(STAFF_NOTE_HEADER);
+      if (noteCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_NOTE_HEADER}" ในชีท` } };
     }
     let taxInvoiceCol = -1;
     if (typeof wantsTaxInvoice === 'boolean') {
-      taxInvoiceCol = headerAt(TAX_INVOICE_HEADER);
-      if (taxInvoiceCol === -1) {
-        const fallbackHeader = String(header[TAX_INVOICE_FALLBACK_COLUMN_INDEX] ?? '').trim();
-        if (fallbackHeader !== '') {
-          return {
-            status: 500,
-            body: { error: `ไม่พบคอลัมน์ "${TAX_INVOICE_HEADER}" และคอลัมน์สำรอง (${columnLetter(TAX_INVOICE_FALLBACK_COLUMN_INDEX)}) ก็มีชื่ออื่นอยู่แล้ว ("${fallbackHeader}") — ต้องเพิ่มคอลัมน์นี้ในชีทเอง` },
-          };
-        }
-        taxInvoiceCol = TAX_INVOICE_FALLBACK_COLUMN_INDEX;
-      }
+      taxInvoiceCol = headerAt(STAFF_TAX_INVOICE_HEADER);
+      if (taxInvoiceCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_TAX_INVOICE_HEADER}" ในชีท` } };
     }
     let statusCol = -1;
-    let deliveredTimestampCol = -1;
+    let statusAtCol = -1;
     if (markDelivered === true || typeof status === 'string') {
-      statusCol = headerAt(STATUS_HEADER);
-      if (statusCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STATUS_HEADER}" ในชีท` } };
-    }
-    if (markDelivered === true) {
-      deliveredTimestampCol = headerAt(DELIVERED_TIMESTAMP_HEADER);
-      if (deliveredTimestampCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${DELIVERED_TIMESTAMP_HEADER}" ในชีท` } };
+      statusCol = headerAt(STAFF_OPERATIONAL_STATUS_HEADER);
+      if (statusCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_OPERATIONAL_STATUS_HEADER}" ในชีท` } };
+      statusAtCol = headerAt(STAFF_OPERATIONAL_STATUS_AT_HEADER);
+      if (statusAtCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_OPERATIONAL_STATUS_AT_HEADER}" ในชีท` } };
     }
     let archivedCol = -1;
     if (typeof archived === 'boolean') {
-      archivedCol = headerAt(ARCHIVED_HEADER);
-      // No known-blank legacy column to reuse here (unlike tax-invoice above)
-      // — just claim the next empty column past whatever's currently used.
-      if (archivedCol === -1) archivedCol = header.length;
+      archivedCol = headerAt(STAFF_ARCHIVED_HEADER);
+      if (archivedCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_ARCHIVED_HEADER}" ในชีท` } };
     }
     let courierCol = -1;
     let courierStampText = '';
     if (wantsCourierStamp || clearCourierStamp === true) {
-      courierCol = headerAt(COURIER_HEADER);
-      if (courierCol === -1) {
-        const existing = String(header[COURIER_COLUMN_INDEX] ?? '').trim();
-        if (existing !== '') {
-          return {
-            status: 500,
-            body: { error: `ไม่พบคอลัมน์ "${COURIER_HEADER}" และคอลัมน์ N ก็มีชื่ออื่นอยู่แล้ว ("${existing}") — ต้องเพิ่มคอลัมน์นี้ในชีทเอง` },
-          };
-        }
-        courierCol = COURIER_COLUMN_INDEX;
-      }
+      courierCol = headerAt(STAFF_COURIER_HEADER);
+      if (courierCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_COURIER_HEADER}" ในชีท` } };
     }
     if (wantsCourierStamp) {
       // The driver's display name is just their username, resolved here
@@ -1165,401 +1123,68 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
       courierStampText = `${driver?.username ?? ''} / ${courierVehicleName as string} / ${courierBatchId as string}`;
     }
 
-    // Bootstrap the tax-invoice header the first time it's needed. Plain
-    // values.update (not append) so it can never create a new row.
-    if (typeof wantsTaxInvoice === 'boolean' && headerAt(TAX_INVOICE_HEADER) === -1) {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: MAIN_SHEET_ID,
-        range: `${title}!${columnLetter(taxInvoiceCol)}1`,
-        valueInputOption: 'RAW',
-        requestBody: { values: [[TAX_INVOICE_HEADER]] },
-      });
-    }
-    // Bootstrap the archived header the first time it's needed, same pattern.
-    if (typeof archived === 'boolean' && headerAt(ARCHIVED_HEADER) === -1) {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: MAIN_SHEET_ID,
-        range: `${title}!${columnLetter(archivedCol)}1`,
-        valueInputOption: 'RAW',
-        requestBody: { values: [[ARCHIVED_HEADER]] },
-      });
-    }
-    // Bootstrap the "คนส่ง" header the first time it's needed, same pattern.
-    if ((wantsCourierStamp || clearCourierStamp === true) && headerAt(COURIER_HEADER) === -1) {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: MAIN_SHEET_ID,
-        range: `${title}!${columnLetter(courierCol)}1`,
-        valueInputOption: 'RAW',
-        requestBody: { values: [[COURIER_HEADER]] },
-      });
-    }
-
-    // USER_ENTERED for the date so Sheets parses it the same way a person
-    // typing it in would (matching the existing column's date formatting);
-    // RAW for free text so a note starting with "=" can never be read as a
-    // formula.
-    if (sheetDate !== null) {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: MAIN_SHEET_ID,
-        range: `${title}!${columnLetter(deliveryDateCol)}${targetRow}`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: { values: [[sheetDate]] },
-      });
-    }
-    if (typeof note === 'string') {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: MAIN_SHEET_ID,
-        range: `${title}!${columnLetter(noteCol)}${targetRow}`,
-        valueInputOption: 'RAW',
-        requestBody: { values: [[note]] },
-      });
-    }
-    if (typeof wantsTaxInvoice === 'boolean') {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: MAIN_SHEET_ID,
-        range: `${title}!${columnLetter(taxInvoiceCol)}${targetRow}`,
-        valueInputOption: 'RAW',
-        requestBody: { values: [[wantsTaxInvoice ? 'ใช่' : '']] },
-      });
-    }
+    // Collect every cell this request needs to write, keyed by column —
+    // shared between the update-existing-row and append-new-row paths below.
+    const writes = new Map<number, string>();
+    if (sheetDate !== null) writes.set(deliveryDateCol, sheetDate);
+    if (typeof note === 'string') writes.set(noteCol, note);
+    if (typeof wantsTaxInvoice === 'boolean') writes.set(taxInvoiceCol, wantsTaxInvoice ? 'ใช่' : 'ไม่ใช่');
+    if (typeof archived === 'boolean') writes.set(archivedCol, archived ? 'ใช่' : '');
+    if (wantsCourierStamp) writes.set(courierCol, courierStampText);
+    if (clearCourierStamp === true) writes.set(courierCol, '');
     if (typeof status === 'string') {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: MAIN_SHEET_ID,
-        range: `${title}!${columnLetter(statusCol)}${targetRow}`,
-        valueInputOption: 'RAW',
-        requestBody: { values: [[status]] },
-      });
-    }
-    if (typeof archived === 'boolean') {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: MAIN_SHEET_ID,
-        range: `${title}!${columnLetter(archivedCol)}${targetRow}`,
-        valueInputOption: 'RAW',
-        requestBody: { values: [[archived ? 'ใช่' : '']] },
-      });
-    }
-    if (wantsCourierStamp) {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: MAIN_SHEET_ID,
-        range: `${title}!${columnLetter(courierCol)}${targetRow}`,
-        valueInputOption: 'RAW',
-        requestBody: { values: [[courierStampText]] },
-      });
-    }
-    if (clearCourierStamp === true) {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: MAIN_SHEET_ID,
-        range: `${title}!${columnLetter(courierCol)}${targetRow}`,
-        valueInputOption: 'RAW',
-        requestBody: { values: [['']] },
-      });
+      writes.set(statusCol, status);
+      writes.set(statusAtCol, nowSheetDateTime());
     }
     if (markDelivered === true) {
-      await sheets.spreadsheets.values.update({
+      writes.set(statusCol, DELIVERED_STATUS_VALUE);
+      writes.set(statusAtCol, nowSheetDateTime());
+    }
+
+    if (targetRow != null) {
+      // USER_ENTERED for the date so Sheets parses it the same way a person
+      // typing it in would; RAW for everything else so free text (a note
+      // starting with "=", for instance) can never be read as a formula.
+      if (sheetDate !== null) {
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: MAIN_SHEET_ID,
+          range: `${title}!${columnLetter(deliveryDateCol)}${targetRow}`,
+          valueInputOption: 'USER_ENTERED',
+          requestBody: { values: [[sheetDate]] },
+        });
+      }
+      const rawWrites = new Map(writes);
+      rawWrites.delete(deliveryDateCol);
+      for (const [col, value] of rawWrites) {
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: MAIN_SHEET_ID,
+          range: `${title}!${columnLetter(col)}${targetRow}`,
+          valueInputOption: 'RAW',
+          requestBody: { values: [[value]] },
+        });
+      }
+    } else {
+      // Brand new order — this tab has no row for it yet. Append one with
+      // just the UID and whatever was actually passed; every other column
+      // starts blank, same as if the row already existed with nothing set.
+      // RAW throughout (including the date) so nothing in a single-shot
+      // append can ever be misread as a formula.
+      const rowValues: unknown[] = new Array(header.length).fill('');
+      rowValues[uidCol] = wanted;
+      for (const [col, value] of writes) rowValues[col] = value;
+      await sheets.spreadsheets.values.append({
         spreadsheetId: MAIN_SHEET_ID,
-        range: `${title}!${columnLetter(statusCol)}${targetRow}`,
+        range: `${title}!A:Z`,
         valueInputOption: 'RAW',
-        requestBody: { values: [[DELIVERED_STATUS_VALUE]] },
-      });
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: MAIN_SHEET_ID,
-        range: `${title}!${columnLetter(deliveredTimestampCol)}${targetRow}`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: { values: [[nowSheetDateTime()]] },
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: [rowValues] },
       });
     }
 
-    return { status: 200, body: { ok: true, updatedRow: targetRow } };
+    return { status: 200, body: { ok: true } };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
     console.error('[route-orders/update]', message);
-    return { status: 500, body: { error: message } };
-  }
-}
-
-// ---------- คำสั่งซื้อ VS sync (API Import -> คำสั่งซื้อ VS, matched by Order UID) ----------
-// Replaces the old "คำสั่งซื้อ" tab's row-position-based VLOOKUP/IMPORTRANGE
-// formula, which broke whenever API Import got a new row inserted above
-// existing ones (new orders usually sort to the top): every formula shifted
-// down one row, so staff-entered Route/note/tax-invoice/delivery-date ended
-// up stamped onto the wrong order. This sync is triggered by the app's own
-// "Sync" button (see actions.syncNow in store.ts) and matches strictly by
-// Order UID — never row position — so an insert anywhere in API Import can
-// never misalign anything here again.
-const API_IMPORT_ORDER_UID_HEADER = 'Order UID';
-const API_IMPORT_CUSTOMER_HEADER = 'ลูกค้า';
-const API_IMPORT_ITEM_COUNT_HEADER = 'จำนวนรายการ';
-const API_IMPORT_TOTAL_AMOUNT_HEADER = 'ยอดขายรวม';
-const API_IMPORT_PAYMENT_TYPE_HEADER = 'ประเภทชำระเงิน';
-const API_IMPORT_STATUS_HEADER = 'สถานะ';
-const API_IMPORT_ORDERED_AT_HEADER = 'วันที่สั่ง';
-const API_IMPORT_DELIVERED_AT_HEADER = 'วันที่จัดส่ง';
-const API_IMPORT_COMPLETED_AT_HEADER = 'วันที่ส่งสำเร็จ';
-const API_IMPORT_UPDATED_AT_HEADER = 'วันที่อัปเดต';
-const API_IMPORT_DISTRICT_HEADER = 'อำเภอ';
-const API_IMPORT_PROVINCE_HEADER = 'จังหวัด';
-const API_IMPORT_ADDRESS_HEADER = 'ที่อยู่';
-const API_IMPORT_LAT_HEADER = 'Latitude';
-const API_IMPORT_LNG_HEADER = 'Longitude';
-const API_IMPORT_PHONE_HEADER = 'เบอร์โทร';
-
-// Destination headers in คำสั่งซื้อ VS that this sync refreshes from API
-// Import every run. Deliberately excludes every staff-entered/app-managed
-// column (Route, AutoR, วันที่จะจัดส่ง, ขอใบกำกับภาษี, สินค้าโปรโมชั่น, new
-// customer, หมายเหตุ, far_from_wh, wh_lat, wh_long, คนส่ง, Archived) — those
-// are left completely untouched on an existing row, and start blank on a
-// newly-appended one, exactly as a genuinely new order should.
-const CUSTOMER_HEADER = 'ชื่อลูกค้า';
-const ITEM_COUNT_HEADER = 'จำนวนรายการ';
-const TOTAL_AMOUNT_HEADER = 'ยอดขายรวม';
-const PAYMENT_TYPE_HEADER = 'การจ่ายเงิน';
-const ORDERED_DATE_HEADER = 'วันที่สั่ง';
-const COMPLETED_DATE_HEADER = 'วันที่ส่งสำเร็จ';
-const UPDATED_DATE_HEADER = 'วันที่อัปเดต';
-const DISTRICT_PROVINCE_HEADER = 'อำเภอ, จังหวัด';
-const ADDRESS_FROM_UNII_HEADER = 'ที่อยู่จาก Unii';
-const MAP_LINK_HEADER = 'Link';
-const CS_LAT_HEADER = 'CS_Lat';
-const CS_LONG_HEADER = 'CS_Long';
-const PHONE_NUMBER_HEADER = 'Phone Number';
-
-interface SyncRouteOrdersSummary {
-  created: number;
-  updated: number;
-  skipped: { orderUid: string; reason: string }[];
-}
-
-export interface RouteOrdersSyncPlan {
-  /** row/col are 0-based data indices — row within routeOrdersRows (add 1 for
-   * the 1-based sheet row), col a column index into the คำสั่งซื้อ VS header. */
-  cellUpdates: { row: number; col: number; value: string }[];
-  newRows: unknown[][];
-  summary: SyncRouteOrdersSummary;
-  missingApiImportHeaders: string[];
-  missingVsHeaders: string[];
-}
-
-/**
- * The actual matching/diff logic, pure and I/O-free (no Sheets API calls) so
- * it can be unit-tested directly against fixture rows — this is the one
- * piece that absolutely must be correct, since the entire point of this
- * sync is "never misalign a row again." `apiImportRows`/`routeOrdersRows`
- * are raw values.get()-shaped 2D arrays (row 0 = header). Never writes
- * anything itself — handleSyncRouteOrders below turns the returned plan
- * into actual batchUpdate/append calls.
- */
-export function computeRouteOrdersSyncPlan(apiImportRows: unknown[][], routeOrdersRows: unknown[][]): RouteOrdersSyncPlan {
-  const apiImportHeader = (apiImportRows[0] ?? []) as unknown[];
-  const aiAt = (name: string) => apiImportHeader.findIndex((h) => String(h ?? '').trim() === name);
-
-  const requiredApiImportHeaders = [
-    API_IMPORT_ORDER_UID_HEADER, API_IMPORT_CUSTOMER_HEADER, API_IMPORT_ITEM_COUNT_HEADER, API_IMPORT_TOTAL_AMOUNT_HEADER,
-    API_IMPORT_PAYMENT_TYPE_HEADER, API_IMPORT_STATUS_HEADER, API_IMPORT_ORDERED_AT_HEADER, API_IMPORT_DELIVERED_AT_HEADER,
-    API_IMPORT_COMPLETED_AT_HEADER, API_IMPORT_UPDATED_AT_HEADER, API_IMPORT_DISTRICT_HEADER, API_IMPORT_PROVINCE_HEADER,
-    API_IMPORT_ADDRESS_HEADER, API_IMPORT_LAT_HEADER, API_IMPORT_LNG_HEADER, API_IMPORT_PHONE_HEADER,
-  ];
-  const missingApiImportHeaders = requiredApiImportHeaders.filter((h) => aiAt(h) === -1);
-
-  const vsHeader = (routeOrdersRows[0] ?? []) as unknown[];
-  const vsAt = (name: string) => vsHeader.findIndex((h) => String(h ?? '').trim() === name);
-
-  const requiredVsHeaders = [
-    ORDER_NO_HEADER, CUSTOMER_HEADER, ITEM_COUNT_HEADER, TOTAL_AMOUNT_HEADER, PAYMENT_TYPE_HEADER, STATUS_HEADER,
-    ORDERED_DATE_HEADER, DELIVERED_TIMESTAMP_HEADER, COMPLETED_DATE_HEADER, UPDATED_DATE_HEADER, DISTRICT_PROVINCE_HEADER,
-    ADDRESS_FROM_UNII_HEADER, MAP_LINK_HEADER, CS_LAT_HEADER, CS_LONG_HEADER, PHONE_NUMBER_HEADER,
-  ];
-  const missingVsHeaders = requiredVsHeaders.filter((h) => vsAt(h) === -1);
-
-  const summary: SyncRouteOrdersSummary = { created: 0, updated: 0, skipped: [] };
-  const cellUpdates: { row: number; col: number; value: string }[] = [];
-  const newRows: unknown[][] = [];
-
-  if (missingApiImportHeaders.length > 0 || missingVsHeaders.length > 0) {
-    return { cellUpdates, newRows, summary, missingApiImportHeaders, missingVsHeaders };
-  }
-
-  const vsRowByOrderUid = new Map<string, number>(); // orderUid -> 0-based row index into routeOrdersRows
-  const duplicateOrderUids = new Set<string>();
-  const orderNoCol = vsAt(ORDER_NO_HEADER);
-  for (let i = 1; i < routeOrdersRows.length; i++) {
-    const uid = String((routeOrdersRows[i] as unknown[] | undefined)?.[orderNoCol] ?? '').trim();
-    if (!uid) continue;
-    if (vsRowByOrderUid.has(uid)) duplicateOrderUids.add(uid);
-    else vsRowByOrderUid.set(uid, i);
-  }
-
-  // De-duplicate by Order UID up front — API Import can carry more than one
-  // row for the same order (its own external ingestion appends a fresh row
-  // per status change rather than updating one in place), and scanning
-  // top-to-bottom without this would let whichever row happens to be
-  // scanned LAST win regardless of which one is actually newest. That's how
-  // a genuinely fresher status update (e.g. "กำลังดำเนินการ") could get
-  // silently overwritten within the very same sync run by a stale duplicate
-  // still sitting further down/up in API Import — the sync appears to run
-  // with no error, but คำสั่งซื้อ VS keeps showing the old value. Picked by
-  // "วันที่อัปเดต"; ties keep whichever was scanned last (a harmless,
-  // order-dependent fallback only reached when neither timestamp parses).
-  const updatedAtCol = aiAt(API_IMPORT_UPDATED_AT_HEADER);
-  const latestRowByUid = new Map<string, unknown[]>();
-  const latestMsByUid = new Map<string, number>();
-  for (let i = 1; i < apiImportRows.length; i++) {
-    const r = (apiImportRows[i] ?? []) as unknown[];
-    const uid = String(r[aiAt(API_IMPORT_ORDER_UID_HEADER)] ?? '').trim();
-    if (!uid) continue;
-    const ms = sheetDateTimeToMs(String(r[updatedAtCol] ?? ''));
-    const curMs = latestMsByUid.get(uid);
-    if (curMs === undefined || ms >= curMs) {
-      latestRowByUid.set(uid, r);
-      latestMsByUid.set(uid, ms);
-    }
-  }
-
-  for (const [orderUid, r] of latestRowByUid) {
-    if (duplicateOrderUids.has(orderUid)) {
-      summary.skipped.push({ orderUid, reason: 'พบเลขคำสั่งซื้อนี้ซ้ำกันหลายแถวในคำสั่งซื้อ VS — แก้ไขในชีทโดยตรงก่อน sync รอบต่อไป' });
-      continue;
-    }
-
-    const districtProvince = [String(r[aiAt(API_IMPORT_DISTRICT_HEADER)] ?? '').trim(), String(r[aiAt(API_IMPORT_PROVINCE_HEADER)] ?? '').trim()]
-      .filter(Boolean)
-      .join(', ');
-    const lat = String(r[aiAt(API_IMPORT_LAT_HEADER)] ?? '').trim();
-    const lng = String(r[aiAt(API_IMPORT_LNG_HEADER)] ?? '').trim();
-    const mapLink = lat && lng ? `https://www.google.com/maps/search/?api=1&query=${lat},${lng}` : '';
-
-    const refreshValues: Record<string, string> = {
-      [CUSTOMER_HEADER]: String(r[aiAt(API_IMPORT_CUSTOMER_HEADER)] ?? '').trim(),
-      [ITEM_COUNT_HEADER]: String(r[aiAt(API_IMPORT_ITEM_COUNT_HEADER)] ?? '').trim(),
-      [TOTAL_AMOUNT_HEADER]: String(r[aiAt(API_IMPORT_TOTAL_AMOUNT_HEADER)] ?? '').trim(),
-      [PAYMENT_TYPE_HEADER]: String(r[aiAt(API_IMPORT_PAYMENT_TYPE_HEADER)] ?? '').trim(),
-      [STATUS_HEADER]: String(r[aiAt(API_IMPORT_STATUS_HEADER)] ?? '').trim(),
-      [ORDERED_DATE_HEADER]: String(r[aiAt(API_IMPORT_ORDERED_AT_HEADER)] ?? '').trim(),
-      [DELIVERED_TIMESTAMP_HEADER]: String(r[aiAt(API_IMPORT_DELIVERED_AT_HEADER)] ?? '').trim(),
-      [COMPLETED_DATE_HEADER]: String(r[aiAt(API_IMPORT_COMPLETED_AT_HEADER)] ?? '').trim(),
-      [UPDATED_DATE_HEADER]: String(r[aiAt(API_IMPORT_UPDATED_AT_HEADER)] ?? '').trim(),
-      [DISTRICT_PROVINCE_HEADER]: districtProvince,
-      [ADDRESS_FROM_UNII_HEADER]: String(r[aiAt(API_IMPORT_ADDRESS_HEADER)] ?? '').trim(),
-      [CS_LAT_HEADER]: lat,
-      [CS_LONG_HEADER]: lng,
-      [PHONE_NUMBER_HEADER]: String(r[aiAt(API_IMPORT_PHONE_HEADER)] ?? '').trim(),
-      // Link is only ever refreshed when a coordinate is actually present —
-      // never blanks out a manually-fixed link when API Import has none.
-      ...(mapLink ? { [MAP_LINK_HEADER]: mapLink } : {}),
-    };
-
-    const existingRow = vsRowByOrderUid.get(orderUid);
-    if (existingRow != null) {
-      // Only write cells whose value actually changed. Every existing order
-      // used to get all ~13 of its refreshed columns rewritten on every sync
-      // run regardless of whether anything changed, which scales the
-      // batchUpdate volume with the sheet's total historical order count
-      // rather than with how many orders actually changed today — on a
-      // sheet with enough history, that pushes a single sync well past a
-      // Vercel serverless function's execution time limit, silently killing
-      // the run before it ever reaches the new-row append below. New orders
-      // then never get created, with no error shown, purely because the
-      // function ran out of time partway through re-writing unchanged data.
-      const currentRow = (routeOrdersRows[existingRow] ?? []) as unknown[];
-      for (const [h, v] of Object.entries(refreshValues)) {
-        const col = vsAt(h);
-        if (String(currentRow[col] ?? '').trim() === v) continue;
-        cellUpdates.push({ row: existingRow, col, value: v });
-      }
-      summary.updated++;
-    } else {
-      const rowValues: unknown[] = new Array(vsHeader.length).fill('');
-      rowValues[orderNoCol] = orderUid;
-      for (const [h, v] of Object.entries(refreshValues)) rowValues[vsAt(h)] = v;
-      newRows.push(rowValues);
-      summary.created++;
-    }
-  }
-
-  return { cellUpdates, newRows, summary, missingApiImportHeaders, missingVsHeaders };
-}
-
-/** Any authenticated user can trigger this — same as clicking the existing
- * "Sync" button already available to every role; the write is entirely
- * deterministic (mirrors API Import 1:1 by Order UID), so there's no
- * meaningful risk in letting any logged-in session run it, unlike a manual
- * edit form. */
-export async function handleSyncRouteOrders(token: string | null): Promise<ApiResult> {
-  const payload = verifySessionToken(token);
-  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
-  if (!isRouteOrdersTabConfigured()) return { status: 500, body: { error: ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE } };
-
-  try {
-    const sheets = await getSheetsClient();
-
-    const apiImportTitle = await resolveSheetTitle(sheets, Number(SHEET_TABS.apiImport.gid));
-    const routeOrdersTitle = await resolveSheetTitle(sheets, ROUTE_ORDERS_GID);
-
-    const [apiImportRes, routeOrdersRes] = await Promise.all([
-      sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${apiImportTitle}!A:Z` }),
-      sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${routeOrdersTitle}!A:AB` }),
-    ]);
-
-    const plan = computeRouteOrdersSyncPlan(apiImportRes.data.values ?? [], routeOrdersRes.data.values ?? []);
-    if (plan.missingApiImportHeaders.length > 0) {
-      return { status: 500, body: { error: `ไม่พบคอลัมน์ในแท็บ API Import: ${plan.missingApiImportHeaders.join(', ')}` } };
-    }
-    if (plan.missingVsHeaders.length > 0) {
-      return {
-        status: 500,
-        body: { error: `ไม่พบคอลัมน์ในแท็บ "คำสั่งซื้อ VS": ${plan.missingVsHeaders.join(', ')} — ตรวจสอบว่าคัดลอกหัวคอลัมน์มาครบจากแท็บ "คำสั่งซื้อ" เดิม` },
-      };
-    }
-
-    const { cellUpdates, newRows, summary } = plan;
-
-    // New rows go in FIRST, ahead of the (often much larger) existing-order
-    // cell-update batch below — appending only ever adds rows after existing
-    // data, so it can never shift the row indices cellUpdates below still
-    // relies on, and it means a brand new order is never silently dropped
-    // just because a serverless function's execution time limit cuts the
-    // sync off partway through re-checking every already-known order.
-    if (newRows.length > 0) {
-      try {
-        await sheets.spreadsheets.values.append({
-          spreadsheetId: MAIN_SHEET_ID,
-          range: `${routeOrdersTitle}!A:AB`,
-          valueInputOption: 'USER_ENTERED',
-          insertDataOption: 'INSERT_ROWS',
-          requestBody: { values: newRows },
-        });
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'เพิ่มแถวใหม่ไม่สำเร็จ';
-        summary.skipped.push({ orderUid: '(หลายรายการ)', reason: `เพิ่ม ${newRows.length} แถวใหม่ไม่สำเร็จ: ${message}` });
-      }
-    }
-
-    // Batched in chunks so one oversized request can't fail the whole sync —
-    // each chunk's own failure is caught and reported rather than losing
-    // every update in that chunk silently. cellUpdates only ever contains
-    // genuinely changed cells (see computeRouteOrdersSyncPlan), so a typical
-    // run's volume scales with today's actual changes, not the sheet's
-    // entire history.
-    const CHUNK_SIZE = 500;
-    for (let i = 0; i < cellUpdates.length; i += CHUNK_SIZE) {
-      const chunk = cellUpdates.slice(i, i + CHUNK_SIZE);
-      try {
-        await sheets.spreadsheets.values.batchUpdate({
-          spreadsheetId: MAIN_SHEET_ID,
-          requestBody: {
-            valueInputOption: 'USER_ENTERED',
-            data: chunk.map((u) => ({ range: `${routeOrdersTitle}!${columnLetter(u.col)}${u.row + 1}`, values: [[u.value]] })),
-          },
-        });
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'อัปเดตแถวไม่สำเร็จ';
-        summary.skipped.push({ orderUid: '(หลายรายการ)', reason: `อัปเดต ${chunk.length} เซลล์ไม่สำเร็จ: ${message}` });
-      }
-    }
-
-    return { status: 200, body: summary };
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
-    console.error('[route-orders/sync]', message);
     return { status: 500, body: { error: message } };
   }
 }
