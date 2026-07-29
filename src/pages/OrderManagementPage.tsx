@@ -75,7 +75,7 @@ function OrderTable({
           <tr>
             {canEdit && <th style={{ width: 26 }}><input type="checkbox" checked={allSelected} onChange={toggleSelectAll} /></th>}
             <th>Route</th><th>อำเภอ, จังหวัด</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th>Batch Route</th><th style={{ textAlign: 'right' }}>ยอดขาย</th>
-            <th style={{ textAlign: 'center' }}>รายการ</th><th>วันเวลาที่สั่ง</th><th style={{ minWidth: 168 }}>วันที่จะจัดส่ง</th><th>หมายเหตุ</th><th style={{ textAlign: 'center' }}>ใบกำกับภาษี</th><th style={{ textAlign: 'center' }}>โปรโมชั่น</th><th>สถานะ</th><th></th>
+            <th style={{ textAlign: 'center' }}>รายการ</th><th>วันเวลาที่สั่ง</th><th style={{ minWidth: 168 }}>วันที่จะจัดส่ง</th><th>หมายเหตุ</th><th style={{ textAlign: 'center' }}>ใบกำกับภาษี</th><th style={{ textAlign: 'center' }}>โปรโมชั่น</th><th style={{ textAlign: 'center' }}>ปัญหาการส่ง</th><th>สถานะ</th><th></th>
           </tr>
         </thead>
         <tbody>
@@ -123,6 +123,28 @@ function OrderTable({
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10.5, padding: '2px 7px', borderRadius: 20, background: 'var(--color-accent-soft, rgba(255,138,0,.15))', color: 'var(--color-accent)', fontWeight: 500, whiteSpace: 'nowrap' }} title="มีสินค้าในออเดอร์นี้เข้าร่วมโปรโมชั่น">
                     <i className="ph ph-tag-fill" />มีโปรโมชั่น
                   </span>
+                ) : (
+                  <span style={{ color: 'var(--color-neutral-600)' }}>—</span>
+                )}
+              </td>
+              <td style={{ textAlign: 'center' }}>
+                {r.deliveryFailure ? (
+                  <a
+                    href={r.deliveryFailure.photoLinks[0]?.webViewLink || undefined}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10.5, padding: '2px 7px', borderRadius: 20,
+                      background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontWeight: 500, whiteSpace: 'nowrap',
+                      textDecoration: r.deliveryFailure.photoLinks[0]?.webViewLink ? 'underline' : 'none',
+                      cursor: r.deliveryFailure.photoLinks[0]?.webViewLink ? 'pointer' : 'default',
+                    }}
+                    title={`${r.deliveryFailure.reason}${r.deliveryFailure.note ? ` · ${r.deliveryFailure.note}` : ''} · ${r.deliveryFailure.photoLinks.length} รูป`}
+                    onClick={(e) => { if (!r.deliveryFailure!.photoLinks[0]?.webViewLink) e.preventDefault(); }}
+                  >
+                    <i className="ph ph-warning-fill" />{r.deliveryFailure.reason}
+                    {r.deliveryFailure.photoLinks.length > 0 && ` · ${r.deliveryFailure.photoLinks.length} รูป`}
+                  </a>
                 ) : (
                   <span style={{ color: 'var(--color-neutral-600)' }}>—</span>
                 )}

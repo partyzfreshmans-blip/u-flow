@@ -9,6 +9,7 @@ import {
   handleDecideBooking,
   handleDriveUpload,
   handleHealth,
+  handleListBatchRoutes,
   handleListBookings,
   handleListUsers,
   handleLogin,
@@ -18,6 +19,7 @@ import {
   handleUpdateCsMasterLocation,
   handleUpdateRouteOrder,
   handleUpdateUser,
+  handleUpsertBatchRoutes,
   handleUpsertPromotion,
 } from './lib.js';
 import { bearerToken } from './session.js';
@@ -118,6 +120,16 @@ app.post('/api/bookings/create', async (req, res) => {
 
 app.post('/api/bookings/decide', async (req, res) => {
   const { status, body } = await handleDecideBooking(bearerToken(req.headers.authorization), req.body);
+  res.status(status).json(body);
+});
+
+app.get('/api/batch-routes', async (req, res) => {
+  const { status, body } = await handleListBatchRoutes(bearerToken(req.headers.authorization));
+  res.status(status).json(body);
+});
+
+app.post('/api/batch-routes/upsert', async (req, res) => {
+  const { status, body } = await handleUpsertBatchRoutes(bearerToken(req.headers.authorization), req.body);
   res.status(status).json(body);
 });
 

@@ -12,17 +12,21 @@ export const DRIVE_FOLDERS = {
   customerDocs: 'ใบส่งสินค้า-ลูกค้า',
   /** Supplier bills backing a goods-receiving record. */
   supplierBills: 'บิลรับเข้า-supplier',
+  /** Photo evidence a driver attaches when a stop can't be delivered. */
+  deliveryFailures: 'ส่งไม่สำเร็จ',
 } as const;
 
-export type AttachmentScope = 'order' | 'receiving';
+export type AttachmentScope = 'order' | 'receiving' | 'deliveryFailure';
 
 /**
  * Folder path a file belongs in, relative to the Drive root.
- *   order     → ใบส่งสินค้า-ลูกค้า/UM-260724-4775532441
- *   receiving → บิลรับเข้า-supplier/2026-07-25-บ.สหพัฒนพิบูล จำกัด
+ *   order            → ใบส่งสินค้า-ลูกค้า/UM-260724-4775532441
+ *   receiving        → บิลรับเข้า-supplier/2026-07-25-บ.สหพัฒนพิบูล จำกัด
+ *   deliveryFailure  → ส่งไม่สำเร็จ/UM-260724-4775532441
  */
 export function driveFolderPath(scope: AttachmentScope, key: string): string[] {
   if (scope === 'order') return [DRIVE_FOLDERS.customerDocs, sanitizeSegment(key)];
+  if (scope === 'deliveryFailure') return [DRIVE_FOLDERS.deliveryFailures, sanitizeSegment(key)];
   return [DRIVE_FOLDERS.supplierBills, sanitizeSegment(key)];
 }
 

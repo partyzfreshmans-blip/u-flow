@@ -23,7 +23,11 @@ import { updateRouteOrder } from '../data/sources/routeOrdersWrite';
 import { loadDriverQueue, saveDriverQueue } from '../data/driverQueue';
 import { loadPickLots, savePickLots, type PickLot, type PickLotLine } from '../data/pickLots';
 import { loadBatchRoutes, saveBatchRoutes, type BatchRoute } from '../data/batchRoutes';
-import { PICK_CLOSED_STATUS } from './helpers';
+import { loadDeliveryFailures, saveDeliveryFailures, type DeliveryFailureIndex, type DeliveryFailureRecord } from '../data/deliveryFailures';
+import { loadPreDepartureChecklists, savePreDepartureChecklists, type PreDepartureChecklistIndex } from '../data/preDeparture';
+import { loadFailedDeliveryQueue, removeFailedDeliveryQueueItem, saveFailedDeliveryQueueItem, type FailedDeliveryQueueItem } from '../data/failedDeliveryQueue';
+import { fetchBatchRoutes as apiFetchBatchRoutes, upsertBatchRoutes as apiUpsertBatchRoutes } from '../data/sources/batchRoutesApi';
+import { DELIVERY_FAILED_STATUS, PICK_CLOSED_STATUS } from './helpers';
 import type { AttachmentScope } from '../config/drive';
 import type { ApiImportOrder, CsMasterCustomer, OrderLineItem, Promo, PromoPackUnit, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
 import { csvExportUrl, SHEET_TABS } from '../config/sheets';
@@ -162,6 +166,11 @@ export interface AppState {
    * on the Planner page. The batch itself is never rolled back for this;
    * it's a "go check/retry" notice, not a blocker. */
   courierStampWarning: string | null;
+  /** Set when a background push of batchRoutes to the shared backend (see
+   * src/data/sources/batchRoutesApi.ts) fails — the edit itself is never
+   * rolled back (local state + localStorage already have it), this is only
+   * a "some other device may not see this yet, retry" notice. */
+  batchRoutesSyncWarning: string | null;
   /** orderNo whose "ตรวจสอบ/แก้ไขโลเคชั่น" modal is open; null = closed. */
   orderLocationOrderNo: string | null;
   orderLocationLat: string;
@@ -173,9 +182,35 @@ export interface AppState {
   // own navigation + offline-sync state
   /** null = vehicle picker screen. */
   driverVehicleId: string | null;
+  /** Which of that vehicle's Batch Route dates the driver is currently
+   * viewing — null = date-selection screen. Reset to null whenever the
+   * vehicle changes (see setDriverVehicle). */
+  driverSelectedBatchId: string | null;
   /** orderNos marked delivered locally but not yet confirmed synced to the sheet. */
   driverSyncQueue: string[];
   driverOnline: boolean;
+  /** batchId -> which SKUs are ticked + whether "ยืนยันเริ่มเดินทาง" was
+   * pressed for that batch's pre-departure checklist. */
+  preDepartureChecklists: PreDepartureChecklistIndex;
+
+  // "ส่งไม่สำเร็จ" (delivery failed) — the alternative to markDelivered on a
+  // stop, with a required photo. detail (reason/note/photo links) keyed by
+  // orderNo; see src/data/deliveryFailures.ts for why it's not on the order
+  // record itself.
+  deliveryFailures: DeliveryFailureIndex;
+  /** orderNo whose "ส่งไม่สำเร็จ" dialog is open; null = closed. */
+  deliveryFailureDialogOrderNo: string | null;
+  deliveryFailureReason: string;
+  deliveryFailureNote: string;
+  deliveryFailurePhotos: File[];
+  deliveryFailureSubmitting: boolean;
+  deliveryFailureError: string | null;
+  /** orderNos whose "ส่งไม่สำเร็จ" submission (status write + photo upload)
+   * is queued for retry — mirrors driverSyncQueue's role for markDelivered,
+   * but the actual pending payload (reason/note/photo blobs) lives in
+   * IndexedDB (see src/data/failedDeliveryQueue.ts) since it can't fit in
+   * localStorage's string-only quota. */
+  deliveryFailureSyncQueue: string[];
 
   // driver stop bookings ("จองคิว") — a driver "reserves" an unassigned stop
   // as a request; manager/admin then confirms (adding it to that driver's
@@ -434,6 +469,7 @@ export const initialState: AppState = {
   plannerTab: 'plan',
   assignDialogOpen: false,
   courierStampWarning: null,
+  batchRoutesSyncWarning: null,
   assignSelectedVehicleIds: [],
   orderLocationOrderNo: null,
   orderLocationLat: '',
@@ -441,8 +477,19 @@ export const initialState: AppState = {
   orderLocationSaving: false,
   orderLocationError: null,
 
+  driverSelectedBatchId: null,
   driverSyncQueue: [],
   driverOnline: typeof navigator === 'undefined' || navigator.onLine,
+  preDepartureChecklists: {},
+
+  deliveryFailures: {},
+  deliveryFailureDialogOrderNo: null,
+  deliveryFailureReason: '',
+  deliveryFailureNote: '',
+  deliveryFailurePhotos: [],
+  deliveryFailureSubmitting: false,
+  deliveryFailureError: null,
+  deliveryFailureSyncQueue: [],
 
   bookings: [],
   bookingsLoading: false,
@@ -735,6 +782,55 @@ export function useAppStore() {
     });
   }
 
+  /** Uploads the photo(s) for one "ส่งไม่สำเร็จ" report and writes the Status
+   * column, then reflects both in local shared state — the one place both
+   * the immediate submit path and the offline-queue retry path converge, so
+   * they can never drift on what "success" actually updates. Throws on any
+   * failure (upload or write-back) so the caller decides what to do next
+   * (submit queues it; retry just leaves it queued for the next attempt). */
+  async function attemptFailedDelivery(item: FailedDeliveryQueueItem): Promise<void> {
+    const uploaded = await uploadToDrive('deliveryFailure', item.orderNo, item.photos);
+    await updateRouteOrder({ orderNo: item.orderNo, status: DELIVERY_FAILED_STATUS });
+
+    const username = loadSession()?.username ?? 'ไม่ทราบผู้ใช้';
+    const record: DeliveryFailureRecord = {
+      orderNo: item.orderNo,
+      reason: item.reason,
+      note: item.note,
+      photoLinks: uploaded.map((f) => ({ fileId: f.fileId, webViewLink: f.webViewLink, name: f.name })),
+      failedAt: new Date().toISOString(),
+      failedBy: username,
+    };
+    const nextFailures = { ...loadDeliveryFailures(), [item.orderNo]: record };
+    saveDeliveryFailures(nextFailures);
+    dispatch({ type: 'patch', patch: { deliveryFailures: nextFailures } });
+    dispatch({ type: 'applyPickLotStatus', orderNo: item.orderNo, statusText: DELIVERY_FAILED_STATUS });
+    logActivity('ส่งไม่สำเร็จ', `${item.reason}${item.note ? ` · ${item.note}` : ''} · แนบรูป ${uploaded.length} รูป`, item.orderNo);
+  }
+
+  /** Retries every queued "ส่งไม่สำเร็จ" report — same on-reconnect /
+   * periodic-tick trigger as syncDriverQueue above. Re-reads the queue after
+   * each removal (rather than filtering a captured state.deliveryFailureSyncQueue)
+   * so this never depends on a stale closure over state, same reasoning as
+   * syncDriverQueue's own loadDriverQueue().filter(...) pattern. */
+  function syncFailedDeliveryQueue() {
+    loadFailedDeliveryQueue().then((queue) => {
+      queue.forEach((item) => {
+        attemptFailedDelivery(item)
+          .then(() =>
+            removeFailedDeliveryQueueItem(item.orderNo).then(() =>
+              loadFailedDeliveryQueue().then((remaining) => {
+                dispatch({ type: 'patch', patch: { deliveryFailureSyncQueue: remaining.map((r) => r.orderNo) } });
+              }),
+            ),
+          )
+          .catch(() => {
+            /* stays queued — next online event or interval tick retries */
+          });
+      });
+    });
+  }
+
   /** Appends one entry to the persisted activity log and reflects it in
    * state immediately. Called from every user action that changes something
    * meaningful (order edits, planner moves, pick-lot closes, lat/lng fixes,
@@ -941,12 +1037,26 @@ export function useAppStore() {
         driverSyncQueue: loadDriverQueue(),
         pickLots: loadPickLots(),
         batchRoutes: loadBatchRoutes(),
+        deliveryFailures: loadDeliveryFailures(),
+        preDepartureChecklists: loadPreDepartureChecklists(),
         lastSyncAt: loadLastSyncAt(),
         notificationEvents: loadNotificationEvents(),
         notificationReadIds: loadNotificationReadIds(),
         activityLog: loadActivityLog(),
         sidebarCollapsed: loadSidebarCollapsed() ?? window.innerWidth < 900,
       },
+    });
+  }, []);
+
+  // The failed-delivery photo queue lives in IndexedDB (see
+  // src/data/failedDeliveryQueue.ts), which is inherently async — can't join
+  // the synchronous localStorage batch above — so it gets its own mount
+  // effect, and also kicks off one retry attempt immediately in case
+  // connectivity came back while the app was closed.
+  useEffect(() => {
+    loadFailedDeliveryQueue().then((queue) => {
+      dispatch({ type: 'patch', patch: { deliveryFailureSyncQueue: queue.map((q) => q.orderNo) } });
+      if (queue.length > 0) syncFailedDeliveryQueue();
     });
   }, []);
 
@@ -1006,12 +1116,14 @@ export function useAppStore() {
     const goOnline = () => {
       dispatch({ type: 'patch', patch: { driverOnline: true } });
       syncDriverQueue();
+      syncFailedDeliveryQueue();
     };
     const goOffline = () => dispatch({ type: 'patch', patch: { driverOnline: false } });
     window.addEventListener('online', goOnline);
     window.addEventListener('offline', goOffline);
     const interval = setInterval(() => {
       if (loadDriverQueue().length > 0) syncDriverQueue();
+      syncFailedDeliveryQueue();
     }, 20000);
     return () => {
       window.removeEventListener('online', goOnline);
@@ -1050,6 +1162,36 @@ export function useAppStore() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.session?.username]);
 
+  // Batch Routes — same polling reasoning as bookings above: this is what
+  // lets a driver's own phone (a different device than whichever admin ran
+  // "ยืนยันรูท (Assign)") see that vehicle's assigned dates at all, since the
+  // localStorage cache alone would otherwise only ever hold whatever was
+  // last assigned FROM this exact browser.
+  useEffect(() => {
+    if (!state.session) return;
+    let cancelled = false;
+    const load = () => {
+      const session = loadSession();
+      if (!session) return;
+      apiFetchBatchRoutes(session)
+        .then((list) => {
+          if (cancelled) return;
+          dispatch({ type: 'patch', patch: { batchRoutes: list } });
+          saveBatchRoutes(list);
+        })
+        .catch(() => {
+          /* keep showing whatever's cached locally — next poll tick retries */
+        });
+    };
+    load();
+    const interval = setInterval(load, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.session?.username]);
+
   const actions = useMemo(
     () => ({
       patch: (patch: Partial<AppState>) => dispatch({ type: 'patch', patch }),
@@ -1066,9 +1208,22 @@ export function useAppStore() {
         saveRoutePlan(plan);
       },
       setBatchRoutes: (list: BatchRoute[]) => {
+        // Local-first, same as every other planner write: state + localStorage
+        // update immediately, then push to the shared backend in the
+        // background so a driver on a different device picks it up on their
+        // next poll (see the batchRoutes poll effect below). A push failure
+        // never rolls back the local edit — it surfaces as a dismissible
+        // warning instead, matching courierStampWarning's own pattern.
         dispatch({ type: 'patch', patch: { batchRoutes: list } });
         saveBatchRoutes(list);
+        const session = loadSession();
+        if (!session) return;
+        apiUpsertBatchRoutes(session, list).catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : 'ซิงค์ Batch Route ขึ้นเซิร์ฟเวอร์ไม่สำเร็จ';
+          dispatch({ type: 'patch', patch: { batchRoutesSyncWarning: message } });
+        });
       },
+      dismissBatchRoutesSyncWarning: () => dispatch({ type: 'patch', patch: { batchRoutesSyncWarning: null } }),
       /** Best-effort background write of column N ("คนส่ง") in the คำสั่งซื้อ
        * sheet after a batch Assign or edit — fires once per order via
        * Promise.allSettled (not Promise.all) so one bad row can't hide the
@@ -1476,7 +1631,86 @@ export function useAppStore() {
           });
       },
 
-      setDriverVehicle: (vehicleId: string | null) => dispatch({ type: 'patch', patch: { driverVehicleId: vehicleId } }),
+      setDriverVehicle: (vehicleId: string | null) => dispatch({ type: 'patch', patch: { driverVehicleId: vehicleId, driverSelectedBatchId: null } }),
+      selectDriverBatch: (batchId: string | null) => dispatch({ type: 'patch', patch: { driverSelectedBatchId: batchId } }),
+
+      openDeliveryFailureDialog: (orderNo: string) =>
+        dispatch({ type: 'patch', patch: { deliveryFailureDialogOrderNo: orderNo, deliveryFailureReason: '', deliveryFailureNote: '', deliveryFailurePhotos: [], deliveryFailureError: null } }),
+      closeDeliveryFailureDialog: () =>
+        dispatch({ type: 'patch', patch: { deliveryFailureDialogOrderNo: null, deliveryFailurePhotos: [], deliveryFailureError: null } }),
+      setDeliveryFailureReason: (reason: string) => dispatch({ type: 'patch', patch: { deliveryFailureReason: reason } }),
+      setDeliveryFailureNote: (note: string) => dispatch({ type: 'patch', patch: { deliveryFailureNote: note } }),
+      setDeliveryFailurePhotos: (files: File[]) => dispatch({ type: 'patch', patch: { deliveryFailurePhotos: files } }),
+      /** Tries the upload + status write immediately; if that fails for any
+       * reason (most commonly: no connection), the report is queued in
+       * IndexedDB and retried automatically the same way a queued
+       * markDelivered is (on 'online' and on the periodic interval tick —
+       * see the effect below) — the driver isn't blocked waiting on it
+       * either way, matching "ไม่บังคับห้ามออกจากหน้า" from the spec. */
+      submitDeliveryFailure: (orderNo: string, reason: string, note: string, photos: File[]) => {
+        if (photos.length === 0) {
+          dispatch({ type: 'patch', patch: { deliveryFailureError: 'ต้องแนบรูปอย่างน้อย 1 รูป' } });
+          return;
+        }
+        dispatch({ type: 'patch', patch: { deliveryFailureSubmitting: true, deliveryFailureError: null } });
+        const item: FailedDeliveryQueueItem = { orderNo, reason, note, photos, queuedAt: new Date().toISOString() };
+        attemptFailedDelivery(item)
+          .then(() => {
+            dispatch({
+              type: 'patch',
+              patch: { deliveryFailureSubmitting: false, deliveryFailureDialogOrderNo: null, deliveryFailurePhotos: [] },
+            });
+          })
+          .catch(() => {
+            saveFailedDeliveryQueueItem(item).then(() =>
+              loadFailedDeliveryQueue().then((queue) => {
+                dispatch({
+                  type: 'patch',
+                  patch: {
+                    deliveryFailureSubmitting: false,
+                    deliveryFailureDialogOrderNo: null,
+                    deliveryFailurePhotos: [],
+                    deliveryFailureSyncQueue: queue.map((q) => q.orderNo),
+                  },
+                });
+              }),
+            );
+          });
+      },
+      retryDeliveryFailureQueue: () => syncFailedDeliveryQueue(),
+
+      // toggleChecklistSku/confirmChecklist take the current checklist index
+      // as a parameter (from computeDriverChecklist, itself called fresh
+      // every render) rather than reading state.preDepartureChecklists
+      // directly — this actions object is memoized once with an empty
+      // dependency array (see the useMemo below), so any action body that
+      // read state.X directly would always see whatever state was current
+      // at the very first render, never a later one. Every other action in
+      // this file that needs current state already follows this same
+      // caller-supplies-it pattern (e.g. closeBatchCod's batchRoutes param).
+      toggleChecklistSku: (batchId: string, sku: string, checklists: PreDepartureChecklistIndex) => {
+        const cur = checklists[batchId] ?? { checkedSkus: [], confirmedAt: null, confirmedBy: '' };
+        const nextSkus = cur.checkedSkus.includes(sku) ? cur.checkedSkus.filter((s) => s !== sku) : [...cur.checkedSkus, sku];
+        const next = { ...checklists, [batchId]: { ...cur, checkedSkus: nextSkus } };
+        savePreDepartureChecklists(next);
+        dispatch({ type: 'patch', patch: { preDepartureChecklists: next } });
+      },
+      /** "ยืนยันเริ่มเดินทาง" — records the confirmation whether or not every
+       * SKU was individually ticked first (see PreDepartureChecklistState),
+       * and always logs it, noting exactly how many of the total were
+       * checked so an incomplete confirmation is visible in the audit trail
+       * too, not indistinguishable from a full one. */
+      confirmChecklist: (batchId: string, batchLabel: string, checkedCount: number, totalCount: number, checklists: PreDepartureChecklistIndex) => {
+        const cur = checklists[batchId] ?? { checkedSkus: [], confirmedAt: null, confirmedBy: '' };
+        const username = loadSession()?.username ?? 'ไม่ทราบผู้ใช้';
+        const next = { ...checklists, [batchId]: { ...cur, confirmedAt: new Date().toISOString(), confirmedBy: username } };
+        savePreDepartureChecklists(next);
+        dispatch({ type: 'patch', patch: { preDepartureChecklists: next } });
+        logActivity(
+          'ยืนยันเช็คลิสต์ก่อนออกเดินทาง',
+          `${batchLabel} · ตรวจนับแล้ว ${checkedCount}/${totalCount} รายการ${checkedCount < totalCount ? ' (ยังไม่ครบ)' : ''}`,
+        );
+      },
       /** Marks a stop delivered immediately in shared state (so every page
        * sees it right away) and queues the sheet write — offline-safe: if
        * the write fails or there's no connection at all, the orderNo stays

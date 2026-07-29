@@ -42,10 +42,15 @@ const STATUS_HEADER = 'Status';
 // above) — exactly what should be stamped when a driver marks a stop done.
 const DELIVERED_TIMESTAMP_HEADER = 'วันที่จัดส่ง';
 const DELIVERED_STATUS_VALUE = 'ส่งสำเร็จ';
+// Not a done state — deliberately excluded from DELIVERY_DONE_STATUSES on
+// the frontend (see src/state/helpers.ts) so a failed stop keeps showing up
+// in stuck-order/incomplete tracking until someone resolves it (redeliver,
+// cancel, etc.), same as any other still-open order.
+export const DELIVERY_FAILED_STATUS_VALUE = 'ส่งไม่สำเร็จ';
 // Real status vocabulary observed in the sheet — a small allowlist so a
 // caller passing an arbitrary `status` string (e.g. batch picking closing a
 // lot) can't accidentally write a typo/garbage value into the column.
-const KNOWN_STATUS_VALUES = ['รอยืนยันออเดอร์', 'กำลังดำเนินการ', 'รอชำระเงิน', 'กำลังจัดส่ง', DELIVERED_STATUS_VALUE, 'ได้รับแล้ว', 'ยกเลิก'];
+const KNOWN_STATUS_VALUES = ['รอยืนยันออเดอร์', 'กำลังดำเนินการ', 'รอชำระเงิน', 'กำลังจัดส่ง', DELIVERED_STATUS_VALUE, 'ได้รับแล้ว', 'ยกเลิก', DELIVERY_FAILED_STATUS_VALUE];
 // The real sheet has no dedicated boolean tax-invoice column — only a legacy
 // field ("ใบกำกับภาษี/หมายเหตุเดิม") that mixes it with old free-text notes
 // and already holds real note content on some rows, so it's not safe to
@@ -675,6 +680,217 @@ export async function handleDecideBooking(token: string | null, body: unknown): 
   }
 }
 
+// ---------- Batch Routes ----------
+// A "Batch Route" is a vehicle's locked delivery run for one day, created by
+// the Planner's "Assign" step. Originally local-only (localStorage), but a
+// driver logging in from their own phone — a different browser than
+// whichever admin planned the route — would never see it: same reasoning as
+// Bookings above, this now gets a real Sheet tab too so date-selection on
+// Driver View works across devices, not just same-browser.
+const BATCH_ROUTES_TAB_TITLE = 'Batch Routes';
+const BATCH_ROUTES_HEADER = [
+  'id', 'vehicleId', 'vehicleName', 'deliveryDate', 'orderNos', 'createdAt', 'createdBy',
+  'updatedAt', 'updatedBy', 'locked', 'codClosed', 'codClosedAt', 'codClosedBy',
+];
+
+interface BatchRouteRecord {
+  rowIndex: number;
+  id: string;
+  vehicleId: string;
+  vehicleName: string;
+  deliveryDate: string;
+  orderNos: string[];
+  createdAt: string;
+  createdBy: string;
+  updatedAt: string;
+  updatedBy: string;
+  locked: boolean;
+  codClosed: boolean;
+  codClosedAt: string;
+  codClosedBy: string;
+}
+
+async function ensureBatchRoutesSheet(sheets: SheetsClient): Promise<void> {
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: MAIN_SHEET_ID });
+  const exists = meta.data.sheets?.some((s) => s.properties?.title === BATCH_ROUTES_TAB_TITLE);
+  if (exists) return;
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: MAIN_SHEET_ID,
+    requestBody: { requests: [{ addSheet: { properties: { title: BATCH_ROUTES_TAB_TITLE } } }] },
+  });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: MAIN_SHEET_ID,
+    range: `${BATCH_ROUTES_TAB_TITLE}!A1:M1`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [BATCH_ROUTES_HEADER] },
+  });
+}
+
+// orderNos is the one array-valued field — order numbers observed in this
+// sheet are plain alphanumeric-with-hyphens, so "|" is a safe, human-readable
+// join that will never collide with a real value.
+async function readBatchRoutes(sheets: SheetsClient): Promise<BatchRouteRecord[]> {
+  await ensureBatchRoutesSheet(sheets);
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${BATCH_ROUTES_TAB_TITLE}!A:M` });
+  const rows = res.data.values ?? [];
+  const out: BatchRouteRecord[] = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i] ?? [];
+    const id = String(r[0] ?? '').trim();
+    if (!id) continue;
+    out.push({
+      rowIndex: i + 1,
+      id,
+      vehicleId: String(r[1] ?? '').trim(),
+      vehicleName: String(r[2] ?? '').trim(),
+      deliveryDate: String(r[3] ?? '').trim(),
+      orderNos: String(r[4] ?? '').split('|').map((s) => s.trim()).filter(Boolean),
+      createdAt: String(r[5] ?? '').trim(),
+      createdBy: String(r[6] ?? '').trim(),
+      updatedAt: String(r[7] ?? '').trim(),
+      updatedBy: String(r[8] ?? '').trim(),
+      locked: String(r[9] ?? '').trim().toUpperCase() === 'TRUE',
+      codClosed: String(r[10] ?? '').trim().toUpperCase() === 'TRUE',
+      codClosedAt: String(r[11] ?? '').trim(),
+      codClosedBy: String(r[12] ?? '').trim(),
+    });
+  }
+  return out;
+}
+
+function batchRouteRowValues(b: Omit<BatchRouteRecord, 'rowIndex'>): unknown[] {
+  return [
+    b.id, b.vehicleId, b.vehicleName, b.deliveryDate, b.orderNos.join('|'), b.createdAt, b.createdBy,
+    b.updatedAt, b.updatedBy, b.locked ? 'TRUE' : 'FALSE', b.codClosed ? 'TRUE' : 'FALSE', b.codClosedAt, b.codClosedBy,
+  ];
+}
+
+/** Any authenticated user can list batch routes — same reasoning as
+ * Bookings: a driver needs to see their own vehicle's assigned dates, and
+ * nothing here is more sensitive than what the desktop Planner already
+ * shows to manager/admin_staff. */
+export async function handleListBatchRoutes(token: string | null): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  try {
+    const sheets = await getSheetsClient();
+    const records = await readBatchRoutes(sheets);
+    return {
+      status: 200,
+      body: {
+        batchRoutes: records.map(({ rowIndex: _rowIndex, ...b }) => b),
+      },
+    };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'โหลด Batch Route ไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
+}
+
+/** Bulk upsert — the client always sends its whole current batchRoutes list
+ * (never large: a handful of vehicles × at most a couple of batches each per
+ * day), matched back to sheet rows by id; unmatched ids are appended.
+ *
+ * administrator/manager/admin_staff may write any field (this mirrors the
+ * exact same set of roles the Planner's own batch-editing actions already
+ * require client-side). A driver may also call this — but ONLY to close out
+ * COD on their own vehicle's batch, exactly the "ปิดยอดรอบนี้ (batch)"
+ * button on their own Driver View COD tab already lets them do — so every
+ * driver-submitted record is checked field-by-field against what's already
+ * stored: vehicleId/orderNos/locked/etc. must be byte-for-byte unchanged,
+ * only codClosed/codClosedAt/codClosedBy (and updatedAt/updatedBy) may
+ * differ, and vehicleId must match the driver's own session. This is
+ * deliberately stricter than trusting the client, since this endpoint is the
+ * one place a compromised or buggy driver session could otherwise rewrite
+ * someone else's route. */
+export async function handleUpsertBatchRoutes(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (!['administrator', 'manager', 'admin_staff', 'driver'].includes(payload.role)) {
+    return { status: 403, body: { error: 'ไม่มีสิทธิ์แก้ไข Batch Route' } };
+  }
+
+  const { batchRoutes } = (body ?? {}) as Record<string, unknown>;
+  if (!Array.isArray(batchRoutes)) return { status: 400, body: { error: 'ต้องระบุ batchRoutes เป็น array' } };
+
+  const incoming: Omit<BatchRouteRecord, 'rowIndex'>[] = [];
+  for (const raw of batchRoutes) {
+    const b = (raw ?? {}) as Record<string, unknown>;
+    if (typeof b.id !== 'string' || !b.id.trim()) return { status: 400, body: { error: 'batchRoutes ทุกรายการต้องมี id' } };
+    incoming.push({
+      id: b.id.trim(),
+      vehicleId: typeof b.vehicleId === 'string' ? b.vehicleId : '',
+      vehicleName: typeof b.vehicleName === 'string' ? b.vehicleName : '',
+      deliveryDate: typeof b.deliveryDate === 'string' ? b.deliveryDate : '',
+      orderNos: Array.isArray(b.orderNos) ? b.orderNos.filter((n): n is string => typeof n === 'string') : [],
+      createdAt: typeof b.createdAt === 'string' ? b.createdAt : '',
+      createdBy: typeof b.createdBy === 'string' ? b.createdBy : '',
+      updatedAt: typeof b.updatedAt === 'string' ? b.updatedAt : new Date().toISOString(),
+      updatedBy: typeof b.updatedBy === 'string' ? b.updatedBy : payload.username,
+      locked: b.locked === true,
+      codClosed: b.codClosed === true,
+      codClosedAt: typeof b.codClosedAt === 'string' ? b.codClosedAt : '',
+      codClosedBy: typeof b.codClosedBy === 'string' ? b.codClosedBy : '',
+    });
+  }
+
+  try {
+    const sheets = await getSheetsClient();
+    const existing = await readBatchRoutes(sheets);
+    const existingById = new Map(existing.map((b) => [b.id, b]));
+
+    if (payload.role === 'driver') {
+      for (const b of incoming) {
+        const cur = existingById.get(b.id);
+        if (!cur) return { status: 403, body: { error: 'Driver ไม่มีสิทธิ์สร้าง Batch Route ใหม่' } };
+        if (cur.vehicleId !== payload.driverVehicleId) {
+          return { status: 403, body: { error: 'Driver แก้ไขได้เฉพาะ Batch Route ของรถตัวเอง' } };
+        }
+        const onlyCodFieldsChanged =
+          cur.vehicleId === b.vehicleId &&
+          cur.vehicleName === b.vehicleName &&
+          cur.deliveryDate === b.deliveryDate &&
+          cur.orderNos.join('|') === b.orderNos.join('|') &&
+          cur.locked === b.locked &&
+          cur.createdAt === b.createdAt &&
+          cur.createdBy === b.createdBy;
+        if (!onlyCodFieldsChanged) {
+          return { status: 403, body: { error: 'Driver แก้ไขได้เฉพาะสถานะปิดยอด COD เท่านั้น' } };
+        }
+      }
+    }
+
+    const updates: { range: string; values: unknown[][] }[] = [];
+    const appends: unknown[][] = [];
+    for (const b of incoming) {
+      const cur = existingById.get(b.id);
+      if (cur) {
+        updates.push({ range: `${BATCH_ROUTES_TAB_TITLE}!A${cur.rowIndex}:M${cur.rowIndex}`, values: [batchRouteRowValues(b)] });
+      } else {
+        appends.push(batchRouteRowValues(b));
+      }
+    }
+    for (const u of updates) {
+      await sheets.spreadsheets.values.update({ spreadsheetId: MAIN_SHEET_ID, range: u.range, valueInputOption: 'RAW', requestBody: { values: u.values } });
+    }
+    if (appends.length > 0) {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: MAIN_SHEET_ID,
+        range: `${BATCH_ROUTES_TAB_TITLE}!A:M`,
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: appends },
+      });
+    }
+
+    return { status: 200, body: { ok: true } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'บันทึก Batch Route ไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
+}
+
 export function handleHealth(): ApiResult {
   const configured = !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY?.trim();
   return {
@@ -769,13 +985,18 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
     return { status: 400, body: { error: 'ต้องระบุเลขคำสั่งซื้อ' } };
   }
   // Different fields on this one endpoint serve different features with
-  // different permission requirements: markDelivered is the driver's own
-  // action from Driver View; status is the batch-pick-lot close write
+  // different permission requirements: markDelivered and the
+  // DELIVERY_FAILED_STATUS_VALUE status are the driver's own actions from
+  // Driver View; any other status is the batch-pick-lot close write
   // (Checker's job, per the permission matrix); everything else is the
   // Order Management edit form.
   if (markDelivered === true) {
     if (!['administrator', 'manager', 'driver'].includes(payload.role)) {
       return { status: 403, body: { error: 'ไม่มีสิทธิ์ทำเครื่องหมายส่งสำเร็จ' } };
+    }
+  } else if (status === DELIVERY_FAILED_STATUS_VALUE) {
+    if (!['administrator', 'manager', 'driver'].includes(payload.role)) {
+      return { status: 403, body: { error: 'ไม่มีสิทธิ์ทำเครื่องหมายส่งไม่สำเร็จ' } };
     }
   } else if (typeof status === 'string') {
     if (!['administrator', 'manager', 'checker'].includes(payload.role)) {
@@ -1312,11 +1533,20 @@ export async function handleDriveUpload(token: string | null, files: UploadFile[
   const payload = verifySessionToken(token);
   if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
   if (files.length === 0) return { status: 400, body: { error: 'ไม่พบไฟล์ที่จะอัปโหลด' } };
-  if (scope !== 'order' && scope !== 'receiving') return { status: 400, body: { error: 'scope ต้องเป็น order หรือ receiving' } };
+  if (scope !== 'order' && scope !== 'receiving' && scope !== 'deliveryFailure') {
+    return { status: 400, body: { error: 'scope ต้องเป็น order, receiving หรือ deliveryFailure' } };
+  }
   if (!key) return { status: 400, body: { error: 'ต้องระบุ key (เลขออเดอร์ หรือ วันที่-ซัพพลายเออร์)' } };
   // Order attachments follow Order Management's edit permission; receiving
-  // attachments also allow Checker, who can log goods receiving.
-  const allowedRoles = scope === 'order' ? ['administrator', 'manager', 'admin_staff'] : ['administrator', 'manager', 'admin_staff', 'checker'];
+  // attachments also allow Checker, who can log goods receiving;
+  // deliveryFailure photos are a driver's own action from Driver View, same
+  // role set markDelivered already allows there.
+  const allowedRoles =
+    scope === 'order'
+      ? ['administrator', 'manager', 'admin_staff']
+      : scope === 'deliveryFailure'
+        ? ['administrator', 'manager', 'driver']
+        : ['administrator', 'manager', 'admin_staff', 'checker'];
   if (!allowedRoles.includes(payload.role)) {
     return { status: 403, body: { error: 'ไม่มีสิทธิ์แนบไฟล์' } };
   }

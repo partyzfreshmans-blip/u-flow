@@ -692,6 +692,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
     const batchStamp = batchStampByOrderNo.get(o.orderNo) ?? null;
     const skusForOrder = orderSkus.get(o.orderNo);
     const hasPromoItem = skusForOrder ? Array.from(skusForOrder).some((sku) => activePromoSkus.has(sku)) : false;
+    const deliveryFailure = state.deliveryFailures[o.orderNo] ?? null;
     const saveStatus = state.orderSaveStatus[o.orderNo];
     const hasDeliveryDate = sheetDateToDayKey(o.plannedDeliveryDate) != null;
     // Warehouse cutoff rule: ordered before 16:00 -> ship the next day;
@@ -718,6 +719,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
       amtText: fmt(o.totalAmount),
       itemCountText: o.itemCount.toLocaleString('en-US'),
       hasPromoItem,
+      deliveryFailure,
       paymentType: o.paymentType,
       orderedAtText: formatOrderedAt(o.orderedAtText),
       plannedDeliveryDate: o.plannedDeliveryDate || '—',
@@ -1546,6 +1548,164 @@ export function computePlanner(state: AppState, actions: AppActions) {
 }
 
 type RoutePlanShape = Record<string, string[]>;
+
+// ---------- DRIVER: date selection + route detail for a picked Batch Route ----------
+/** One vehicle's Batch Route dates, nearest-to-today first (today itself
+ * ranks first, then the closest date on either side) — computePlanner's own
+ * per-vehicle stops are scoped to whatever state.plannerDate the admin
+ * currently has the desktop Planner set to, which is a single global value
+ * with no way for a driver to pick a different day; this reads the
+ * permanent Batch Route records directly instead; scoped to the driver's
+ * own vehicle whenever the account is actually a driver. */
+export function computeDriverBatches(state: AppState, vehicleId: string) {
+  const byOrderNo = new Map(state.routeOrders.map((o) => [o.orderNo, o]));
+  const today = todayDayKey();
+
+  const rows = state.batchRoutes
+    .filter((b) => b.vehicleId === vehicleId)
+    .map((b) => {
+      const orders = b.orderNos.map((no) => byOrderNo.get(no)).filter((o): o is RouteOrder => o != null);
+      const deliveredCount = orders.filter((o) => DELIVERY_DONE_STATUSES.includes(o.status)).length;
+      const statusLabel = deliveredCount === 0 ? 'ยังไม่เริ่ม' : deliveredCount < b.orderNos.length ? 'กำลังส่ง' : 'ส่งครบแล้ว';
+      const statusStyle = deliveredCount === 0 ? badgeStyle('neutral') : deliveredCount < b.orderNos.length ? badgeStyle('warn') : badgeStyle('ok');
+      const d = dayKeyToDate(b.deliveryDate);
+      return {
+        id: b.id,
+        dateIso: b.deliveryDate,
+        dateText: d ? formatThaiWeekdayDate(d) : b.deliveryDate || '—',
+        isToday: b.deliveryDate === today,
+        stopCount: b.orderNos.length,
+        totalText: fmt(orders.reduce((sum, o) => sum + o.totalAmount, 0)),
+        statusLabel,
+        statusStyle,
+        deliveredCount,
+        codClosed: b.codClosed,
+        distanceFromToday: b.deliveryDate ? Math.abs(daysBetweenKeys(b.deliveryDate, today)) : Number.MAX_SAFE_INTEGER,
+      };
+    })
+    .sort((a, b) => a.distanceFromToday - b.distanceFromToday || (a.dateIso < b.dateIso ? 1 : -1));
+
+  return { rows, isEmpty: rows.length === 0 };
+}
+
+/** Route detail for one already-picked Batch Route — reads stops from the
+ * batch's own frozen orderNos (the durable, historically-accurate record for
+ * that date) rather than state.routePlan (the live, currently-being-edited
+ * plan, which has already moved on by the time a driver looks back at
+ * yesterday's run). No reorder/remove/move-to-vehicle controls here — those
+ * only make sense for the admin's live, unlocked plan, not a driver's
+ * read-mostly view of a locked historical batch. */
+export function computeDriverRouteDetail(state: AppState, actions: AppActions, batch: BatchRoute) {
+  const resolved = resolveRouteOrderLocations(state.routeOrders, state.customers);
+  const byOrderNo = new Map(resolved.map((o) => [o.orderNo, o]));
+  const wh = resolved.find((o) => o.whLat != null && o.whLng != null);
+  const warehouse = wh && wh.whLat != null && wh.whLng != null ? { lat: wh.whLat, lng: wh.whLng } : null;
+  const vehicle = state.vehicles.find((v) => v.id === batch.vehicleId) ?? null;
+
+  const stops = batch.orderNos
+    .map((no) => byOrderNo.get(no))
+    .filter((o): o is NonNullable<typeof o> => o != null)
+    .map((o, i, arr) => {
+      const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
+      const distanceKm =
+        o.locationSource === 'override'
+          ? warehouse && o.lat != null && o.lng != null
+            ? haversineKm(warehouse.lat, warehouse.lng, o.lat, o.lng)
+            : 0
+          : (o.distanceFromWhKm ?? (warehouse && o.lat != null && o.lng != null ? haversineKm(warehouse.lat, warehouse.lng, o.lat, o.lng) : 0));
+      const deliveryFailure = state.deliveryFailures[o.orderNo] ?? null;
+      return {
+        seq: i + 1,
+        loadCode: vehicle ? loadCode(vehicle.loadPrefix, i, arr.length) : '',
+        orderNo: o.orderNo,
+        customer: o.customer,
+        address: o.addressFromUnii || o.districtProvince,
+        phone: o.phone,
+        amtText: fmt(o.totalAmount),
+        itemCount: o.itemCount,
+        zoneColor: zone.color,
+        distanceText: `${distanceKm.toFixed(1)} กม.`,
+        googleMapsUrl:
+          o.locationSource === 'override' && o.lat != null && o.lng != null
+            ? `https://www.google.com/maps/search/?api=1&query=${o.lat},${o.lng}`
+            : o.mapLink || (o.lat != null && o.lng != null ? `https://www.google.com/maps/search/?api=1&query=${o.lat},${o.lng}` : ''),
+        isCod: isCodPayment(o.paymentType),
+        codMethod: state.routeCodMethod[o.orderNo] ?? 'cash',
+        codCollected: state.routeCodCollected[o.orderNo] ?? '',
+        setCodCash: () => actions.saveRouteCod(state.routeCodCollected, { ...state.routeCodMethod, [o.orderNo]: 'cash' }),
+        setCodTransfer: () => actions.saveRouteCod(state.routeCodCollected, { ...state.routeCodMethod, [o.orderNo]: 'transfer' }),
+        onCodCollected: (val: string) => actions.saveRouteCod({ ...state.routeCodCollected, [o.orderNo]: val.replace(/[^0-9]/g, '') }, state.routeCodMethod),
+        status: o.status,
+        stStyle: sheetStatusStyle(o.status),
+        isDelivered: DELIVERY_DONE_STATUSES.includes(o.status),
+        markDelivered: () => actions.markDelivered(o.orderNo),
+        deliveryFailure,
+        openDeliveryFailureDialog: () => actions.openDeliveryFailureDialog(o.orderNo),
+      };
+    });
+
+  const codStops = stops.filter((s) => s.isCod);
+  let codCashExpected = 0;
+  let codCashCollected = 0;
+  for (const s of codStops) {
+    if (s.codMethod === 'transfer') continue;
+    codCashExpected += Number(byOrderNo.get(s.orderNo)?.totalAmount ?? 0);
+    codCashCollected += Number(s.codCollected || 0);
+  }
+  const codDiff = codCashCollected - codCashExpected;
+
+  const d = dayKeyToDate(batch.deliveryDate);
+  return {
+    batchId: batch.id,
+    dateText: d ? formatThaiWeekdayDate(d) : batch.deliveryDate || '—',
+    stops,
+    stopCount: stops.length,
+    totalText: fmt(stops.reduce((sum, s) => sum + (byOrderNo.get(s.orderNo)?.totalAmount ?? 0), 0)),
+    codCount: codStops.length,
+    codCashExpectedText: fmt(codCashExpected),
+    codCashCollectedText: fmt(codCashCollected),
+    codDiffText: codDiff === 0 ? 'ยอดตรง' : (codDiff > 0 ? 'เกิน +' : 'ขาด −') + fmt(Math.abs(codDiff)),
+    codDiffStyle: codDiff === 0 ? badgeStyle('ok') : badgeStyle('bad'),
+  };
+}
+
+/** Pre-departure SKU checklist for one batch — every SKU across every order
+ * in it, quantities summed, same merge-by-sku pattern as the batch-picking
+ * lot builder (see createPickLot in store.ts): one line per SKU regardless
+ * of how many orders it's split across, not one line per order-line-item. */
+export function computeDriverChecklist(state: AppState, actions: AppActions, batch: BatchRoute) {
+  const merged = new Map<string, { sku: string; name: string; unit: string; totalQty: number }>();
+  for (const li of state.orderLineItems) {
+    if (!batch.orderNos.includes(li.orderNo)) continue;
+    const existing = merged.get(li.sku);
+    if (existing) {
+      existing.totalQty += li.qty;
+    } else {
+      merged.set(li.sku, { sku: li.sku, name: li.productName, unit: li.unit, totalQty: li.qty });
+    }
+  }
+
+  const checklist = state.preDepartureChecklists[batch.id] ?? { checkedSkus: [], confirmedAt: null, confirmedBy: '' };
+  const items = Array.from(merged.values())
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((line) => ({
+      ...line,
+      checked: checklist.checkedSkus.includes(line.sku),
+      toggle: () => actions.toggleChecklistSku(batch.id, line.sku, state.preDepartureChecklists),
+    }));
+
+  const checkedCount = items.filter((i) => i.checked).length;
+  return {
+    items,
+    totalCount: items.length,
+    checkedCount,
+    allChecked: items.length > 0 && checkedCount === items.length,
+    isEmpty: items.length === 0,
+    confirmed: checklist.confirmedAt != null,
+    confirmedAtText: checklist.confirmedAt ? formatDateTime(new Date(checklist.confirmedAt).getTime()) : null,
+    confirm: () => actions.confirmChecklist(batch.id, `${batch.id} · ${batch.vehicleName}`, checkedCount, items.length, state.preDepartureChecklists),
+  };
+}
 
 // ---------- DRIVER "จองคิว" (stop booking) ----------
 /** Full unassigned-stops pool for the Driver's own booking picker — same

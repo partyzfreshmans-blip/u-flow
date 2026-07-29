@@ -65,7 +65,17 @@ const sheetStatusKind: Record<string, BadgeKind> = {
   'ยกเลิก': 'bad',
   'ส่งสำเร็จ': 'ok',
   'กำลังจัดส่ง': 'info',
+  'ส่งไม่สำเร็จ': 'bad',
 };
+
+/** Written back (via routeOrdersWrite's generic `status` field) when a
+ * driver marks a stop "ส่งไม่สำเร็จ" instead of delivered — must match
+ * server/lib.ts's DELIVERY_FAILED_STATUS_VALUE exactly, since that's the
+ * allowlisted value the backend accepts for this write. Deliberately NOT
+ * added to DELIVERY_DONE_STATUSES below — a failed delivery still needs
+ * follow-up (redeliver, cancel, etc.), so it should keep surfacing in
+ * stuck-order/incomplete tracking like any other still-open order. */
+export const DELIVERY_FAILED_STATUS = 'ส่งไม่สำเร็จ';
 
 export function sheetStatusStyle(status: string): CSSProperties {
   return badgeStyle(sheetStatusKind[status] ?? 'neutral');
