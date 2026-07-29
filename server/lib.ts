@@ -139,6 +139,21 @@ function nowSheetDateTime(): string {
   return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
 }
 
+/** Parses the same "M/D/YYYY[ H:MM[:SS]]" text nowSheetDateTime writes into
+ * a comparable epoch-ms value — used to pick the freshest of several API
+ * Import rows sharing one Order UID (see computeRouteOrdersSyncPlan).
+ * Returns 0 for blank/unparseable text so a row with no timestamp never
+ * outranks one that has a real one. */
+function sheetDateTimeToMs(text: string): number {
+  const s = text.trim();
+  if (!s) return 0;
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (!m) return 0;
+  const [, mo, d, y, h, mi, se] = m;
+  const date = new Date(Number(y), Number(mo) - 1, Number(d), Number(h ?? 0), Number(mi ?? 0), Number(se ?? 0));
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
+}
+
 function getServiceAccountCredentials(): { client_email: string; private_key: string } {
   const raw = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
   if (!raw || raw.trim() === '') {
@@ -1373,11 +1388,33 @@ export function computeRouteOrdersSyncPlan(apiImportRows: unknown[][], routeOrde
     else vsRowByOrderUid.set(uid, i);
   }
 
+  // De-duplicate by Order UID up front — API Import can carry more than one
+  // row for the same order (its own external ingestion appends a fresh row
+  // per status change rather than updating one in place), and scanning
+  // top-to-bottom without this would let whichever row happens to be
+  // scanned LAST win regardless of which one is actually newest. That's how
+  // a genuinely fresher status update (e.g. "กำลังดำเนินการ") could get
+  // silently overwritten within the very same sync run by a stale duplicate
+  // still sitting further down/up in API Import — the sync appears to run
+  // with no error, but คำสั่งซื้อ VS keeps showing the old value. Picked by
+  // "วันที่อัปเดต"; ties keep whichever was scanned last (a harmless,
+  // order-dependent fallback only reached when neither timestamp parses).
+  const updatedAtCol = aiAt(API_IMPORT_UPDATED_AT_HEADER);
+  const latestRowByUid = new Map<string, unknown[]>();
+  const latestMsByUid = new Map<string, number>();
   for (let i = 1; i < apiImportRows.length; i++) {
     const r = (apiImportRows[i] ?? []) as unknown[];
-    const orderUid = String(r[aiAt(API_IMPORT_ORDER_UID_HEADER)] ?? '').trim();
-    if (!orderUid) continue;
+    const uid = String(r[aiAt(API_IMPORT_ORDER_UID_HEADER)] ?? '').trim();
+    if (!uid) continue;
+    const ms = sheetDateTimeToMs(String(r[updatedAtCol] ?? ''));
+    const curMs = latestMsByUid.get(uid);
+    if (curMs === undefined || ms >= curMs) {
+      latestRowByUid.set(uid, r);
+      latestMsByUid.set(uid, ms);
+    }
+  }
 
+  for (const [orderUid, r] of latestRowByUid) {
     if (duplicateOrderUids.has(orderUid)) {
       summary.skipped.push({ orderUid, reason: 'พบเลขคำสั่งซื้อนี้ซ้ำกันหลายแถวในคำสั่งซื้อ VS — แก้ไขในชีทโดยตรงก่อน sync รอบต่อไป' });
       continue;

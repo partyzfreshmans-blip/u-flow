@@ -13,8 +13,27 @@ const PAGE_SIZE = 30;
  * this keeps the picked value local until an explicit "บันทึก" click.
  * Clicking the suggestion's "ยืนยัน" doesn't save straight away either — it
  * just fills this same box with the suggested date, so both paths always go
- * through the one visible field and the one save action. */
-function DeliveryDateCell({ suggestedIso, suggestedText, onSave }: { suggestedIso: string | null; suggestedText: string | null; onSave: (iso: string) => void }) {
+ * through the one visible field and the one save action.
+ *
+ * Save feedback renders right here, next to the field the user is actually
+ * looking at — a failure (e.g. a duplicate order number blocking the write,
+ * see handleUpdateRouteOrder's matches.length>1 guard) previously only
+ * showed as a small icon in the far-right actions column, easy to miss when
+ * the row doesn't visibly move to the "already scheduled" group and looks
+ * like nothing happened. */
+function DeliveryDateCell({
+  suggestedIso,
+  suggestedText,
+  onSave,
+  saving,
+  saveError,
+}: {
+  suggestedIso: string | null;
+  suggestedText: string | null;
+  onSave: (iso: string) => void;
+  saving: boolean;
+  saveError: string | null;
+}) {
   const [value, setValue] = useState('');
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 150 }}>
@@ -30,10 +49,17 @@ function DeliveryDateCell({ suggestedIso, suggestedText, onSave }: { suggestedIs
       )}
       <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
         <input type="date" className="input" style={{ minHeight: 26, fontSize: 11, width: 130 }} value={value} onChange={(e) => setValue(e.target.value)} />
-        <button className="btn btn-ghost" style={{ fontSize: 10.5, padding: '2px 7px' }} disabled={!value} onClick={() => onSave(value)}>
-          <i className="ph ph-check" />บันทึก
+        <button className="btn btn-ghost" style={{ fontSize: 10.5, padding: '2px 7px' }} disabled={!value || saving} onClick={() => onSave(value)}>
+          {saving ? <i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} /> : <i className="ph ph-check" />}
+          บันทึก
         </button>
       </div>
+      {saveError && (
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 4, fontSize: 11, color: 'var(--st-bad-fg)', maxWidth: 220 }}>
+          <i className="ph ph-warning-fill" style={{ flex: 'none', marginTop: 1 }} />
+          <span>บันทึกไม่สำเร็จ: {saveError}</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -109,7 +135,13 @@ function OrderTable({
                 {r.hasDeliveryDate || !canEdit ? (
                   <span style={{ color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{r.plannedDeliveryDate || '—'}</span>
                 ) : (
-                  <DeliveryDateCell suggestedIso={r.suggestedDeliveryDateIso} suggestedText={r.suggestedDeliveryDateText} onSave={r.setDeliveryDate} />
+                  <DeliveryDateCell
+                    suggestedIso={r.suggestedDeliveryDateIso}
+                    suggestedText={r.suggestedDeliveryDateText}
+                    onSave={r.setDeliveryDate}
+                    saving={r.saving}
+                    saveError={r.saveError}
+                  />
                 )}
               </td>
               <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', maxWidth: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={r.noteText}>
