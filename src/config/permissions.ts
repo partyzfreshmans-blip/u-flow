@@ -80,6 +80,19 @@ export function canClosePickLot(role: Role): boolean {
   return role === 'administrator' || role === 'manager' || role === 'checker';
 }
 
+/** Cancelling a Batch Route (mistaken assignment) or an unfinished pick lot
+ * are both data-correction actions, not routine page work — deliberately a
+ * separate check from canEditPlan/canPickWork so a role's normal page access
+ * never has to change to grant them. admin_staff gets both even though its
+ * Pick page access is otherwise 'view'-only (see PAGE_ACCESS above): fixing a
+ * mis-created lot is an admin-adjacent correction, not "doing the pick". */
+export function canCancelBatchRoute(role: Role): boolean {
+  return role === 'administrator' || role === 'manager' || role === 'admin_staff';
+}
+export function canCancelPickLot(role: Role): boolean {
+  return role === 'administrator' || role === 'manager' || role === 'admin_staff';
+}
+
 /** Customer master: lat/lng is the only field a driver may ever write —
  * every other field on that page stays read-only for them. */
 export function canEditCustomerLatLng(role: Role): boolean {

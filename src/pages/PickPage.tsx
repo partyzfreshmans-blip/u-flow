@@ -1,9 +1,41 @@
+import { useState } from 'react';
 import { OrderDetailModal } from '../components/OrderDetailModal';
 import { computePick } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 
 export function PickPage({ state, actions }: { state: AppState; actions: AppActions }) {
   const v = computePick(state, actions);
+  const [confirmCancelLotId, setConfirmCancelLotId] = useState<string | null>(null);
+  const cancelTarget =
+    v.mode === 'lot'
+      ? v.lotId === confirmCancelLotId
+        ? { id: v.lotId, orderCount: v.cancelOrderCount, cancel: v.cancel }
+        : null
+      : (v.openLots.find((l) => l.id === confirmCancelLotId) ?? null);
+  const cancelDialog = cancelTarget && (
+    <div className="dialog-backdrop" onClick={() => setConfirmCancelLotId(null)}>
+      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+        <div className="dialog-title">ยกเลิกล็อตหยิบสินค้า {cancelTarget.id}?</div>
+        <div className="dialog-body">
+          ออเดอร์ {cancelTarget.orderCount} รายการในล็อตนี้จะกลับไปเป็น "ยังไม่ได้จัดล็อต" ทันที
+          — สามารถเลือกสร้างล็อตใหม่ได้ตามปกติ การกระทำนี้จะถูกบันทึกลง Activity Log
+        </div>
+        <div className="dialog-actions">
+          <button className="btn btn-secondary" onClick={() => setConfirmCancelLotId(null)}>ยกเลิก (ไม่ทำอะไร)</button>
+          <button
+            className="btn btn-primary"
+            style={{ background: 'var(--st-bad-fg)' }}
+            onClick={() => {
+              cancelTarget.cancel();
+              setConfirmCancelLotId(null);
+            }}
+          >
+            ยืนยันยกเลิกล็อต
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 
   if (v.mode === 'lot') {
     return (
@@ -87,6 +119,16 @@ export function PickPage({ state, actions }: { state: AppState; actions: AppActi
             <i className="ph ph-package" />{v.pickBtnLabel}
           </button>
         )}
+        {v.canCancel && (
+          <button
+            className="btn btn-ghost btn-block"
+            style={{ fontSize: 12.5, marginTop: 10, color: 'var(--st-bad-fg)' }}
+            onClick={() => setConfirmCancelLotId(v.lotId)}
+          >
+            <i className="ph ph-x-circle" />ยกเลิกล็อตหยิบสินค้านี้
+          </button>
+        )}
+        {cancelDialog}
       </div>
     );
   }
@@ -108,16 +150,26 @@ export function PickPage({ state, actions }: { state: AppState; actions: AppActi
         <div className="card elev-sm" style={{ marginBottom: 16, gap: 10 }}>
           <div style={{ fontWeight: 600, fontSize: 14 }}><i className="ph ph-clock-counter-clockwise" style={{ marginRight: 6, color: 'var(--color-accent-300)' }} />ล็อตที่ยังทำไม่เสร็จ</div>
           {v.openLots.map((l) => (
-            <button
-              key={l.id}
-              onClick={l.resume}
-              style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', textAlign: 'left', padding: '10px 12px', borderRadius: 10, border: 0, cursor: 'pointer', background: 'var(--color-bg)', fontFamily: 'var(--font-body)' }}
-            >
-              <span style={{ fontWeight: 600, fontSize: 13 }}>{l.id}</span>
-              <span style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{l.orderCount} ออเดอร์ · {l.skuCount} รายการ</span>
-              <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-accent-200)', fontWeight: 600 }}>{l.doneCount}/{l.skuCount} ({l.pct}%)</span>
-              <i className="ph ph-caret-right" />
-            </button>
+            <div key={l.id} style={{ display: 'flex', alignItems: 'center', gap: 6, borderRadius: 10, background: 'var(--color-bg)' }}>
+              <button
+                onClick={l.resume}
+                style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1, minWidth: 0, textAlign: 'left', padding: '10px 12px', border: 0, cursor: 'pointer', background: 'transparent', fontFamily: 'var(--font-body)' }}
+              >
+                <span style={{ fontWeight: 600, fontSize: 13 }}>{l.id}</span>
+                <span style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{l.orderCount} ออเดอร์ · {l.skuCount} รายการ</span>
+                <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-accent-200)', fontWeight: 600 }}>{l.doneCount}/{l.skuCount} ({l.pct}%)</span>
+                <i className="ph ph-caret-right" />
+              </button>
+              {l.canCancel && (
+                <button
+                  className="btn btn-ghost"
+                  style={{ fontSize: 11.5, flex: 'none', marginRight: 8, color: 'var(--st-bad-fg)' }}
+                  onClick={() => setConfirmCancelLotId(l.id)}
+                >
+                  <i className="ph ph-x-circle" />ยกเลิก
+                </button>
+              )}
+            </div>
           ))}
         </div>
       )}
@@ -198,6 +250,7 @@ export function PickPage({ state, actions }: { state: AppState; actions: AppActi
       )}
 
       <OrderDetailModal state={state} actions={actions} />
+      {cancelDialog}
     </div>
   );
 }

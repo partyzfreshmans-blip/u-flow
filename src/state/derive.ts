@@ -10,8 +10,8 @@ import { coordKey, type GeocodeCache } from '../data/geocodeCache';
 import { resolveRouteOrderLocations } from '../data/customerLocation';
 import { avgPricePerPiece, detectUnit } from '../data/sources/promotionsSheet';
 import { addDays, dayKey, dayKeyToDate, daysBetweenKeys, formatOrderedAt, formatThaiShortDate, formatThaiWeekdayDate, sheetDateTimeToMs, sheetDateToDayKey, suggestedDeliveryDayKey, todayDayKey } from '../data/dateUtils';
-import { badgeStyle, DELIVERY_DONE_STATUSES, fmt, sheetStatusStyle } from './helpers';
-import { canBookStop, canClosePickLot, canDecideBooking, canEditOrder, canEditPlan, canManageUsers, canPickWork, ROLES, ROLE_LABELS, seesAllActivityLog } from '../config/permissions';
+import { badgeStyle, DELIVERED_STATUSES, DELIVERY_DONE_STATUSES, fmt, sheetStatusStyle } from './helpers';
+import { canBookStop, canCancelBatchRoute, canCancelPickLot, canClosePickLot, canDecideBooking, canEditOrder, canEditPlan, canManageUsers, canPickWork, ROLES, ROLE_LABELS, seesAllActivityLog } from '../config/permissions';
 import type { BookingRow } from '../data/sources/bookingsApi';
 import type { AppActions, AppState } from './store';
 
@@ -31,7 +31,10 @@ function effectiveDeliveryDayKey(o: RouteOrder): string | null {
 export function filterOutBatchedOrderNos(orderNos: string[], batchRoutes: BatchRoute[]): string[] {
   if (batchRoutes.length === 0 || orderNos.length === 0) return orderNos;
   const batched = new Set<string>();
-  for (const b of batchRoutes) for (const no of b.orderNos) batched.add(no);
+  for (const b of batchRoutes) {
+    if (b.cancelled) continue;
+    for (const no of b.orderNos) batched.add(no);
+  }
   return orderNos.filter((no) => !batched.has(no));
 }
 
@@ -265,7 +268,7 @@ export function computeDashboard(state: AppState, actions: AppActions) {
   // least one order that hasn't reached a done status — the same two facts
   // the COD Clearing and Batch Route History pages already track per batch.
   const activeBatches = state.batchRoutes.filter((b) => {
-    if (b.codClosed) return false;
+    if (b.codClosed || b.cancelled) return false;
     const deliveredCount = b.orderNos.filter((no) => DELIVERY_DONE_STATUSES.includes(byOrderNoForBatches.get(no)?.status ?? '')).length;
     return deliveredCount < b.orderNos.length;
   });
@@ -660,6 +663,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
   // wins, since that reflects the order's real current assignment.
   const batchStampByOrderNo = new Map<string, { vehicleName: string; batchId: string; createdAt: string }>();
   for (const b of state.batchRoutes) {
+    if (b.cancelled) continue;
     for (const orderNo of b.orderNos) {
       const cur = batchStampByOrderNo.get(orderNo);
       if (!cur || b.createdAt > cur.createdAt) batchStampByOrderNo.set(orderNo, { vehicleName: b.vehicleName, batchId: b.id, createdAt: b.createdAt });
@@ -885,7 +889,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
   // "Active" batch per vehicle = the most recently created one for this
   // exact delivery date (a vehicle can accumulate more than one batch across
   // a day — e.g. a second trip — each keeping its own frozen order list).
-  const batchesForDate = state.plannerDate ? state.batchRoutes.filter((b) => b.deliveryDate === state.plannerDate) : [];
+  const batchesForDate = state.plannerDate ? state.batchRoutes.filter((b) => b.deliveryDate === state.plannerDate && !b.cancelled) : [];
   const activeBatchByVehicle = new Map<string, BatchRoute>();
   for (const b of batchesForDate) {
     const cur = activeBatchByVehicle.get(b.vehicleId);
@@ -966,6 +970,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
     for (const no of orderNos) assignedTo.set(no, vehicleId);
   }
   for (const b of state.batchRoutes) {
+    if (b.cancelled) continue;
     for (const no of b.orderNos) if (!assignedTo.has(no)) assignedTo.set(no, b.vehicleId);
   }
 
@@ -1458,6 +1463,9 @@ export function computePlanner(state: AppState, actions: AppActions) {
         codClosed: false,
         codClosedAt: '',
         codClosedBy: '',
+        cancelled: false,
+        cancelledAt: '',
+        cancelledBy: '',
       };
       nextBatches = [...nextBatches, batch];
       // The batch now owns these orderNos permanently — clear the vehicle's
@@ -1602,7 +1610,7 @@ export function computeDriverBatches(state: AppState, vehicleId: string) {
   const today = todayDayKey();
 
   const rows = state.batchRoutes
-    .filter((b) => b.vehicleId === vehicleId)
+    .filter((b) => b.vehicleId === vehicleId && !b.cancelled)
     .map((b) => {
       const orders = b.orderNos.map((no) => byOrderNo.get(no)).filter((o): o is RouteOrder => o != null);
       const deliveredCount = orders.filter((o) => DELIVERY_DONE_STATUSES.includes(o.status)).length;
@@ -1847,6 +1855,8 @@ export function computeDriverBooking(state: AppState, actions: AppActions) {
 export function computeBatchRouteHistory(state: AppState, actions: AppActions) {
   const byOrderNo = new Map(state.routeOrders.map((o) => [o.orderNo, o]));
   const q = state.batchRouteQ.trim().toLowerCase();
+  const role = state.session?.role;
+  const canCancel = role ? canCancelBatchRoute(role) : false;
 
   const rows = state.batchRoutes
     .filter((b) => !q || b.id.toLowerCase().includes(q) || b.deliveryDate.includes(q) || b.vehicleName.toLowerCase().includes(q))
@@ -1869,6 +1879,12 @@ export function computeBatchRouteHistory(state: AppState, actions: AppActions) {
       }
       const deliveredCount = orders.filter((o) => DELIVERY_DONE_STATUSES.includes(o.status)).length;
       const missingOrderNos = b.orderNos.filter((no) => !byOrderNo.has(no));
+      // Actually-delivered count only (excludes an order Unii itself
+      // cancelled upstream) — the one thing that permanently blocks
+      // "ยกเลิก Batch Route", see cancelBatchRoute in store.ts.
+      const actuallyDeliveredCount = orders.filter((o) => DELIVERED_STATUSES.includes(o.status)).length;
+      const cancelBlockedReason =
+        actuallyDeliveredCount > 0 ? `มี ${actuallyDeliveredCount} ออเดอร์ส่งสำเร็จแล้ว ไม่สามารถยกเลิก batch นี้ได้` : '';
 
       return {
         id: b.id,
@@ -1903,6 +1919,16 @@ export function computeBatchRouteHistory(state: AppState, actions: AppActions) {
         // Edited (membership changed) after its COD round was already
         // closed — same "needs re-checking" signal the COD page itself shows.
         codEditedAfterClose: b.codClosed && b.updatedAt > b.codClosedAt,
+        // "ยกเลิก Batch Route" — never allowed once any order in it has
+        // actually delivered, and never offered twice.
+        cancelled: b.cancelled,
+        cancelledBy: b.cancelledBy,
+        cancelledAtText: b.cancelledAt ? formatDateTime(new Date(b.cancelledAt).getTime()) : '',
+        canCancelRole: canCancel,
+        canCancel: canCancel && !b.cancelled && actuallyDeliveredCount === 0,
+        cancelBlockedReason,
+        cancelOrderCount: b.orderNos.length,
+        cancel: () => actions.cancelBatchRoute(b.id, state.batchRoutes, state.routeOrders),
         stops: orders.map((o) => ({
           orderNo: o.orderNo,
           customer: o.customer,
@@ -2120,6 +2146,9 @@ function computePickOrderSelection(state: AppState, actions: AppActions) {
     return { total, done, pct: total ? Math.round((done / total) * 100) : 0 };
   };
 
+  const role = state.session?.role;
+  const canCancelLot = role ? canCancelPickLot(role) : false;
+
   const openLots = state.pickLots
     .filter((l) => !l.closed)
     .map((l) => {
@@ -2132,6 +2161,8 @@ function computePickOrderSelection(state: AppState, actions: AppActions) {
         pct: p.pct,
         createdAtText: formatThaiShortDate(new Date(l.createdAt)),
         resume: () => actions.openPickLot(l.id),
+        canCancel: canCancelLot,
+        cancel: () => actions.cancelPickLot(l.id, state.pickLots, state.activePickLotId),
       };
     });
 
@@ -2147,7 +2178,6 @@ function computePickOrderSelection(state: AppState, actions: AppActions) {
       view: () => actions.openPickLot(l.id),
     }));
 
-  const role = state.session?.role;
   return {
     mode: 'select' as const,
     canWork: role ? canPickWork(role) : false,
@@ -2217,6 +2247,9 @@ function computePickLotDetail(state: AppState, actions: AppActions, lot: PickLot
     hasPendingSync: lot.statusSyncPending.length > 0,
     pendingSyncText: lot.statusSyncPending.join(', '),
     retrySync: () => actions.retryPickLotStatusSync(lot.statusSyncPending),
+    canCancel: !lot.closed && (role ? canCancelPickLot(role) : false),
+    cancelOrderCount: lot.orderNos.length,
+    cancel: () => actions.cancelPickLot(lot.id, state.pickLots, state.activePickLotId),
   };
 }
 
@@ -2247,7 +2280,7 @@ export function computeCod(state: AppState, actions: AppActions) {
     .sort((a, b) => a.name.localeCompare(b.name));
 
   const visibleBatches = state.batchRoutes
-    .filter((b) => effectiveVehicleFilter === 'all' || b.vehicleId === effectiveVehicleFilter)
+    .filter((b) => !b.cancelled && (effectiveVehicleFilter === 'all' || b.vehicleId === effectiveVehicleFilter))
     // Newest first — same ordering as the Batch Route History page.
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
 

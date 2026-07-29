@@ -27,6 +27,13 @@ export interface BatchRoute {
   codClosed: boolean;
   codClosedAt: string; // ISO timestamp, '' until closed
   codClosedBy: string; // username, '' until closed
+  /** Set by "ยกเลิก Batch Route" (mistaken assignment) — never deletes the
+   * record, so Batch Route History keeps the audit trail. Only allowed while
+   * no order in the batch has actually been delivered yet (see
+   * canCancelBatchRoute + the delivered-count check in derive.ts). */
+  cancelled: boolean;
+  cancelledAt: string; // ISO timestamp, '' until cancelled
+  cancelledBy: string; // username, '' until cancelled
 }
 
 const STORAGE_KEY = 'warehouse-ops.batchRoutes.v1';
@@ -35,7 +42,15 @@ const STORAGE_KEY = 'warehouse-ops.batchRoutes.v1';
  * fields — default them to "never closed" rather than leaving them
  * undefined, so every reader can rely on the fields always being present. */
 function normalize(b: BatchRoute): BatchRoute {
-  return { ...b, codClosed: b.codClosed ?? false, codClosedAt: b.codClosedAt ?? '', codClosedBy: b.codClosedBy ?? '' };
+  return {
+    ...b,
+    codClosed: b.codClosed ?? false,
+    codClosedAt: b.codClosedAt ?? '',
+    codClosedBy: b.codClosedBy ?? '',
+    cancelled: b.cancelled ?? false,
+    cancelledAt: b.cancelledAt ?? '',
+    cancelledBy: b.cancelledBy ?? '',
+  };
 }
 
 export function loadBatchRoutes(): BatchRoute[] {

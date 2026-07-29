@@ -5,6 +5,8 @@ import type { AppActions, AppState } from '../state/store';
 export function BatchRouteHistoryPanel({ state, actions }: { state: AppState; actions: AppActions }) {
   const v = computeBatchRouteHistory(state, actions);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null);
+  const confirmingRow = v.rows.find((b) => b.id === confirmCancelId) ?? null;
 
   return (
     <div>
@@ -61,8 +63,27 @@ export function BatchRouteHistoryPanel({ state, actions }: { state: AppState; ac
                       ไม่พบ {b.missingCount} ออเดอร์
                     </span>
                   )}
+                  {b.cancelled && (
+                    <span style={{ fontSize: 10.5, padding: '2px 7px', borderRadius: 6, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)' }} title={`ยกเลิกโดย ${b.cancelledBy || '—'} · ${b.cancelledAtText}`}>
+                      <i className="ph ph-x-circle" style={{ marginRight: 3 }} />ยกเลิกแล้ว
+                    </span>
+                  )}
                   <i className={open ? 'ph ph-caret-up' : 'ph ph-caret-down'} style={{ marginLeft: 'auto', color: 'var(--color-neutral-500)' }} />
                 </button>
+
+                {b.canCancelRole && !b.cancelled && (
+                  <div style={{ padding: '0 2px 8px', display: 'flex', justifyContent: 'flex-end' }}>
+                    <button
+                      className="btn btn-ghost"
+                      style={{ fontSize: 11.5, color: 'var(--st-bad-fg)' }}
+                      disabled={!b.canCancel}
+                      title={b.canCancel ? '' : b.cancelBlockedReason}
+                      onClick={() => setConfirmCancelId(b.id)}
+                    >
+                      <i className="ph ph-x-circle" />ยกเลิก Batch Route
+                    </button>
+                  </div>
+                )}
 
                 {open && (
                   <div style={{ padding: '4px 2px 12px' }}>
@@ -92,6 +113,31 @@ export function BatchRouteHistoryPanel({ state, actions }: { state: AppState; ac
               </div>
             );
           })}
+        </div>
+      )}
+
+      {confirmingRow && (
+        <div className="dialog-backdrop" onClick={() => setConfirmCancelId(null)}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-title">ยกเลิก Batch Route {confirmingRow.id}?</div>
+            <div className="dialog-body">
+              ออเดอร์ {confirmingRow.cancelOrderCount} รายการในนี้จะถูกปลดออกจากรถ/batch นี้ กลับไปเป็น "ยังไม่ได้จัดลงรถ" ทันที
+              — สามารถจัดเข้า batch ใหม่ได้ตามปกติ การกระทำนี้จะถูกบันทึกลง Activity Log
+            </div>
+            <div className="dialog-actions">
+              <button className="btn btn-secondary" onClick={() => setConfirmCancelId(null)}>ยกเลิก (ไม่ทำอะไร)</button>
+              <button
+                className="btn btn-primary"
+                style={{ background: 'var(--st-bad-fg)' }}
+                onClick={() => {
+                  confirmingRow.cancel();
+                  setConfirmCancelId(null);
+                }}
+              >
+                ยืนยันยกเลิก Batch Route
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

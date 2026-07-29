@@ -676,6 +676,7 @@ const BATCH_ROUTES_TAB_TITLE = 'Batch Routes';
 const BATCH_ROUTES_HEADER = [
   'id', 'vehicleId', 'vehicleName', 'deliveryDate', 'orderNos', 'createdAt', 'createdBy',
   'updatedAt', 'updatedBy', 'locked', 'codClosed', 'codClosedAt', 'codClosedBy',
+  'cancelled', 'cancelledAt', 'cancelledBy',
 ];
 
 interface BatchRouteRecord {
@@ -693,23 +694,42 @@ interface BatchRouteRecord {
   codClosed: boolean;
   codClosedAt: string;
   codClosedBy: string;
+  cancelled: boolean;
+  cancelledAt: string;
+  cancelledBy: string;
 }
 
 async function ensureBatchRoutesSheet(sheets: SheetsClient): Promise<void> {
   const meta = await sheets.spreadsheets.get({ spreadsheetId: MAIN_SHEET_ID });
   const exists = meta.data.sheets?.some((s) => s.properties?.title === BATCH_ROUTES_TAB_TITLE);
-  if (exists) return;
+  if (!exists) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: MAIN_SHEET_ID,
+      requestBody: { requests: [{ addSheet: { properties: { title: BATCH_ROUTES_TAB_TITLE } } }] },
+    });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: MAIN_SHEET_ID,
+      range: `${BATCH_ROUTES_TAB_TITLE}!A1:P1`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [BATCH_ROUTES_HEADER] },
+    });
+    return;
+  }
 
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId: MAIN_SHEET_ID,
-    requestBody: { requests: [{ addSheet: { properties: { title: BATCH_ROUTES_TAB_TITLE } } }] },
-  });
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: MAIN_SHEET_ID,
-    range: `${BATCH_ROUTES_TAB_TITLE}!A1:M1`,
-    valueInputOption: 'RAW',
-    requestBody: { values: [BATCH_ROUTES_HEADER] },
-  });
+  // A sheet created before the cancelled/cancelledAt/cancelledBy columns
+  // existed keeps its old, shorter header row — back it up to the full
+  // header (additive only, row 1 only) so those columns actually get
+  // labeled instead of silently reading as blank forever.
+  const headerRes = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${BATCH_ROUTES_TAB_TITLE}!A1:P1` });
+  const currentHeader = headerRes.data.values?.[0] ?? [];
+  if (currentHeader.length < BATCH_ROUTES_HEADER.length) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: MAIN_SHEET_ID,
+      range: `${BATCH_ROUTES_TAB_TITLE}!A1:P1`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [BATCH_ROUTES_HEADER] },
+    });
+  }
 }
 
 // orderNos is the one array-valued field — order numbers observed in this
@@ -717,7 +737,7 @@ async function ensureBatchRoutesSheet(sheets: SheetsClient): Promise<void> {
 // join that will never collide with a real value.
 async function readBatchRoutes(sheets: SheetsClient): Promise<BatchRouteRecord[]> {
   await ensureBatchRoutesSheet(sheets);
-  const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${BATCH_ROUTES_TAB_TITLE}!A:M` });
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${BATCH_ROUTES_TAB_TITLE}!A:P` });
   const rows = res.data.values ?? [];
   const out: BatchRouteRecord[] = [];
   for (let i = 1; i < rows.length; i++) {
@@ -739,6 +759,9 @@ async function readBatchRoutes(sheets: SheetsClient): Promise<BatchRouteRecord[]
       codClosed: String(r[10] ?? '').trim().toUpperCase() === 'TRUE',
       codClosedAt: String(r[11] ?? '').trim(),
       codClosedBy: String(r[12] ?? '').trim(),
+      cancelled: String(r[13] ?? '').trim().toUpperCase() === 'TRUE',
+      cancelledAt: String(r[14] ?? '').trim(),
+      cancelledBy: String(r[15] ?? '').trim(),
     });
   }
   return out;
@@ -748,6 +771,7 @@ function batchRouteRowValues(b: Omit<BatchRouteRecord, 'rowIndex'>): unknown[] {
   return [
     b.id, b.vehicleId, b.vehicleName, b.deliveryDate, b.orderNos.join('|'), b.createdAt, b.createdBy,
     b.updatedAt, b.updatedBy, b.locked ? 'TRUE' : 'FALSE', b.codClosed ? 'TRUE' : 'FALSE', b.codClosedAt, b.codClosedBy,
+    b.cancelled ? 'TRUE' : 'FALSE', b.cancelledAt, b.cancelledBy,
   ];
 }
 
@@ -817,6 +841,9 @@ export async function handleUpsertBatchRoutes(token: string | null, body: unknow
       codClosed: b.codClosed === true,
       codClosedAt: typeof b.codClosedAt === 'string' ? b.codClosedAt : '',
       codClosedBy: typeof b.codClosedBy === 'string' ? b.codClosedBy : '',
+      cancelled: b.cancelled === true,
+      cancelledAt: typeof b.cancelledAt === 'string' ? b.cancelledAt : '',
+      cancelledBy: typeof b.cancelledBy === 'string' ? b.cancelledBy : '',
     });
   }
 
@@ -832,6 +859,10 @@ export async function handleUpsertBatchRoutes(token: string | null, body: unknow
         if (cur.vehicleId !== payload.driverVehicleId) {
           return { status: 403, body: { error: 'Driver แก้ไขได้เฉพาะ Batch Route ของรถตัวเอง' } };
         }
+        // "ยกเลิก Batch Route" is an administrator/manager/admin_staff-only
+        // action (see canCancelBatchRoute) — explicitly excluded from what a
+        // driver's own COD-close request is allowed to touch, same as every
+        // other non-COD field checked below.
         const onlyCodFieldsChanged =
           cur.vehicleId === b.vehicleId &&
           cur.vehicleName === b.vehicleName &&
@@ -839,7 +870,10 @@ export async function handleUpsertBatchRoutes(token: string | null, body: unknow
           cur.orderNos.join('|') === b.orderNos.join('|') &&
           cur.locked === b.locked &&
           cur.createdAt === b.createdAt &&
-          cur.createdBy === b.createdBy;
+          cur.createdBy === b.createdBy &&
+          cur.cancelled === b.cancelled &&
+          cur.cancelledAt === b.cancelledAt &&
+          cur.cancelledBy === b.cancelledBy;
         if (!onlyCodFieldsChanged) {
           return { status: 403, body: { error: 'Driver แก้ไขได้เฉพาะสถานะปิดยอด COD เท่านั้น' } };
         }
@@ -851,7 +885,7 @@ export async function handleUpsertBatchRoutes(token: string | null, body: unknow
     for (const b of incoming) {
       const cur = existingById.get(b.id);
       if (cur) {
-        updates.push({ range: `${BATCH_ROUTES_TAB_TITLE}!A${cur.rowIndex}:M${cur.rowIndex}`, values: [batchRouteRowValues(b)] });
+        updates.push({ range: `${BATCH_ROUTES_TAB_TITLE}!A${cur.rowIndex}:P${cur.rowIndex}`, values: [batchRouteRowValues(b)] });
       } else {
         appends.push(batchRouteRowValues(b));
       }
@@ -862,7 +896,7 @@ export async function handleUpsertBatchRoutes(token: string | null, body: unknow
     if (appends.length > 0) {
       await sheets.spreadsheets.values.append({
         spreadsheetId: MAIN_SHEET_ID,
-        range: `${BATCH_ROUTES_TAB_TITLE}!A:M`,
+        range: `${BATCH_ROUTES_TAB_TITLE}!A:P`,
         valueInputOption: 'RAW',
         insertDataOption: 'INSERT_ROWS',
         requestBody: { values: appends },

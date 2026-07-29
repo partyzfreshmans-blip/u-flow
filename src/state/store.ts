@@ -27,7 +27,7 @@ import { loadDeliveryFailures, saveDeliveryFailures, type DeliveryFailureIndex, 
 import { loadPreDepartureChecklists, savePreDepartureChecklists, type PreDepartureChecklistIndex } from '../data/preDeparture';
 import { loadFailedDeliveryQueue, removeFailedDeliveryQueueItem, saveFailedDeliveryQueueItem, type FailedDeliveryQueueItem } from '../data/failedDeliveryQueue';
 import { fetchBatchRoutes as apiFetchBatchRoutes, upsertBatchRoutes as apiUpsertBatchRoutes } from '../data/sources/batchRoutesApi';
-import { DELIVERY_FAILED_STATUS, PICK_CLOSED_STATUS } from './helpers';
+import { DELIVERED_STATUSES, DELIVERY_FAILED_STATUS, PICK_CLOSED_STATUS } from './helpers';
 import type { AttachmentScope } from '../config/drive';
 import type { ApiImportOrder, CsMasterCustomer, OrderLineItem, Promo, PromoPackUnit, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
 import { csvExportUrl, SHEET_TABS } from '../config/sheets';
@@ -782,6 +782,49 @@ export function useAppStore() {
     });
   }
 
+  /** Writes or blanks the "คนส่ง" column for a set of orders — shared by
+   * stampCourierOrders (per-order add/remove during ordinary batch editing)
+   * and cancelBatchRoute (clearing every order in a whole cancelled batch at
+   * once). Failures surface via the same dismissible courierStampWarning
+   * either caller already knows how to show. */
+  function clearOrStampCourier(orderNos: string[], stamp: { vehicleId: string; vehicleName: string; batchId: string } | null) {
+    if (orderNos.length === 0) return;
+    Promise.allSettled(
+      orderNos.map((orderNo) =>
+        stamp
+          ? updateRouteOrder({ orderNo, courierVehicleId: stamp.vehicleId, courierVehicleName: stamp.vehicleName, courierBatchId: stamp.batchId })
+          : updateRouteOrder({ orderNo, clearCourierStamp: true }),
+      ),
+    ).then((results) => {
+      const failed = orderNos.filter((_, i) => results[i].status === 'rejected');
+      if (failed.length === 0) return;
+      const firstReason = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
+      const reasonText = firstReason?.reason instanceof Error ? firstReason.reason.message : 'บันทึกไม่สำเร็จ';
+      dispatch({
+        type: 'patch',
+        patch: {
+          courierStampWarning: `เขียนคอลัมน์ "คนส่ง" ไม่สำเร็จ ${failed.length}/${orderNos.length} ออเดอร์ (${failed.join(', ')}) — ${reasonText} — ลองใหม่ได้จากหน้าวางแผนจัดรูท`,
+        },
+      });
+    });
+  }
+
+  /** Local-first batchRoutes write, shared by setBatchRoutes (ordinary
+   * planner edits) and cancelBatchRoute — state + localStorage update
+   * immediately, then push to the shared backend in the background; a push
+   * failure never rolls back the local edit, it just surfaces as a
+   * dismissible batchRoutesSyncWarning. */
+  function persistBatchRoutes(list: BatchRoute[]) {
+    dispatch({ type: 'patch', patch: { batchRoutes: list } });
+    saveBatchRoutes(list);
+    const session = loadSession();
+    if (!session) return;
+    apiUpsertBatchRoutes(session, list).catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : 'ซิงค์ Batch Route ขึ้นเซิร์ฟเวอร์ไม่สำเร็จ';
+      dispatch({ type: 'patch', patch: { batchRoutesSyncWarning: message } });
+    });
+  }
+
   /** Uploads the photo(s) for one "ส่งไม่สำเร็จ" report and writes the Status
    * column, then reflects both in local shared state — the one place both
    * the immediate submit path and the offline-queue retry path converge, so
@@ -1207,23 +1250,32 @@ export function useAppStore() {
         dispatch({ type: 'patch', patch: { routePlan: plan } });
         saveRoutePlan(plan);
       },
-      setBatchRoutes: (list: BatchRoute[]) => {
-        // Local-first, same as every other planner write: state + localStorage
-        // update immediately, then push to the shared backend in the
-        // background so a driver on a different device picks it up on their
-        // next poll (see the batchRoutes poll effect below). A push failure
-        // never rolls back the local edit — it surfaces as a dismissible
-        // warning instead, matching courierStampWarning's own pattern.
-        dispatch({ type: 'patch', patch: { batchRoutes: list } });
-        saveBatchRoutes(list);
-        const session = loadSession();
-        if (!session) return;
-        apiUpsertBatchRoutes(session, list).catch((err: unknown) => {
-          const message = err instanceof Error ? err.message : 'ซิงค์ Batch Route ขึ้นเซิร์ฟเวอร์ไม่สำเร็จ';
-          dispatch({ type: 'patch', patch: { batchRoutesSyncWarning: message } });
-        });
-      },
+      setBatchRoutes: (list: BatchRoute[]) => persistBatchRoutes(list),
       dismissBatchRoutesSyncWarning: () => dispatch({ type: 'patch', patch: { batchRoutesSyncWarning: null } }),
+      /** "ยกเลิก Batch Route" — a data-correction action for a batch created
+       * or assigned wrong, distinct from ordinary batch editing
+       * (syncBatchAfterEdit in derive.ts) since it touches every order in the
+       * batch at once and marks the batch record itself cancelled rather
+       * than just changing membership. The UI only ever offers this once
+       * canCancelBatchRoute(role) and a zero-delivered check both pass (see
+       * computeBatchRouteHistory), but the same delivered-status check is
+       * repeated here defensively so a stale button can never unwind a real
+       * delivery. Cancelling never deletes the record — Batch Route History
+       * keeps showing it, badged "ยกเลิกแล้ว". */
+      cancelBatchRoute: (batchId: string, batchRoutes: BatchRoute[], routeOrders: RouteOrder[]) => {
+        const batch = batchRoutes.find((b) => b.id === batchId);
+        if (!batch || batch.cancelled) return;
+        const statusByOrderNo = new Map(routeOrders.map((o) => [o.orderNo, o.status]));
+        const hasDelivered = batch.orderNos.some((no) => DELIVERED_STATUSES.includes(statusByOrderNo.get(no) ?? ''));
+        if (hasDelivered) return;
+
+        const now = new Date().toISOString();
+        const username = loadSession()?.username ?? '';
+        const next = batchRoutes.map((b) => (b.id === batchId ? { ...b, cancelled: true, cancelledAt: now, cancelledBy: username } : b));
+        persistBatchRoutes(next);
+        clearOrStampCourier(batch.orderNos, null);
+        logActivity('ยกเลิก Batch Route', `${batch.id} · ปลด ${batch.orderNos.length} ออเดอร์ (${batch.orderNos.join(', ')})`);
+      },
       /** Best-effort background write of column N ("คนส่ง") in the คำสั่งซื้อ
        * sheet after a batch Assign or edit — fires once per order via
        * Promise.allSettled (not Promise.all) so one bad row can't hide the
@@ -1232,27 +1284,7 @@ export function useAppStore() {
        * runs). Any failures surface as a dismissible courierStampWarning
        * instead of silently vanishing. Pass stamp=null to clear the column
        * (order pulled out of its batch) instead of setting it. */
-      stampCourierOrders: (orderNos: string[], stamp: { vehicleId: string; vehicleName: string; batchId: string } | null) => {
-        if (orderNos.length === 0) return;
-        Promise.allSettled(
-          orderNos.map((orderNo) =>
-            stamp
-              ? updateRouteOrder({ orderNo, courierVehicleId: stamp.vehicleId, courierVehicleName: stamp.vehicleName, courierBatchId: stamp.batchId })
-              : updateRouteOrder({ orderNo, clearCourierStamp: true }),
-          ),
-        ).then((results) => {
-          const failed = orderNos.filter((_, i) => results[i].status === 'rejected');
-          if (failed.length === 0) return;
-          const firstReason = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
-          const reasonText = firstReason?.reason instanceof Error ? firstReason.reason.message : 'บันทึกไม่สำเร็จ';
-          dispatch({
-            type: 'patch',
-            patch: {
-              courierStampWarning: `เขียนคอลัมน์ "คนส่ง" ไม่สำเร็จ ${failed.length}/${orderNos.length} ออเดอร์ (${failed.join(', ')}) — ${reasonText} — ลองใหม่ได้จากหน้าวางแผนจัดรูท`,
-            },
-          });
-        });
-      },
+      stampCourierOrders: (orderNos: string[], stamp: { vehicleId: string; vehicleName: string; batchId: string } | null) => clearOrStampCourier(orderNos, stamp),
       dismissCourierStampWarning: () => dispatch({ type: 'patch', patch: { courierStampWarning: null } }),
       saveRouteCod: (collected: Record<string, string>, method: Record<string, 'cash' | 'transfer'>) => {
         saveRouteCodState({ collected, method });
@@ -1873,6 +1905,22 @@ export function useAppStore() {
         logActivity('ปิดล็อตหยิบสินค้า', `ล็อต ${lot.id} · ${lot.orderNos.length} ออเดอร์ (${lot.orderNos.join(', ')})`);
       },
       retryPickLotStatusSync: (orderNos: string[]) => syncPickLotStatus(orderNos),
+
+      /** "ยกเลิกล็อตหยิบสินค้า" — for a lot grouped by mistake before it's
+       * closed. Unlike closePickLot, this never writes anything back to the
+       * sheet: an unclosed lot never wrote a status there to begin with (see
+       * createPickLot/syncPickLotStatus), so simply dropping it from the
+       * list is enough for every one of its orders to reappear as
+       * "ยังไม่ได้จัดล็อต" — see alreadyInALot in computePickOrderSelection,
+       * which only ever looks at state.pickLots. */
+      cancelPickLot: (lotId: string, lots: PickLot[], activePickLotId: string | null) => {
+        const lot = lots.find((l) => l.id === lotId);
+        if (!lot || lot.closed) return;
+        const next = lots.filter((l) => l.id !== lotId);
+        savePickLots(next);
+        dispatch({ type: 'patch', patch: { pickLots: next, activePickLotId: activePickLotId === lotId ? null : activePickLotId } });
+        logActivity('ยกเลิกล็อตหยิบสินค้า', `ล็อต ${lot.id} · ${lot.orderNos.length} ออเดอร์ (${lot.orderNos.join(', ')})`);
+      },
 
       openPickLot: (lotId: string) => dispatch({ type: 'patch', patch: { activePickLotId: lotId } }),
       backToPickerHome: () => dispatch({ type: 'patch', patch: { activePickLotId: null } }),

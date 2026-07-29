@@ -100,6 +100,14 @@ export function sheetStatusColor(status: string): string {
  * cancelled. Anything else with a delivery date in the past is a stuck order. */
 export const DELIVERY_DONE_STATUSES = ['ส่งสำเร็จ', 'ได้รับแล้ว', 'ยกเลิก'];
 
+/** Narrower than DELIVERY_DONE_STATUSES above — actually-delivered outcomes
+ * only, deliberately excluding "ยกเลิก" (an order the customer/Unii itself
+ * cancelled upstream, unrelated to this app's own Batch Route). Used to gate
+ * "ยกเลิก Batch Route": that action must stay blocked once real delivery has
+ * happened, but an order that was separately cancelled shouldn't itself lock
+ * the batch out of correction. */
+export const DELIVERED_STATUSES = ['ส่งสำเร็จ', 'ได้รับแล้ว'];
+
 /** Status written back when a batch-picking lot closes — reuses "กำลังจัดส่ง"
  * (already a real value in the sheet, the step right after "กำลังดำเนินการ")
  * rather than inventing a new one that isn't part of the existing flow. */
