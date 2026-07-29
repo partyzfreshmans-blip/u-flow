@@ -1449,8 +1449,21 @@ export function computeRouteOrdersSyncPlan(apiImportRows: unknown[][], routeOrde
 
     const existingRow = vsRowByOrderUid.get(orderUid);
     if (existingRow != null) {
+      // Only write cells whose value actually changed. Every existing order
+      // used to get all ~13 of its refreshed columns rewritten on every sync
+      // run regardless of whether anything changed, which scales the
+      // batchUpdate volume with the sheet's total historical order count
+      // rather than with how many orders actually changed today — on a
+      // sheet with enough history, that pushes a single sync well past a
+      // Vercel serverless function's execution time limit, silently killing
+      // the run before it ever reaches the new-row append below. New orders
+      // then never get created, with no error shown, purely because the
+      // function ran out of time partway through re-writing unchanged data.
+      const currentRow = (routeOrdersRows[existingRow] ?? []) as unknown[];
       for (const [h, v] of Object.entries(refreshValues)) {
-        cellUpdates.push({ row: existingRow, col: vsAt(h), value: v });
+        const col = vsAt(h);
+        if (String(currentRow[col] ?? '').trim() === v) continue;
+        cellUpdates.push({ row: existingRow, col, value: v });
       }
       summary.updated++;
     } else {
@@ -1499,9 +1512,33 @@ export async function handleSyncRouteOrders(token: string | null): Promise<ApiRe
 
     const { cellUpdates, newRows, summary } = plan;
 
+    // New rows go in FIRST, ahead of the (often much larger) existing-order
+    // cell-update batch below — appending only ever adds rows after existing
+    // data, so it can never shift the row indices cellUpdates below still
+    // relies on, and it means a brand new order is never silently dropped
+    // just because a serverless function's execution time limit cuts the
+    // sync off partway through re-checking every already-known order.
+    if (newRows.length > 0) {
+      try {
+        await sheets.spreadsheets.values.append({
+          spreadsheetId: MAIN_SHEET_ID,
+          range: `${routeOrdersTitle}!A:AB`,
+          valueInputOption: 'USER_ENTERED',
+          insertDataOption: 'INSERT_ROWS',
+          requestBody: { values: newRows },
+        });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'เพิ่มแถวใหม่ไม่สำเร็จ';
+        summary.skipped.push({ orderUid: '(หลายรายการ)', reason: `เพิ่ม ${newRows.length} แถวใหม่ไม่สำเร็จ: ${message}` });
+      }
+    }
+
     // Batched in chunks so one oversized request can't fail the whole sync —
     // each chunk's own failure is caught and reported rather than losing
-    // every update in that chunk silently.
+    // every update in that chunk silently. cellUpdates only ever contains
+    // genuinely changed cells (see computeRouteOrdersSyncPlan), so a typical
+    // run's volume scales with today's actual changes, not the sheet's
+    // entire history.
     const CHUNK_SIZE = 500;
     for (let i = 0; i < cellUpdates.length; i += CHUNK_SIZE) {
       const chunk = cellUpdates.slice(i, i + CHUNK_SIZE);
@@ -1516,21 +1553,6 @@ export async function handleSyncRouteOrders(token: string | null): Promise<ApiRe
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : 'อัปเดตแถวไม่สำเร็จ';
         summary.skipped.push({ orderUid: '(หลายรายการ)', reason: `อัปเดต ${chunk.length} เซลล์ไม่สำเร็จ: ${message}` });
-      }
-    }
-
-    if (newRows.length > 0) {
-      try {
-        await sheets.spreadsheets.values.append({
-          spreadsheetId: MAIN_SHEET_ID,
-          range: `${routeOrdersTitle}!A:AB`,
-          valueInputOption: 'USER_ENTERED',
-          insertDataOption: 'INSERT_ROWS',
-          requestBody: { values: newRows },
-        });
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'เพิ่มแถวใหม่ไม่สำเร็จ';
-        summary.skipped.push({ orderUid: '(หลายรายการ)', reason: `เพิ่ม ${newRows.length} แถวใหม่ไม่สำเร็จ: ${message}` });
       }
     }
 

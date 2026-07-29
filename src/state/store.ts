@@ -344,6 +344,10 @@ export interface AppState {
   syncError: string | null;
   /** true only while the manual "Sync" button's batch refresh is in flight. */
   syncing: boolean;
+  /** created/updated counts from the last API Import → คำสั่งซื้อ VS run —
+   * shown next to the sync timestamp so "did new orders actually get added"
+   * is answerable at a glance instead of only by opening the real sheet. */
+  lastRouteOrdersSyncSummary: { created: number; updated: number } | null;
 
   // notifications (header bell) — persisted one-time events (new order
   // arrived, sync failed); standing-condition items (stuck/overdue orders)
@@ -567,6 +571,7 @@ export const initialState: AppState = {
   lastSyncErrorAt: null,
   syncError: null,
   syncing: false,
+  lastRouteOrdersSyncSummary: null,
 
   notificationEvents: [],
   notificationReadIds: [],
@@ -1896,12 +1901,14 @@ export function useAppStore() {
         // before this sync. A failure here is folded into the same
         // `failures` list as every other source below — one bad source
         // never blocks the rest of Sync.
+        let routeOrdersSyncSummary: { created: number; updated: number } | null = null;
         const routeOrdersSyncFailure: string | null = await (async () => {
           if (!isRouteOrdersTabConfigured()) return null; // fetchRouteOrders below reports this once, no need to duplicate it here
           const session = loadSession();
           if (!session) return null;
           try {
             const result = await syncRouteOrdersVs(session);
+            routeOrdersSyncSummary = { created: result.created, updated: result.updated };
             if (result.skipped.length > 0) {
               return `ข้าม ${result.skipped.length} รายการ (${result.skipped.map((s) => s.reason).join('; ')})`;
             }
@@ -1973,6 +1980,7 @@ export function useAppStore() {
         } else failures.push(`ฐานข้อมูลสินค้า (SKU Master): ${skusR.reason instanceof Error ? skusR.reason.message : 'ไม่สำเร็จ'}`);
 
         patch.syncing = false;
+        patch.lastRouteOrdersSyncSummary = routeOrdersSyncSummary;
         if (anySucceeded) {
           const now = Date.now();
           saveLastSyncAt(now);
