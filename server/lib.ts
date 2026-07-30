@@ -884,6 +884,49 @@ export async function handleListCustomerLocationOverrides(token: string | null):
   }
 }
 
+/** Keeps customers.name_from_unii current as shop names change in Unii —
+ * matched by phone (the table's primary key) only, never by name, so a
+ * renamed shop updates its existing row in place instead of ever creating a
+ * new one. Only touches name_from_unii; lat_override/lng_override and every
+ * other saved field for that phone are left completely alone, so a rename
+ * never loses a previously-corrected pin. Called by the frontend right after
+ * it reads the CS Master sheet (see src/state/store.ts), since that's the
+ * one place the app already has fresh name+phone pairs on hand — same
+ * "local read triggers a background Postgres sync" shape as the rest of this
+ * migration. */
+export async function handleSyncCustomerNames(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+
+  const { customers } = (body ?? {}) as Record<string, unknown>;
+  if (!Array.isArray(customers)) return { status: 400, body: { error: 'ต้องระบุ customers เป็น array' } };
+
+  const byPhone = new Map<string, string>();
+  for (const raw of customers) {
+    const c = (raw ?? {}) as Record<string, unknown>;
+    const phone = typeof c.phone === 'string' ? c.phone.trim() : '';
+    const name = typeof c.name === 'string' ? c.name.trim() : '';
+    if (!phone || !name) continue;
+    byPhone.set(phone, name); // last one wins if the sheet has a duplicate phone
+  }
+  if (byPhone.size === 0) return { status: 200, body: { ok: true, synced: 0 } };
+
+  try {
+    const sql = getDb();
+    const rows = Array.from(byPhone.entries()).map(([phone, name]) => [phone, name]);
+    await sql`
+      INSERT INTO customers (phone, name_from_unii) VALUES ${sql(bulkRows(rows))}
+      ON CONFLICT (phone) DO UPDATE SET name_from_unii = EXCLUDED.name_from_unii, updated_at = now()
+      WHERE customers.name_from_unii IS DISTINCT FROM EXCLUDED.name_from_unii
+    `;
+    return { status: 200, body: { ok: true, synced: byPhone.size } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'ซิงค์ชื่อลูกค้าไม่สำเร็จ';
+    console.error('[cs-master/sync-names]', message);
+    return { status: 500, body: { error: message } };
+  }
+}
+
 /** Every staff-entered order field — delivery date/note/tax invoice/
  * operational status/archived/courier assignment — read from Postgres's
  * `orders` table instead of the old "คำสั่งซื้อ VS" Sheets tab. Shaped

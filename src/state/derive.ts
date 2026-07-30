@@ -1118,7 +1118,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
   // routing manually from having to notice it themselves row by row.
   const unassignedCustomerCounts = new Map<string, number>();
   for (const o of unassignedCandidates) {
-    const key = o.customer.trim();
+    const key = o.phone.trim();
     if (!key) continue;
     unassignedCustomerCounts.set(key, (unassignedCustomerCounts.get(key) ?? 0) + 1);
   }
@@ -1169,7 +1169,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
       return {
         orderNo: o.orderNo,
         customer: o.customer,
-        duplicateCustomer: (unassignedCustomerCounts.get(o.customer.trim()) ?? 0) > 1,
+        duplicateCustomer: (unassignedCustomerCounts.get(o.phone.trim()) ?? 0) > 1,
         // Cross-day stuck-order detector's own badge — see
         // ordersNeedingStuckBatchDetach/autoDetachStuckOrders. Shows here
         // because this row exists at all (order is currently unassigned);
@@ -2668,8 +2668,18 @@ export function computePromoUsage(state: AppState, actions: AppActions) {
   }
   const orders = Array.from(byOrder.values()).sort((a, b) => (a.orderedAt < b.orderedAt ? 1 : -1));
 
-  const byCustomer = new Map<string, number>();
-  for (const o of orders) byCustomer.set(o.customer, (byCustomer.get(o.customer) ?? 0) + 1);
+  // Grouped by phone, not customer name — a shop can rename between orders,
+  // and phone is the stable identity (customers.phone is the Postgres
+  // primary key). Falls back to the name itself only for the rare order with
+  // no phone on file, so it doesn't silently disappear from the count.
+  const phoneByOrderNo = new Map(state.routeOrders.map((r) => [r.orderNo, r.phone.trim()]));
+  const byCustomer = new Map<string, { name: string; count: number }>();
+  for (const o of orders) {
+    const key = phoneByOrderNo.get(o.orderNo) || `name:${o.customer}`;
+    const cur = byCustomer.get(key);
+    if (cur) cur.count += 1;
+    else byCustomer.set(key, { name: o.customer, count: 1 });
+  }
 
   const totalRevenue = orders.reduce((a, o) => a + o.total, 0);
 
@@ -2692,9 +2702,9 @@ export function computePromoUsage(state: AppState, actions: AppActions) {
         actions.openOrderDetail(o.orderNo, o.customer, state.routeOrders.find((r) => r.orderNo === o.orderNo));
       },
     })),
-    customerRows: Array.from(byCustomer.entries())
-      .sort((a, b) => b[1] - a[1])
-      .map(([customer, count]) => ({ customer, count })),
+    customerRows: Array.from(byCustomer.values())
+      .sort((a, b) => b.count - a.count)
+      .map(({ name, count }) => ({ customer: name, count })),
   };
 }
 

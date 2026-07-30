@@ -27,6 +27,7 @@ import {
   handleReverseGeocode,
   handleLinkLineItemPromo,
   handleSavePickLot,
+  handleSyncCustomerNames,
   handleUpdateCsMasterLocation,
   handleUpdateRouteOrder,
   handleUpdateUser,
@@ -76,6 +77,11 @@ app.get('/api/cs-master/location-overrides', async (req, res) => {
 
 app.post('/api/cs-master/update-location', async (req, res) => {
   const { status, body } = await handleUpdateCsMasterLocation(bearerToken(req.headers.authorization), req.body);
+  res.status(status).json(body);
+});
+
+app.post('/api/cs-master/sync-names', async (req, res) => {
+  const { status, body } = await handleSyncCustomerNames(bearerToken(req.headers.authorization), req.body);
   res.status(status).json(body);
 });
 

@@ -1,4 +1,4 @@
-import { handleListCustomerLocationOverrides, handleUpdateCsMasterLocation } from '../../server/lib.js';
+import { handleListCustomerLocationOverrides, handleSyncCustomerNames, handleUpdateCsMasterLocation } from '../../server/lib.js';
 import { bearerToken } from '../../server/session.js';
 import { routeSlug } from '../_routing.js';
 import type { ApiRequest, ApiResponse } from '../_types.js';
@@ -21,6 +21,11 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   }
   if (slug === 'update-location' && req.method === 'POST') {
     const { status, body } = await handleUpdateCsMasterLocation(bearerToken(req.headers.authorization), req.body);
+    res.status(status).json(body);
+    return;
+  }
+  if (slug === 'sync-names' && req.method === 'POST') {
+    const { status, body } = await handleSyncCustomerNames(bearerToken(req.headers.authorization), req.body);
     res.status(status).json(body);
     return;
   }

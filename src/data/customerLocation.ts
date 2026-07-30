@@ -3,13 +3,21 @@ import type { CsMasterCustomer, RouteOrder } from './types';
 // Single source of truth for "which coordinate is actually correct for this
 // customer" — a manually-corrected pin (saved via the Customer Master page's
 // own "แก้พิกัด" editor, or the Planner's per-order "แก้ไขโลเคชั่น" dialog,
-// both of which write to the same CS Master ละ/ลอง columns) always wins over
-// the CS_Lat/CS_Long the คำสั่งซื้อ sheet carries, which is raw, unverified
-// data straight from Unii and never gets corrected in place. Every page that
-// plots a pin, computes a distance, links out to Google Maps navigation, or
-// feeds a coordinate into reverse-geocoding should resolve through here
-// instead of reading RouteOrder.lat/lng directly, so a fix made once shows up
+// both of which write to the same customers.lat_override/lng_override
+// columns in Postgres, keyed by phone) always wins over the CS_Lat/CS_Long
+// the คำสั่งซื้อ sheet carries, which is raw, unverified data straight from
+// Unii and never gets corrected in place. Every page that plots a pin,
+// computes a distance, links out to Google Maps navigation, or feeds a
+// coordinate into reverse-geocoding should resolve through here instead of
+// reading RouteOrder.lat/lng directly, so a fix made once shows up
 // everywhere at once.
+//
+// Matched by phone alone, not name+phone — a customer's shop name can be
+// renamed in Unii at any time (this actually happens), and phone is the
+// table's real, stable identity (customers.phone is the Postgres PRIMARY
+// KEY). Keying on name as well used to silently break this lookup whenever
+// a renamed customer's order carried the new name but the saved override was
+// still indexed under the old one.
 
 export type CustomerLocationSource = 'override' | 'unii';
 
@@ -28,18 +36,14 @@ function phoneKey(v: string): string {
   return v.replace(/\D/g, '').slice(-9);
 }
 
-function customerKey(name: string, phone: string): string {
-  return `${name.trim()}|${phoneKey(phone)}`;
-}
-
 /** Indexes every CS Master row that actually has a coordinate saved, keyed by
- * name+phone — built once per resolve pass rather than scanning the whole
+ * phone — built once per resolve pass rather than scanning the whole
  * customers array per order. */
 export function buildCustomerLocationOverrideIndex(customers: CsMasterCustomer[]): Map<string, { lat: number; lng: number }> {
   const map = new Map<string, { lat: number; lng: number }>();
   for (const c of customers) {
     if (c.lat == null || c.lng == null) continue;
-    map.set(customerKey(c.name, c.phone), { lat: c.lat, lng: c.lng });
+    map.set(phoneKey(c.phone), { lat: c.lat, lng: c.lng });
   }
   return map;
 }
@@ -51,7 +55,7 @@ export function resolveCustomerLocation(
   customer: { customer: string; phone: string; lat: number | null; lng: number | null },
   overrideIndex: Map<string, { lat: number; lng: number }>,
 ): ResolvedCustomerLocation {
-  const override = overrideIndex.get(customerKey(customer.customer, customer.phone));
+  const override = overrideIndex.get(phoneKey(customer.phone));
   if (override) return { lat: override.lat, lng: override.lng, source: 'override' };
   return { lat: customer.lat, lng: customer.lng, source: 'unii' };
 }

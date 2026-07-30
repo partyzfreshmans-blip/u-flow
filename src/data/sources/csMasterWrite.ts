@@ -51,3 +51,24 @@ export async function updateCsMasterLatLng(name: string, phone: string, lat: num
     throw new Error(message || `บันทึกพิกัดไม่สำเร็จ (HTTP ${res.status})`);
   }
 }
+
+/**
+ * Best-effort background push of the CS Master sheet's current name+phone
+ * pairs into Postgres's `customers.name_from_unii`, matched by phone only —
+ * keeps that column current as shop names change in Unii without ever
+ * touching lat_override/lng_override or creating a duplicate row for a
+ * renamed shop. Never awaited by callers that shouldn't block on it, same
+ * fire-and-forget shape as persistBatchRoutes.
+ */
+export async function syncCustomerNames(session: Session | null, customers: { phone: string; name: string }[]): Promise<void> {
+  const res = await fetch('/api/cs-master/sync-names', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders(session) },
+    body: JSON.stringify({ customers }),
+  });
+  if (!res.ok) {
+    const body: unknown = await res.json().catch(() => null);
+    const message = body && typeof body === 'object' && 'error' in body ? String((body as { error: unknown }).error) : null;
+    throw new Error(message || `ซิงค์ชื่อลูกค้าไม่สำเร็จ (HTTP ${res.status})`);
+  }
+}

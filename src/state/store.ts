@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useReducer, useRef } from 'react';
 import { fetchApiImportOrders } from '../data/sources/apiImportOrders';
 import { fetchCsMasterCustomers } from '../data/sources/csMaster';
-import { fetchCustomerLocationOverrides, updateCsMasterLatLng, type CustomerLocationOverride } from '../data/sources/csMasterWrite';
+import { fetchCustomerLocationOverrides, syncCustomerNames, updateCsMasterLatLng, type CustomerLocationOverride } from '../data/sources/csMasterWrite';
 import { avgPricePerPiece, fetchPromotions, formatPackUnitsTerm, formatTiersTerm } from '../data/sources/promotionsSheet';
 import { upsertPromotion } from '../data/sources/promotionsWrite';
 import { fetchRouteOrders } from '../data/sources/routeOrders';
@@ -1076,6 +1076,15 @@ export function useAppStore() {
         });
         dispatch({ type: 'patch', patch: { customers: merged, customersLoading: false, customersError: null } });
         recordSyncSuccess();
+        // Best-effort: keep customers.name_from_unii current with whatever
+        // the sheet says right now, matched by phone — never blocks the UI,
+        // never overwrites lat/lng overrides (see handleSyncCustomerNames).
+        if (state.session) {
+          syncCustomerNames(
+            loadSession(),
+            customers.map((c) => ({ phone: c.phone, name: c.name })),
+          ).catch((err: unknown) => console.error('[cs-master/sync-names]', err));
+        }
       })
       .catch((err: unknown) => {
         if (!cancelled) {
@@ -2120,6 +2129,10 @@ export function useAppStore() {
           });
           patch.customersError = null;
           anySucceeded = true;
+          syncCustomerNames(
+            session,
+            customersR.value.map((c) => ({ phone: c.phone, name: c.name })),
+          ).catch((err: unknown) => console.error('[cs-master/sync-names]', err));
         } else failures.push(`รายชื่อลูกค้า (CS Master): ${customersR.reason instanceof Error ? customersR.reason.message : 'ไม่สำเร็จ'}`);
 
         if (skusR.status === 'fulfilled') {
