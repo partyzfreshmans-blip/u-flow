@@ -34,7 +34,15 @@ export async function fetchStaffOrderInfo(session: Session | null): Promise<Staf
   if (!res.ok) {
     const body: unknown = await res.json().catch(() => null);
     const message = body && typeof body === 'object' && 'error' in body ? String((body as { error: unknown }).error) : null;
-    throw new Error(message || `โหลดข้อมูลออเดอร์ไม่สำเร็จ (HTTP ${res.status})`);
+    if (message) throw new Error(message);
+    // No parseable JSON `error` body means the request never reached this
+    // endpoint's own code (every real response it sends is `{ error: ... }`
+    // on failure) — a 404 here is this app's own backend route/deployment,
+    // unrelated to Unii or its token entirely.
+    if (res.status === 404) {
+      throw new Error('ไม่พบ backend endpoint /api/route-orders — ตรวจสอบว่า deploy ล่าสุดสร้าง serverless function นี้จริง');
+    }
+    throw new Error(`โหลดข้อมูลออเดอร์ไม่สำเร็จ (HTTP ${res.status})`);
   }
   const body = (await res.json()) as { orders?: RouteOrderApiRow[] };
   return Array.isArray(body.orders) ? body.orders : [];

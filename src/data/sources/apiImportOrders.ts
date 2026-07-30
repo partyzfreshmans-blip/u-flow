@@ -25,7 +25,18 @@ export async function fetchApiImportOrders(session: Session | null): Promise<Api
   if (!res.ok) {
     const body: unknown = await res.json().catch(() => null);
     const message = body && typeof body === 'object' && 'error' in body ? String((body as { error: unknown }).error) : null;
-    throw new Error(message || `โหลดออเดอร์จาก Unii API ไม่สำเร็จ (HTTP ${res.status})`);
+    if (message) throw new Error(message);
+    // Every real response this endpoint's own code produces is JSON with an
+    // `error` string — reaching here with none means the request never made
+    // it to that code at all (no JSON body, or a shape our own handler never
+    // sends), which on a 404 specifically points at this app's own backend
+    // route/deployment rather than anything Unii said. Worth saying so
+    // explicitly instead of a generic "HTTP 404" that reads the same as a
+    // real Unii-side error.
+    if (res.status === 404) {
+      throw new Error('ไม่พบ backend endpoint /api/route-orders/api-import — ตรวจสอบว่า deploy ล่าสุดสร้าง serverless function นี้จริง (ไม่ใช่ปัญหา Unii API token)');
+    }
+    throw new Error(`โหลดออเดอร์จาก Unii API ไม่สำเร็จ (HTTP ${res.status})`);
   }
   const body = (await res.json()) as { orders?: ApiImportOrder[]; stale?: boolean; error?: string | null };
   if (body.stale) {

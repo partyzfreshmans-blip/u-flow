@@ -1,4 +1,3 @@
-import ExcelJS from 'exceljs';
 import { google } from 'googleapis';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
@@ -685,6 +684,14 @@ export async function handleExportBatchRouteHistory(token: string | null): Promi
   const orderByNo = new Map(joinRouteOrdersForExport(uniiResult.orders, staffInfos).map((o): [string, RouteOrder] => [o.orderNo, o]));
   const batches = batchRawRows.map(batchRouteRecordFromRow);
 
+  // Loaded on demand, not at module top-level: exceljs is only ever needed by
+  // the two export routes, out of the ~15 endpoints this file backs. A
+  // top-level `import ExcelJS from 'exceljs'` used to pull it into every one
+  // of Vercel's 12 serverless functions' module graph (server/lib.ts is the
+  // single shared core all of them import from), even the ones that never
+  // export anything — this keeps that weight, and any exceljs-specific
+  // bundling/runtime quirk, isolated to just these two handlers.
+  const { default: ExcelJS } = await import('exceljs');
   const workbook = new ExcelJS.Workbook();
 
   const summarySheet = workbook.addWorksheet('Batch Routes');
@@ -1245,6 +1252,9 @@ export async function handleExportRouteOrders(token: string | null): Promise<Api
 
   const rows = joinRouteOrdersForExport(uniiResult.orders, staffInfos);
 
+  // See handleExportBatchRouteHistory's identical comment — loaded on demand
+  // so exceljs never enters the other ~13 endpoints' module graph.
+  const { default: ExcelJS } = await import('exceljs');
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet('ออเดอร์');
   sheet.columns = [

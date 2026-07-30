@@ -1,7 +1,7 @@
 import { handleExportBatchRouteHistory, handleListBatchRoutes, handleUpsertBatchRoutes } from '../../server/lib.js';
 import { bearerToken } from '../../server/session.js';
 import { sendResult } from '../_send.js';
-import { routeSlug } from '../_routing.js';
+import { logUnmatchedRoute, routeSlug } from '../_routing.js';
 import type { ApiRequest, ApiResponse } from '../_types.js';
 
 // Consolidates api/batch-routes/index.ts + api/batch-routes/upsert.ts into
@@ -26,5 +26,6 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     sendResult(res, await handleExportBatchRouteHistory(token));
     return;
   }
+  logUnmatchedRoute('batch-routes', req, slug);
   res.status(404).json({ error: 'Not found' });
 }

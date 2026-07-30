@@ -1,7 +1,7 @@
 import { handleExportRouteOrders, handleFetchApiImportOrders, handleListRouteOrders, handleUpdateRouteOrder } from '../../server/lib.js';
 import { bearerToken } from '../../server/session.js';
 import { sendResult } from '../_send.js';
-import { routeSlug } from '../_routing.js';
+import { logUnmatchedRoute, routeSlug } from '../_routing.js';
 import type { ApiRequest, ApiResponse } from '../_types.js';
 
 // Kept as a [[...slug]] catch-all (matching every other api/ route in this
@@ -40,5 +40,6 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     sendResult(res, await handleExportRouteOrders(bearerToken(req.headers.authorization)));
     return;
   }
+  logUnmatchedRoute('route-orders', req, slug);
   res.status(404).json({ error: 'Not found' });
 }

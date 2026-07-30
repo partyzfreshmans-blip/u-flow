@@ -1,6 +1,6 @@
 import { handleListCustomerLocationOverrides, handleSyncCustomerNames, handleUpdateCsMasterLocation } from '../../server/lib.js';
 import { bearerToken } from '../../server/session.js';
-import { routeSlug } from '../_routing.js';
+import { logUnmatchedRoute, routeSlug } from '../_routing.js';
 import type { ApiRequest, ApiResponse } from '../_types.js';
 
 // Was a single-file api/cs-master/update-location.ts — converted to a
@@ -29,5 +29,6 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     res.status(status).json(body);
     return;
   }
+  logUnmatchedRoute('cs-master', req, slug);
   res.status(404).json({ error: 'Not found' });
 }

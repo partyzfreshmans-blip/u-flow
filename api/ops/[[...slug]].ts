@@ -9,7 +9,7 @@ import {
   handleSavePickLot,
 } from '../../server/lib.js';
 import { bearerToken } from '../../server/session.js';
-import { routeSlug } from '../_routing.js';
+import { logUnmatchedRoute, routeSlug } from '../_routing.js';
 import type { ApiRequest, ApiResponse } from '../_types.js';
 
 // Three features that never had ANY backend before this round — Activity
@@ -63,5 +63,6 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     res.status(status).json(body);
     return;
   }
+  logUnmatchedRoute('ops', req, slug);
   res.status(404).json({ error: 'Not found' });
 }

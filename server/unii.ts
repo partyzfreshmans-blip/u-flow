@@ -205,6 +205,11 @@ function extractOrdersArray(body: unknown): unknown[] | null {
 function classifyHttpError(status: number, bodyText: string): string {
   if (status === 401 || status === 403) return 'Unii API token ไม่ถูกต้องหรือหมดอายุ (401/403)';
   if (status === 429) return 'Unii API จำกัดจำนวนคำขอ (rate limit) ลองใหม่อีกครั้งภายหลัง';
+  // Distinct from this app's own 404 (a route/deployment problem in THIS
+  // backend) — this one means Unii itself couldn't find the endpoint we
+  // called, which points at the URL/branch id in server/unii.ts's
+  // UNII_API_BASE/UNII_BRANCH_ID being wrong or Unii having changed it.
+  if (status === 404) return `Unii API ไม่พบ endpoint ที่เรียก (HTTP 404) — ตรวจสอบว่า URL/branch id ที่เรียก (${UNII_API_BASE}/orders/branch/${UNII_BRANCH_ID}) ยังถูกต้องอยู่ฝั่ง Unii`;
   if (status >= 500) return `Unii API มีปัญหาฝั่งเซิร์ฟเวอร์ (HTTP ${status})`;
   return `Unii API ตอบกลับผิดพลาด (HTTP ${status})${bodyText ? `: ${bodyText.slice(0, 200)}` : ''}`;
 }
