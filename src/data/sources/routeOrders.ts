@@ -5,8 +5,8 @@
 // sync actually finish, and did it write every column" question, because
 // nothing is ever copied between the two tabs; this just reads both, fresh,
 // every time, and joins them in memory.
-import { isRouteOrdersTabConfigured, ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE } from '../../config/sheets';
 import type { ApiImportOrder, RouteOrder, StaffOrderInfo } from '../types';
+import type { Session } from '../session';
 import { fetchApiImportOrders } from './apiImportOrders';
 import { fetchStaffOrderInfo } from './staffOrderInfo';
 
@@ -63,9 +63,11 @@ export function joinRouteOrders(apiImportOrders: ApiImportOrder[], staffInfos: S
 /** Reads both sources live and joins them — the one function every page
  * should call for order data. Kept under this name (unchanged from the old
  * sync-based design) so every existing call site — the mount effect and
- * actions.syncNow in store.ts — needed no changes at all. */
-export async function fetchRouteOrders(): Promise<RouteOrder[]> {
-  if (!isRouteOrdersTabConfigured()) throw new Error(ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE);
-  const [apiImportOrders, staffInfos] = await Promise.all([fetchApiImportOrders(), fetchStaffOrderInfo()]);
+ * actions.syncNow in store.ts — needed no changes beyond passing a session.
+ * ApiImportOrder still comes from the public "API Import" Sheet CSV export
+ * (unchanged this round); StaffOrderInfo now comes from Postgres via an
+ * authenticated backend call, hence the session parameter. */
+export async function fetchRouteOrders(session: Session | null): Promise<RouteOrder[]> {
+  const [apiImportOrders, staffInfos] = await Promise.all([fetchApiImportOrders(), fetchStaffOrderInfo(session)]);
   return joinRouteOrders(apiImportOrders, staffInfos);
 }

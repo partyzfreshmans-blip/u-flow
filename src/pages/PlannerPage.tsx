@@ -95,12 +95,6 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
           <i className="ph ph-warning-fill" style={{ flex: 'none' }} />{v.bookingActionError}
         </div>
       )}
-      {v.courierStampWarning && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: 13, marginBottom: 16, borderRadius: 10, background: 'var(--st-warn-bg)', color: 'var(--st-warn-fg)', fontSize: 13 }}>
-          <i className="ph ph-warning-fill" style={{ flex: 'none' }} />{v.courierStampWarning}
-          <button className="btn btn-ghost" style={{ fontSize: 12, marginLeft: 'auto' }} onClick={v.dismissCourierStampWarning}>ปิด</button>
-        </div>
-      )}
       {v.plannerAssignSkippedMessage && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: 13, marginBottom: 16, borderRadius: 10, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 13 }}>
           <i className="ph ph-calendar-x" style={{ flex: 'none' }} />{v.plannerAssignSkippedMessage}

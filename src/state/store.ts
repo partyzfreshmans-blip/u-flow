@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useReducer, useRef } from 'react';
 import { fetchApiImportOrders } from '../data/sources/apiImportOrders';
-import { CS_MASTER_CSV_URL, fetchCsMasterCustomers } from '../data/sources/csMaster';
-import { updateCsMasterLatLng } from '../data/sources/csMasterWrite';
-import { avgPricePerPiece, fetchPromotions, formatPackUnitsTerm, formatTiersTerm, PROMOTIONS_CSV_URL } from '../data/sources/promotionsSheet';
+import { fetchCsMasterCustomers } from '../data/sources/csMaster';
+import { fetchCustomerLocationOverrides, updateCsMasterLatLng, type CustomerLocationOverride } from '../data/sources/csMasterWrite';
+import { avgPricePerPiece, fetchPromotions, formatPackUnitsTerm, formatTiersTerm } from '../data/sources/promotionsSheet';
 import { upsertPromotion } from '../data/sources/promotionsWrite';
 import { fetchRouteOrders } from '../data/sources/routeOrders';
 import { invalidateSheetCache } from '../data/sources/sheetCsv';
@@ -10,7 +10,17 @@ import { fetchAllOrderLineItems, fetchOrderLineItems, fetchOrderLineItemsForOrde
 import { linkLineItemPromo as apiLinkLineItemPromo } from '../data/sources/skuDetailWrite';
 import { fetchSkusFromSheet } from '../data/sources/skuSheet';
 import { attachmentKey, loadAttachments, saveAttachments, uploadToDrive, type AttachmentIndex } from '../data/sources/attachments';
-import { emptyLine, loadReceivingLog, receivingFolderKey, saveReceivingLog, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
+import {
+  createReceivingOnServer,
+  deleteReceivingOnServer,
+  emptyLine,
+  fetchReceivingLog,
+  loadReceivingLog,
+  receivingFolderKey,
+  saveReceivingLog,
+  type ReceivingLine,
+  type ReceivingRecord,
+} from '../data/receiving';
 import { DEFAULT_VEHICLES, loadRoutePlan, loadVehicles, saveRoutePlan, saveVehicles, type RoutePlan, type Vehicle } from '../data/vehicles';
 import { DEFAULT_ZONE_RULES, loadZoneRules, saveZoneRules, type ZoneRule } from '../data/zoneConfig';
 import { coordKey, loadGeocodeCache, saveGeocodeCache, type GeocodeCache } from '../data/geocodeCache';
@@ -21,7 +31,7 @@ import { loadRouteCodState, saveRouteCodState } from '../data/routeCod';
 import { addDays, dayKey, dayKeyToDate, isoToSheetDateText, sheetDateToDayKey, todayDayKey } from '../data/dateUtils';
 import { updateRouteOrder } from '../data/sources/routeOrdersWrite';
 import { loadDriverQueue, saveDriverQueue } from '../data/driverQueue';
-import { loadPickLots, savePickLots, type PickLot, type PickLotLine } from '../data/pickLots';
+import { cancelPickLotOnServer, loadPickLots, savePickLots, syncPickLotToServer, type PickLot, type PickLotLine } from '../data/pickLots';
 import { loadBatchRoutes, saveBatchRoutes, type BatchRoute } from '../data/batchRoutes';
 import { loadStuckDetachments, saveStuckDetachments, type StuckDetachmentIndex } from '../data/stuckDetachments';
 import { loadDeliveryFailures, saveDeliveryFailures, type DeliveryFailureIndex, type DeliveryFailureRecord } from '../data/deliveryFailures';
@@ -35,7 +45,7 @@ import type { ApiImportOrder, CsMasterCustomer, OrderLineItem, Promo, PromoPackU
 import { csvExportUrl, SHEET_TABS } from '../config/sheets';
 import { loadLastSyncAt, saveLastSyncAt } from '../data/syncMeta';
 import { appendNotificationEvents, loadNotificationEvents, loadNotificationReadIds, saveNotificationReadIds, type NotificationEvent } from '../data/notifications';
-import { appendActivityLog, loadActivityLog, type ActivityLogEntry } from '../data/activityLog';
+import { appendActivityLog, fetchActivityLog, loadActivityLogCache, postActivityLog, type ActivityLogEntry } from '../data/activityLog';
 import { loadSidebarCollapsed, saveSidebarCollapsed } from '../data/sidebarState';
 import { clearSession, loadSession, saveSession, type Session } from '../data/session';
 import { createUser as apiCreateUser, fetchUsers as apiFetchUsers, login as apiLogin, updateUser as apiUpdateUser, type UserListRow } from '../data/sources/authApi';
@@ -168,11 +178,6 @@ export interface AppState {
   plannerTab: 'plan' | 'history';
   assignDialogOpen: boolean;
   assignSelectedVehicleIds: string[];
-  /** Set when one or more background "คนส่ง" (column N) stamp/clear writes
-   * from an Assign or batch edit failed — surfaced as a dismissible warning
-   * on the Planner page. The batch itself is never rolled back for this;
-   * it's a "go check/retry" notice, not a blocker. */
-  courierStampWarning: string | null;
   /** Set when the Planner's "จัดลงรถ" bulk-assign includes an order with no
    * delivery date — those get dropped from the assignment (see the gate in
    * computePlanner's assignSelectedTo) and this dismissible message names
@@ -481,7 +486,6 @@ export const initialState: AppState = {
   batchRouteQ: '',
   plannerTab: 'plan',
   assignDialogOpen: false,
-  courierStampWarning: null,
   plannerAssignSkippedMessage: null,
   batchRoutesSyncWarning: null,
   assignSelectedVehicleIds: [],
@@ -796,38 +800,16 @@ export function useAppStore() {
     });
   }
 
-  /** Writes or blanks the "คนส่ง" column for a set of orders — shared by
-   * stampCourierOrders (per-order add/remove during ordinary batch editing)
-   * and cancelBatchRoute (clearing every order in a whole cancelled batch at
-   * once). Failures surface via the same dismissible courierStampWarning
-   * either caller already knows how to show. */
-  function clearOrStampCourier(orderNos: string[], stamp: { vehicleId: string; vehicleName: string; batchId: string } | null) {
-    if (orderNos.length === 0) return;
-    Promise.allSettled(
-      orderNos.map((orderNo) =>
-        stamp
-          ? updateRouteOrder({ orderNo, courierVehicleId: stamp.vehicleId, courierVehicleName: stamp.vehicleName, courierBatchId: stamp.batchId })
-          : updateRouteOrder({ orderNo, clearCourierStamp: true }),
-      ),
-    ).then((results) => {
-      const failed = orderNos.filter((_, i) => results[i].status === 'rejected');
-      if (failed.length === 0) return;
-      const firstReason = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
-      const reasonText = firstReason?.reason instanceof Error ? firstReason.reason.message : 'บันทึกไม่สำเร็จ';
-      dispatch({
-        type: 'patch',
-        patch: {
-          courierStampWarning: `เขียนคอลัมน์ "คนส่ง" ไม่สำเร็จ ${failed.length}/${orderNos.length} ออเดอร์ (${failed.join(', ')}) — ${reasonText} — ลองใหม่ได้จากหน้าวางแผนจัดรูท`,
-        },
-      });
-    });
-  }
-
   /** Local-first batchRoutes write, shared by setBatchRoutes (ordinary
    * planner edits) and cancelBatchRoute — state + localStorage update
    * immediately, then push to the shared backend in the background; a push
    * failure never rolls back the local edit, it just surfaces as a
-   * dismissible batchRoutesSyncWarning. */
+   * dismissible batchRoutesSyncWarning. The backend now ALSO reconciles
+   * every affected order's batch_route_id/route/assigned_driver/
+   * stop_sequence transactionally as part of this same push (see
+   * server/lib.ts's handleUpsertBatchRoutes) — the old separate
+   * "คนส่ง"-column write (clearOrStampCourier/stampCourierOrders) that used
+   * to run alongside this is gone; this one call now does both. */
   function persistBatchRoutes(list: BatchRoute[]) {
     dispatch({ type: 'patch', patch: { batchRoutes: list } });
     saveBatchRoutes(list);
@@ -899,7 +881,14 @@ export function useAppStore() {
     const username = userOverride ?? loadSession()?.username ?? 'ไม่ทราบผู้ใช้';
     dispatch({
       type: 'patch',
-      patch: { activityLog: appendActivityLog(loadActivityLog(), { user: username, action, detail, orderNo }) },
+      patch: { activityLog: appendActivityLog(loadActivityLogCache(), { user: username, action, detail, orderNo }) },
+    });
+    // Best-effort background push to Postgres — never blocks the action that
+    // triggered this log entry (same "local-first" pattern as
+    // persistBatchRoutes). A failure here just means this one entry won't
+    // show up for other sessions; it's already visible in this one.
+    postActivityLog(loadSession(), { action, detail, orderNo }).catch(() => {
+      /* local state already has it; nothing actionable to surface here */
     });
   }
   const SYSTEM_USER_LABEL = 'ระบบ (ตรวจจับอัตโนมัติ)';
@@ -996,9 +985,15 @@ export function useAppStore() {
     };
   }, []);
 
+  // Route orders' staff-entered overlay now lives in Postgres (see
+  // src/data/sources/staffOrderInfo.ts), which — unlike the old public CSV
+  // export — needs a session to read. Gated on state.session like the
+  // Bookings/Batch Routes polling effects below, so it fires as soon as a
+  // session exists (mount if already logged in, or right after login).
   useEffect(() => {
+    if (!state.session) return;
     let cancelled = false;
-    fetchRouteOrders()
+    fetchRouteOrders(loadSession())
       .then((routeOrders) => {
         if (!cancelled) {
           dispatch({ type: 'patch', patch: { routeOrders, routeOrdersLoading: false, routeOrdersError: null } });
@@ -1015,11 +1010,15 @@ export function useAppStore() {
     return () => {
       cancelled = true;
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.session?.username]);
 
+  // Promotions likewise now live in Postgres (see
+  // src/data/sources/promotionsSheet.ts) — same session-gating reasoning.
   useEffect(() => {
+    if (!state.session) return;
     let cancelled = false;
-    fetchPromotions()
+    fetchPromotions(loadSession())
       .then((promos) => {
         if (!cancelled) {
           dispatch({ type: 'patch', patch: { promos, promosLoading: false, promosError: null } });
@@ -1036,7 +1035,8 @@ export function useAppStore() {
     return () => {
       cancelled = true;
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.session?.username]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1059,14 +1059,23 @@ export function useAppStore() {
     };
   }, []);
 
+  // Base customer list (name/address/etc.) still comes straight from the CS
+  // Master Google Sheet, unchanged this round — but any corrected lat/lng
+  // now lives in Postgres (see saveCustomerLatLng/saveOrderLocation below),
+  // so it has to be fetched separately and merged in by phone; the Sheet
+  // itself never gets that correction written back to it anymore.
   useEffect(() => {
     let cancelled = false;
-    fetchCsMasterCustomers()
-      .then((customers) => {
-        if (!cancelled) {
-          dispatch({ type: 'patch', patch: { customers, customersLoading: false, customersError: null } });
-          recordSyncSuccess();
-        }
+    Promise.all([fetchCsMasterCustomers(), state.session ? fetchCustomerLocationOverrides(loadSession()).catch(() => [] as CustomerLocationOverride[]) : Promise.resolve([] as CustomerLocationOverride[])])
+      .then(([customers, overrides]) => {
+        if (cancelled) return;
+        const overrideByPhone = new Map(overrides.map((o) => [o.phone, o]));
+        const merged = customers.map((c) => {
+          const override = overrideByPhone.get(c.phone);
+          return override ? { ...c, lat: override.lat, lng: override.lng } : c;
+        });
+        dispatch({ type: 'patch', patch: { customers: merged, customersLoading: false, customersError: null } });
+        recordSyncSuccess();
       })
       .catch((err: unknown) => {
         if (!cancelled) {
@@ -1078,7 +1087,8 @@ export function useAppStore() {
     return () => {
       cancelled = true;
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.session?.username]);
 
   // Zones, vehicles and the current plan live in localStorage, so they survive
   // a reload without needing the sheet or a backend.
@@ -1104,11 +1114,39 @@ export function useAppStore() {
         lastSyncAt: loadLastSyncAt(),
         notificationEvents: loadNotificationEvents(),
         notificationReadIds: loadNotificationReadIds(),
-        activityLog: loadActivityLog(),
+        activityLog: loadActivityLogCache(),
         sidebarCollapsed: loadSidebarCollapsed() ?? window.innerWidth < 900,
       },
     });
   }, []);
+
+  // Activity Log and Goods Receiving now live in Postgres — the local
+  // caches above give an instant first paint, then this replaces them with
+  // the real shared history as soon as a session exists (same gating as the
+  // route-orders/promotions/customers effects above).
+  useEffect(() => {
+    if (!state.session) return;
+    let cancelled = false;
+    const session = loadSession();
+    fetchActivityLog(session)
+      .then((entries) => {
+        if (!cancelled) dispatch({ type: 'patch', patch: { activityLog: entries } });
+      })
+      .catch(() => {
+        /* keep showing the local cache — activity log has no dedicated error banner */
+      });
+    fetchReceivingLog(session)
+      .then((records) => {
+        if (!cancelled) dispatch({ type: 'patch', patch: { receivingLog: records } });
+      })
+      .catch(() => {
+        /* keep showing the local cache — receiving log has no dedicated error banner */
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.session?.username]);
 
   // The failed-delivery photo queue lives in IndexedDB (see
   // src/data/failedDeliveryQueue.ts), which is inherently async — can't join
@@ -1292,7 +1330,6 @@ export function useAppStore() {
         const username = loadSession()?.username ?? '';
         const next = batchRoutes.map((b) => (b.id === batchId ? { ...b, cancelled: true, cancelledAt: now, cancelledBy: username } : b));
         persistBatchRoutes(next);
-        clearOrStampCourier(batch.orderNos, null);
         logActivity('ยกเลิก Batch Route', `${batch.id} · ปลด ${batch.orderNos.length} ออเดอร์ (${batch.orderNos.join(', ')})`);
       },
       /** Cross-day stuck-order detector's write action (see
@@ -1324,7 +1361,6 @@ export function useAppStore() {
           return { ...b, orderNos: b.orderNos.filter((no) => !removeSet.has(no)), updatedAt: now, updatedBy: SYSTEM_USER_LABEL };
         });
         persistBatchRoutes(next);
-        clearOrStampCourier(entries.map((e) => e.orderNo), null);
 
         const detachments = { ...loadStuckDetachments() };
         for (const e of entries) {
@@ -1344,16 +1380,6 @@ export function useAppStore() {
           );
         }
       },
-      /** Best-effort background write of column N ("คนส่ง") in the คำสั่งซื้อ
-       * sheet after a batch Assign or edit — fires once per order via
-       * Promise.allSettled (not Promise.all) so one bad row can't hide the
-       * rest having written fine, and never blocks or rolls back the batch
-       * itself (which is already committed to local state by the time this
-       * runs). Any failures surface as a dismissible courierStampWarning
-       * instead of silently vanishing. Pass stamp=null to clear the column
-       * (order pulled out of its batch) instead of setting it. */
-      stampCourierOrders: (orderNos: string[], stamp: { vehicleId: string; vehicleName: string; batchId: string } | null) => clearOrStampCourier(orderNos, stamp),
-      dismissCourierStampWarning: () => dispatch({ type: 'patch', patch: { courierStampWarning: null } }),
       dismissPlannerAssignSkippedMessage: () => dispatch({ type: 'patch', patch: { plannerAssignSkippedMessage: null } }),
       saveRouteCod: (collected: Record<string, string>, method: Record<string, 'cash' | 'transfer'>) => {
         saveRouteCodState({ collected, method });
@@ -1416,11 +1442,20 @@ export function useAppStore() {
           },
         });
         logActivity('บันทึกรับสินค้าเข้าคลัง', `${record.supplier} · บิล ${record.billNo || '—'} · ${record.receivedDate} · ${record.lines.length} รายการ`);
+        // Local-first, same pattern as batch routes/activity log — the record
+        // is already visible locally; a failed background push just means it
+        // won't show up for other sessions until the next successful sync.
+        createReceivingOnServer(loadSession(), record).catch((err: unknown) => {
+          console.error('[receiving/create]', err instanceof Error ? err.message : err);
+        });
       },
       deleteReceiving: (id: string, log: ReceivingRecord[]) => {
         const next = log.filter((r) => r.id !== id);
         saveReceivingLog(next);
         dispatch({ type: 'patch', patch: { receivingLog: next } });
+        deleteReceivingOnServer(loadSession(), id).catch((err: unknown) => {
+          console.error('[receiving/delete]', err instanceof Error ? err.message : err);
+        });
       },
       openEditSku: (sku: Sku) => dispatch({ type: 'openEditSku', sku }),
       saveSku: () => dispatch({ type: 'saveSku' }),
@@ -1510,7 +1545,6 @@ export function useAppStore() {
             dispatch({ type: 'applyPromoSaved', promo });
             dispatch({ type: 'patch', patch: { promoSaveStatus: { state: 'saved' } } });
             setTimeout(() => dispatch({ type: 'patch', patch: { promoSaveStatus: null } }), 2500);
-            invalidateSheetCache(PROMOTIONS_CSV_URL);
             logActivity(editingOriginal ? 'แก้ไขโปรโมชั่น' : 'สร้างโปรโมชั่น', `${sku} · ${name} · ${termText}`);
           })
           .catch((err: unknown) => {
@@ -1660,7 +1694,6 @@ export function useAppStore() {
         dispatch({ type: 'patch', patch: { custEditSaving: true, custEditError: null } });
         updateCsMasterLatLng(name, phone, lat, lng)
           .then(async () => {
-            invalidateSheetCache(CS_MASTER_CSV_URL);
             dispatch({ type: 'updateCustomerLatLng', rowIndex, lat, lng });
             dispatch({ type: 'patch', patch: { custEditSaving: false, custEditRowIndex: null } });
             const originalText = originalLat != null && originalLng != null ? `${originalLat.toFixed(5)}, ${originalLng.toFixed(5)}` : 'ไม่มีข้อมูล';
@@ -1711,7 +1744,6 @@ export function useAppStore() {
         dispatch({ type: 'patch', patch: { orderLocationSaving: true, orderLocationError: null } });
         updateCsMasterLatLng(name, phone, lat, lng)
           .then(async () => {
-            invalidateSheetCache(CS_MASTER_CSV_URL);
             dispatch({ type: 'updateOrderLocation', orderNo, lat, lng });
             dispatch({ type: 'patch', patch: { orderLocationSaving: false, orderLocationOrderNo: null } });
             const originalText = originalLat != null && originalLng != null ? `${originalLat.toFixed(5)}, ${originalLng.toFixed(5)}` : 'ไม่มีข้อมูล';
@@ -1956,6 +1988,9 @@ export function useAppStore() {
           const nextLots = [lot, ...lots];
           savePickLots(nextLots);
           dispatch({ type: 'patch', patch: { pickLots: nextLots, activePickLotId: lot.id, pickCreating: false, pickSelectedOrderNos: [] } });
+          syncPickLotToServer(loadSession(), lot).catch((err: unknown) => {
+            console.error('[batch-picking/save]', err instanceof Error ? err.message : err);
+          });
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : 'สร้างล็อตหยิบสินค้าไม่สำเร็จ';
           dispatch({ type: 'patch', patch: { pickCreating: false, pickCreateError: message } });
@@ -1966,6 +2001,12 @@ export function useAppStore() {
         const next = lots.map((l) => (l.id === lotId ? { ...l, picked: { ...l.picked, [sku]: !l.picked[sku] } } : l));
         savePickLots(next);
         dispatch({ type: 'patch', patch: { pickLots: next } });
+        const updated = next.find((l) => l.id === lotId);
+        if (updated) {
+          syncPickLotToServer(loadSession(), updated).catch((err: unknown) => {
+            console.error('[batch-picking/save]', err instanceof Error ? err.message : err);
+          });
+        }
       },
 
       /** Closing is immediate/optimistic (the physical picking is already
@@ -1981,6 +2022,12 @@ export function useAppStore() {
         dispatch({ type: 'patch', patch: { pickLots: next } });
         syncPickLotStatus(lot.orderNos);
         logActivity('ปิดล็อตหยิบสินค้า', `ล็อต ${lot.id} · ${lot.orderNos.length} ออเดอร์ (${lot.orderNos.join(', ')})`);
+        const updated = next.find((l) => l.id === lotId);
+        if (updated) {
+          syncPickLotToServer(loadSession(), updated).catch((err: unknown) => {
+            console.error('[batch-picking/save]', err instanceof Error ? err.message : err);
+          });
+        }
       },
       retryPickLotStatusSync: (orderNos: string[]) => syncPickLotStatus(orderNos),
 
@@ -1997,6 +2044,9 @@ export function useAppStore() {
         const next = lots.filter((l) => l.id !== lotId);
         savePickLots(next);
         dispatch({ type: 'patch', patch: { pickLots: next, activePickLotId: activePickLotId === lotId ? null : activePickLotId } });
+        cancelPickLotOnServer(loadSession(), lotId).catch((err: unknown) => {
+          console.error('[batch-picking/cancel]', err instanceof Error ? err.message : err);
+        });
         logActivity('ยกเลิกล็อตหยิบสินค้า', `ล็อต ${lot.id} · ${lot.orderNos.length} ออเดอร์ (${lot.orderNos.join(', ')})`);
       },
 
@@ -2016,21 +2066,20 @@ export function useAppStore() {
       syncNow: async (): Promise<{ ok: boolean; routeOrdersOk: boolean; failures: string[] }> => {
         dispatch({ type: 'patch', patch: { syncing: true } });
 
-        [
-          csvExportUrl(SHEET_TABS.apiImport),
-          csvExportUrl(SHEET_TABS.routeOrders),
-          csvExportUrl(SHEET_TABS.skuDetail),
-          csvExportUrl(SHEET_TABS.promotions),
-          csvExportUrl(SHEET_TABS.csMaster),
-          csvExportUrl(SHEET_TABS.skuMaster),
-        ].forEach(invalidateSheetCache);
+        // routeOrders (Postgres) and promotions (Postgres) no longer go
+        // through fetchSheetRows' CSV cache — only these three still do.
+        [csvExportUrl(SHEET_TABS.apiImport), csvExportUrl(SHEET_TABS.skuDetail), csvExportUrl(SHEET_TABS.csMaster), csvExportUrl(SHEET_TABS.skuMaster)].forEach(
+          invalidateSheetCache,
+        );
 
-        const [apiOrdersR, routeOrdersR, lineItemsR, promosR, customersR, skusR] = await Promise.allSettled([
+        const session = loadSession();
+        const [apiOrdersR, routeOrdersR, lineItemsR, promosR, customersR, overridesR, skusR] = await Promise.allSettled([
           fetchApiImportOrders(),
-          fetchRouteOrders(),
+          fetchRouteOrders(session),
           fetchAllOrderLineItems(),
-          fetchPromotions(),
+          fetchPromotions(session),
           fetchCsMasterCustomers(),
+          fetchCustomerLocationOverrides(session),
           fetchSkusFromSheet(),
         ]);
 
@@ -2064,7 +2113,11 @@ export function useAppStore() {
         } else failures.push(`โปรโมชั่น: ${promosR.reason instanceof Error ? promosR.reason.message : 'ไม่สำเร็จ'}`);
 
         if (customersR.status === 'fulfilled') {
-          patch.customers = customersR.value;
+          const overrideByPhone = new Map((overridesR.status === 'fulfilled' ? overridesR.value : []).map((o) => [o.phone, o]));
+          patch.customers = customersR.value.map((c) => {
+            const override = overrideByPhone.get(c.phone);
+            return override ? { ...c, lat: override.lat, lng: override.lng } : c;
+          });
           patch.customersError = null;
           anySucceeded = true;
         } else failures.push(`รายชื่อลูกค้า (CS Master): ${customersR.reason instanceof Error ? customersR.reason.message : 'ไม่สำเร็จ'}`);

@@ -3,45 +3,25 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { DRIVE_ROOT_FOLDER_ENV, driveFolderPath, isAllowedFile, type AttachmentScope } from '../src/config/drive.js';
 import { GEOCODE_MIN_INTERVAL_MS, NOMINATIM_REVERSE_URL, NOMINATIM_USER_AGENT } from '../src/config/geocoding.js';
-import { isRouteOrdersTabConfigured, MAIN_SHEET_ID, ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE, SHEET_TABS, STAFF_ORDER_INFO_HEADERS } from '../src/config/sheets.js';
+import { MAIN_SHEET_ID, SHEET_TABS } from '../src/config/sheets.js';
+import { getDb } from './db.js';
 import { createSessionToken, verifySessionToken } from './session.js';
 
-// Shared core for the backend that needs Google credentials: the CS Master
-// lat/lng write-back, order edit write-back, and Drive uploads. Framework
-// entry points (Express in server/index.ts for local dev, Vercel serverless
-// functions in api/ for production) both call these same handlers so the
-// business logic — validation, row matching, what gets written where — lives
-// in exactly one place.
-//
-// The Google Service Account private key lives ONLY here, in the
-// GOOGLE_SERVICE_ACCOUNT_KEY env var — never in the browser bundle.
+// Shared core for the backend. Most write-back features (users, orders,
+// customers, batch routes, bookings, promotions, activity log, batch
+// picking, goods receiving) live in Postgres now — see db/migrations/ and
+// server/db.ts — reached through the single shared getDb() client. Two
+// features deliberately still use Google Sheets/Drive directly, unchanged:
+// SKU Detail's promo-SKU link (handleLinkLineItemPromo — out of scope for
+// this round, see db/README.md) and Drive file uploads (attachments are
+// metadata-only in Postgres; the files themselves stay on Drive). The
+// Google Service Account private key lives ONLY here, in the
+// GOOGLE_SERVICE_ACCOUNT_KEY env var — never in the browser bundle. The
+// Postgres connection string lives ONLY in DATABASE_URL, read by
+// server/db.ts — also never in the browser bundle.
 
-export const CS_MASTER_GID = Number(SHEET_TABS.csMaster.gid);
-export const ROUTE_ORDERS_GID = Number(SHEET_TABS.routeOrders.gid);
-export const PROMOTIONS_GID = Number(SHEET_TABS.promotions.gid);
 export const SKU_DETAIL_GID = Number(SHEET_TABS.skuDetail.gid);
 
-// Columns in the CS Master tab: A=ชื่อ B=เบอร์ C=ที่อยู่ D=ละ(lat) E=ลอง(lng)
-const LAT_COLUMN = 'D';
-const LNG_COLUMN = 'E';
-const NAME_COLUMN_INDEX = 0;
-const PHONE_COLUMN_INDEX = 1;
-
-// Columns in "คำสั่งซื้อ VS" under its new, staff-data-only layout — see
-// config/sheets.ts's STAFF_ORDER_INFO_HEADERS for the single source of truth
-// on exact header text/order (the user sets these up by hand in the real
-// sheet). Looked up by header text each request, never by position, so a
-// future column reorder in the sheet doesn't silently write to the wrong cell.
-const [
-  STAFF_ORDER_UID_HEADER,
-  STAFF_DELIVERY_DATE_HEADER,
-  STAFF_NOTE_HEADER,
-  STAFF_TAX_INVOICE_HEADER,
-  STAFF_OPERATIONAL_STATUS_HEADER,
-  STAFF_OPERATIONAL_STATUS_AT_HEADER,
-  STAFF_COURIER_HEADER,
-  STAFF_ARCHIVED_HEADER,
-] = STAFF_ORDER_INFO_HEADERS;
 const DELIVERED_STATUS_VALUE = 'ส่งสำเร็จ';
 // Not a done state — deliberately excluded from DELIVERY_DONE_STATUSES on
 // the frontend (see src/state/helpers.ts) so a failed stop keeps showing up
@@ -54,19 +34,6 @@ export const DELIVERY_FAILED_STATUS_VALUE = 'ส่งไม่สำเร็�
 // includes API Import's own status text (รอยืนยันออเดอร์/กำลังดำเนินการ/etc.)
 // since this app never writes to that column at all anymore.
 const KNOWN_OPERATIONAL_STATUS_VALUES = ['กำลังจัดส่ง', DELIVERED_STATUS_VALUE, DELIVERY_FAILED_STATUS_VALUE];
-
-// Columns in the "โปรโมชั่น" tab — same header-name lookup approach as the
-// คำสั่งซื้อ tab above (never by fixed position).
-const PROMO_SKU_HEADER = 'SKU';
-const PROMO_STATUS_HEADER = 'Status';
-const PROMO_PRODUCT_NAME_HEADER = 'Product Name';
-const PROMO_TERM_HEADER = 'Promotion Term';
-const PROMO_START_HEADER = 'เริ่มโปร';
-const PROMO_END_HEADER = 'สินสุด';
-const PROMO_PRICE_HEADER = 'Promotion Price';
-const PROMO_BOX_PRICE_HEADER = 'Box Price';
-const PROMO_SINGLE_PRICE_HEADER = 'Single Price';
-const PROMO_PERIOD_HEADER = 'Period (วัน)';
 
 // Columns in the "SKU Detail" tab, same header-name lookup approach.
 const LINE_ITEM_ORDER_NO_HEADER = 'เลขคำสั่งซื้อ';
@@ -81,6 +48,15 @@ export interface ApiResult {
   body: unknown;
 }
 
+/** postgres.js's bulk-insert helper (sql(rows)) types each cell as
+ * `string | number` even though it serializes null/boolean/Date correctly
+ * at runtime — this cast works around that overly-narrow TS signature, not
+ * around a real risk (verified locally before this code was written; see
+ * scripts/migrate-to-postgres.ts's identical note). */
+function bulkRows(rows: unknown[][]): (string | number)[][] {
+  return rows as unknown as (string | number)[][];
+}
+
 function columnLetter(index: number): string {
   let n = index + 1;
   let s = '';
@@ -92,36 +68,15 @@ function columnLetter(index: number): string {
   return s;
 }
 
-/** Sheet dates read as M/D/YYYY (no leading zeros); write back the same way so
- * USER_ENTERED parses it as the same date type as the surrounding cells. */
-function isoToSheetDate(iso: string): string {
-  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) throw new Error('รูปแบบวันที่ไม่ถูกต้อง (ต้องเป็น YYYY-MM-DD)');
-  return `${Number(m[2])}/${Number(m[3])}/${Number(m[1])}`;
-}
-
-/** The "โปรโมชั่น" tab writes dates as zero-padded DD-MM-YYYY (e.g.
- * "21-07-2026") — a completely different convention from the M/D/YYYY the
- * คำสั่งซื้อ tab uses above, confirmed from real rows already in that sheet.
- * Never share isoToSheetDate between the two tabs. */
-function isoToPromoSheetDate(iso: string): string {
-  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) throw new Error('รูปแบบวันที่ไม่ถูกต้อง (ต้องเป็น YYYY-MM-DD)');
-  const [, year, month, day] = m;
-  return `${day}-${month}-${year}`;
-}
-
-/** Whole days between two YYYY-MM-DD ISO dates — matches the "Period (วัน)"
- * column, which real rows already keep as end-minus-start in days. */
+/** Whole days between two YYYY-MM-DD ISO dates — matches promotions'
+ * period_days column, which mirrors the old sheet's "Period (วัน)" as
+ * end-minus-start in days. Postgres DATE columns take ISO YYYY-MM-DD
+ * directly, so (unlike the old Sheets code) no format conversion is needed
+ * for the dates themselves — only this derived day-count is still computed
+ * here. */
 function daysBetweenIso(startIso: string, endIso: string): number {
   const MS_PER_DAY = 24 * 60 * 60 * 1000;
   return Math.round((new Date(`${endIso}T00:00:00Z`).getTime() - new Date(`${startIso}T00:00:00Z`).getTime()) / MS_PER_DAY);
-}
-
-/** Matches the sheet's own datetime text form, e.g. "7/24/2026 8:00:00". */
-function nowSheetDateTime(): string {
-  const d = new Date();
-  return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
 }
 
 function getServiceAccountCredentials(): { client_email: string; private_key: string } {
@@ -203,28 +158,17 @@ async function resolveSheetTitle(sheets: ReturnType<typeof google.sheets>, gid: 
   return title;
 }
 
-/** Phone formats in the sheet are inconsistent ("66 823848337", "6 895559406",
- * "082-384-8337"), so compare the last 9 digits — the part that actually
- * identifies the subscriber — rather than requiring an exact string match. */
-function phoneKey(v: string): string {
-  return v.replace(/\D/g, '').slice(-9);
-}
-
 // ---------- Users / authentication ----------
 //
-// User accounts (username, hashed password, role) live in their own "Users"
-// tab on the main spreadsheet, created on first use. Unlike every other tab
-// this backend reads, it is NEVER exposed through a public CSV export URL —
-// the frontend only ever reaches it through these authenticated handlers, so
-// simply knowing the tab's gid can't leak a password hash the way it could
-// for a CSV-exported tab. The one residual risk this doesn't close: anyone
-// who already has direct "Viewer" access to the underlying Google Sheet
-// file itself (via Google's own sharing, not this app) could open it and
-// see the Users tab. That's a real trade-off of using a spreadsheet as the
-// user store instead of a dedicated database — acceptable for this app's
-// current scale, but worth knowing about.
-const USERS_TAB_TITLE = 'Users';
-const USERS_HEADER = ['username', 'passwordHash', 'role', 'active', 'driverVehicleId', 'createdAt'];
+// User accounts (username, hashed password, role) live in Postgres's `users`
+// table now (see db/migrations/0001_init.sql). Unlike a CSV-exported Sheets
+// tab, Postgres has no public read path at all — the frontend only ever
+// reaches this data through these authenticated handlers. That's strictly
+// better than the old Sheets-backed design, which called out one residual
+// risk worth remembering: anyone with direct Google Sheets "Viewer" access
+// to the underlying spreadsheet could see the Users tab regardless of this
+// app's own auth. Postgres has no equivalent hole — reaching this data at
+// all requires the DATABASE_URL credential, held only by this backend.
 export const VALID_ROLES = ['administrator', 'manager', 'admin_staff', 'checker', 'picker', 'driver'] as const;
 export type ValidRole = (typeof VALID_ROLES)[number];
 
@@ -248,7 +192,6 @@ function verifyPassword(password: string, stored: string): boolean {
 }
 
 interface UserRecord {
-  rowIndex: number;
   username: string;
   passwordHash: string;
   role: string;
@@ -257,69 +200,51 @@ interface UserRecord {
   createdAt: string;
 }
 
-type SheetsClient = Awaited<ReturnType<typeof getSheetsClient>>;
-
-/** Creates the Users tab (with header row) and seeds one throwaway test
- * account per role the very first time anything touches it. Idempotent —
- * a no-op once the tab already exists. */
-async function ensureUsersSheet(sheets: SheetsClient): Promise<void> {
-  const meta = await sheets.spreadsheets.get({ spreadsheetId: MAIN_SHEET_ID });
-  const exists = meta.data.sheets?.some((s) => s.properties?.title === USERS_TAB_TITLE);
-  if (exists) return;
-
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId: MAIN_SHEET_ID,
-    requestBody: { requests: [{ addSheet: { properties: { title: USERS_TAB_TITLE } } }] },
-  });
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: MAIN_SHEET_ID,
-    range: `${USERS_TAB_TITLE}!A1:F1`,
-    valueInputOption: 'RAW',
-    requestBody: { values: [USERS_HEADER] },
-  });
-
-  // One example account per role, so there's something to log in with
-  // immediately after this ships. These are throwaway testing credentials —
-  // rotate (or delete and recreate) them before relying on this for
-  // anything beyond a first smoke test.
-  const seeds: { username: string; password: string; role: ValidRole; driverVehicleId: string }[] = [
-    { username: 'admin', password: 'Admin#2026', role: 'administrator', driverVehicleId: '' },
-    { username: 'manager1', password: 'Manager#2026', role: 'manager', driverVehicleId: '' },
-    { username: 'staff1', password: 'Staff#2026', role: 'admin_staff', driverVehicleId: '' },
-    { username: 'checker1', password: 'Checker#2026', role: 'checker', driverVehicleId: '' },
-    { username: 'picker1', password: 'Picker#2026', role: 'picker', driverVehicleId: '' },
-    { username: 'driver1', password: 'Driver#2026', role: 'driver', driverVehicleId: 'veh-a' },
-  ];
-  const rows = seeds.map((s) => [s.username, hashPassword(s.password), s.role, 'TRUE', s.driverVehicleId, new Date().toISOString()]);
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: MAIN_SHEET_ID,
-    range: `${USERS_TAB_TITLE}!A:F`,
-    valueInputOption: 'RAW',
-    insertDataOption: 'INSERT_ROWS',
-    requestBody: { values: rows },
-  });
+interface UserPgRow {
+  username: string;
+  password_hash: string;
+  role: string;
+  active: boolean;
+  driver_vehicle_id: string;
+  created_at: Date | string | null;
 }
 
-async function readUsers(sheets: SheetsClient): Promise<UserRecord[]> {
-  await ensureUsersSheet(sheets);
-  const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${USERS_TAB_TITLE}!A:F` });
-  const rows = res.data.values ?? [];
-  const out: UserRecord[] = [];
-  for (let i = 1; i < rows.length; i++) {
-    const r = rows[i] ?? [];
-    const username = String(r[0] ?? '').trim();
-    if (!username) continue;
-    out.push({
-      rowIndex: i + 1,
-      username,
-      passwordHash: String(r[1] ?? ''),
-      role: String(r[2] ?? '').trim(),
-      active: String(r[3] ?? '').trim().toUpperCase() === 'TRUE',
-      driverVehicleId: String(r[4] ?? '').trim(),
-      createdAt: String(r[5] ?? '').trim(),
-    });
-  }
-  return out;
+/** One example account per role, seeded only if the `users` table is
+ * completely empty (a brand new database — see readUsersPg) so there's
+ * something to log in with immediately. Throwaway testing credentials —
+ * rotate (or delete and recreate) them before relying on this for anything
+ * beyond a first smoke test. Mirrors the seed set the old Sheets-backed
+ * ensureUsersSheet used to create on a fresh "Users" tab. */
+const DEFAULT_USER_SEEDS: { username: string; password: string; role: ValidRole; driverVehicleId: string }[] = [
+  { username: 'admin', password: 'Admin#2026', role: 'administrator', driverVehicleId: '' },
+  { username: 'manager1', password: 'Manager#2026', role: 'manager', driverVehicleId: '' },
+  { username: 'staff1', password: 'Staff#2026', role: 'admin_staff', driverVehicleId: '' },
+  { username: 'checker1', password: 'Checker#2026', role: 'checker', driverVehicleId: '' },
+  { username: 'picker1', password: 'Picker#2026', role: 'picker', driverVehicleId: '' },
+  { username: 'driver1', password: 'Driver#2026', role: 'driver', driverVehicleId: 'veh-a' },
+];
+
+function rowToUser(r: UserPgRow): UserRecord {
+  return {
+    username: r.username,
+    passwordHash: r.password_hash,
+    role: r.role,
+    active: r.active,
+    driverVehicleId: r.driver_vehicle_id,
+    createdAt: r.created_at ? new Date(r.created_at).toISOString() : '',
+  };
+}
+
+async function readUsersPg(sql: ReturnType<typeof getDb>): Promise<UserRecord[]> {
+  const rows = await sql<UserPgRow[]>`SELECT username, password_hash, role, active, driver_vehicle_id, created_at FROM users ORDER BY username`;
+  if (rows.length > 0) return rows.map(rowToUser);
+
+  // Brand new database (schema applied, never seeded) — bootstrap the same
+  // throwaway accounts the old Sheets version created on first touch.
+  const seedRows = DEFAULT_USER_SEEDS.map((s) => [s.username, hashPassword(s.password), s.role, true, s.driverVehicleId]);
+  await sql`INSERT INTO users (username, password_hash, role, active, driver_vehicle_id) VALUES ${sql(bulkRows(seedRows))}`;
+  const seeded = await sql<UserPgRow[]>`SELECT username, password_hash, role, active, driver_vehicle_id, created_at FROM users ORDER BY username`;
+  return seeded.map(rowToUser);
 }
 
 export async function handleLogin(body: unknown): Promise<ApiResult> {
@@ -328,8 +253,7 @@ export async function handleLogin(body: unknown): Promise<ApiResult> {
     return { status: 400, body: { error: 'ต้องระบุ username และ password' } };
   }
   try {
-    const sheets = await getSheetsClient();
-    const users = await readUsers(sheets);
+    const users = await readUsersPg(getDb());
     const user = users.find((u) => u.username.toLowerCase() === username.trim().toLowerCase());
     if (!user || !user.active || !verifyPassword(password, user.passwordHash)) {
       return { status: 401, body: { error: 'username หรือ password ไม่ถูกต้อง' } };
@@ -356,8 +280,7 @@ export async function handleListUsers(token: string | null): Promise<ApiResult> 
     return { status: 403, body: { error: 'ไม่มีสิทธิ์เข้าถึงหน้านี้' } };
   }
   try {
-    const sheets = await getSheetsClient();
-    const users = await readUsers(sheets);
+    const users = await readUsersPg(getDb());
     return {
       status: 200,
       body: { users: users.map((u) => ({ username: u.username, role: u.role, active: u.active, driverVehicleId: u.driverVehicleId, createdAt: u.createdAt })) },
@@ -381,20 +304,15 @@ export async function handleCreateUser(token: string | null, body: unknown): Pro
   }
 
   try {
-    const sheets = await getSheetsClient();
-    const users = await readUsers(sheets);
+    const sql = getDb();
+    const users = await readUsersPg(sql);
     if (users.some((u) => u.username.toLowerCase() === username.trim().toLowerCase())) {
       return { status: 409, body: { error: `username "${username}" มีอยู่แล้ว` } };
     }
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: MAIN_SHEET_ID,
-      range: `${USERS_TAB_TITLE}!A:F`,
-      valueInputOption: 'RAW',
-      insertDataOption: 'INSERT_ROWS',
-      requestBody: {
-        values: [[username.trim(), hashPassword(password), role, 'TRUE', typeof driverVehicleId === 'string' ? driverVehicleId : '', new Date().toISOString()]],
-      },
-    });
+    await sql`
+      INSERT INTO users (username, password_hash, role, active, driver_vehicle_id)
+      VALUES (${username.trim()}, ${hashPassword(password)}, ${role}, true, ${typeof driverVehicleId === 'string' ? driverVehicleId : ''})
+    `;
     return { status: 200, body: { ok: true } };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'สร้างผู้ใช้ไม่สำเร็จ';
@@ -417,8 +335,8 @@ export async function handleUpdateUser(token: string | null, body: unknown): Pro
   }
 
   try {
-    const sheets = await getSheetsClient();
-    const users = await readUsers(sheets);
+    const sql = getDb();
+    const users = await readUsersPg(sql);
     const user = users.find((u) => u.username.toLowerCase() === username.trim().toLowerCase());
     if (!user) return { status: 404, body: { error: `ไม่พบผู้ใช้ "${username}"` } };
 
@@ -427,12 +345,10 @@ export async function handleUpdateUser(token: string | null, body: unknown): Pro
     const nextDriverVehicleId = typeof driverVehicleId === 'string' ? driverVehicleId : user.driverVehicleId;
     const nextPasswordHash = typeof newPassword === 'string' ? hashPassword(newPassword) : user.passwordHash;
 
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: MAIN_SHEET_ID,
-      range: `${USERS_TAB_TITLE}!A${user.rowIndex}:F${user.rowIndex}`,
-      valueInputOption: 'RAW',
-      requestBody: { values: [[user.username, nextPasswordHash, nextRole, nextActive ? 'TRUE' : 'FALSE', nextDriverVehicleId, user.createdAt]] },
-    });
+    await sql`
+      UPDATE users SET role = ${nextRole}, active = ${nextActive}, driver_vehicle_id = ${nextDriverVehicleId}, password_hash = ${nextPasswordHash}
+      WHERE username = ${user.username}
+    `;
     return { status: 200, body: { ok: true } };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'แก้ไขผู้ใช้ไม่สำเร็จ';
@@ -445,17 +361,14 @@ export async function handleUpdateUser(token: string | null, body: unknown): Pro
 // A driver can't assign themselves into a batch route directly (that stays
 // manager/admin-only, unchanged) — instead they "book" an unassigned order
 // here as a request, which a manager/admin then confirms (adding it to that
-// driver's vehicle plan, same as a normal Assign) or rejects. Lives in its
-// own "Bookings" tab, same reasoning as the Users tab: needs to be visible
-// to every driver and every manager/admin at once, which localStorage
-// (what routePlan/batchRoutes use) can never provide across devices — this
-// is the one piece of planner state that genuinely has to be server-side.
-const BOOKINGS_TAB_TITLE = 'Bookings';
-const BOOKINGS_HEADER = ['orderNo', 'driverUsername', 'driverVehicleId', 'status', 'bookedAt', 'decidedBy', 'decidedAt', 'note'];
+// driver's vehicle plan, same as a normal Assign) or rejects. Lives in
+// Postgres's `delivery_bookings` table — needs to be visible to every driver
+// and every manager/admin at once, which localStorage (what routePlan/
+// batchRoutes use) can never provide across devices.
 type BookingStatus = 'pending' | 'confirmed' | 'rejected';
 
 interface BookingRecord {
-  rowIndex: number;
+  id: number;
   orderNo: string;
   driverUsername: string;
   driverVehicleId: string;
@@ -466,50 +379,31 @@ interface BookingRecord {
   note: string;
 }
 
-async function ensureBookingsSheet(sheets: SheetsClient): Promise<void> {
-  const meta = await sheets.spreadsheets.get({ spreadsheetId: MAIN_SHEET_ID });
-  const exists = meta.data.sheets?.some((s) => s.properties?.title === BOOKINGS_TAB_TITLE);
-  if (exists) return;
-
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId: MAIN_SHEET_ID,
-    requestBody: { requests: [{ addSheet: { properties: { title: BOOKINGS_TAB_TITLE } } }] },
-  });
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: MAIN_SHEET_ID,
-    range: `${BOOKINGS_TAB_TITLE}!A1:H1`,
-    valueInputOption: 'RAW',
-    requestBody: { values: [BOOKINGS_HEADER] },
-  });
+interface BookingPgRow {
+  id: number;
+  order_uid: string;
+  driver_username: string;
+  driver_vehicle_id: string;
+  status: string;
+  booked_at: Date | string;
+  decided_by: string;
+  decided_at: Date | string | null;
+  note: string;
 }
 
-async function readBookings(sheets: SheetsClient): Promise<BookingRecord[]> {
-  await ensureBookingsSheet(sheets);
-  const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${BOOKINGS_TAB_TITLE}!A:H` });
-  const rows = res.data.values ?? [];
-  const out: BookingRecord[] = [];
-  for (let i = 1; i < rows.length; i++) {
-    const r = rows[i] ?? [];
-    const orderNo = String(r[0] ?? '').trim();
-    if (!orderNo) continue;
-    const status = String(r[3] ?? '').trim();
-    out.push({
-      rowIndex: i + 1,
-      orderNo,
-      driverUsername: String(r[1] ?? '').trim(),
-      driverVehicleId: String(r[2] ?? '').trim(),
-      status: status === 'confirmed' || status === 'rejected' ? status : 'pending',
-      bookedAt: String(r[4] ?? '').trim(),
-      decidedBy: String(r[5] ?? '').trim(),
-      decidedAt: String(r[6] ?? '').trim(),
-      note: String(r[7] ?? '').trim(),
-    });
-  }
-  return out;
-}
-
-function bookingRowValues(b: BookingRecord): unknown[] {
-  return [b.orderNo, b.driverUsername, b.driverVehicleId, b.status, b.bookedAt, b.decidedBy, b.decidedAt, b.note];
+function rowToBooking(r: BookingPgRow): BookingRecord {
+  const status = r.status;
+  return {
+    id: r.id,
+    orderNo: r.order_uid,
+    driverUsername: r.driver_username,
+    driverVehicleId: r.driver_vehicle_id,
+    status: status === 'confirmed' || status === 'rejected' ? status : 'pending',
+    bookedAt: new Date(r.booked_at).toISOString(),
+    decidedBy: r.decided_by,
+    decidedAt: r.decided_at ? new Date(r.decided_at).toISOString() : '',
+    note: r.note,
+  };
 }
 
 /** Any authenticated user can list bookings — drivers need to see what's
@@ -520,8 +414,8 @@ export async function handleListBookings(token: string | null): Promise<ApiResul
   const payload = verifySessionToken(token);
   if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
   try {
-    const sheets = await getSheetsClient();
-    const bookings = await readBookings(sheets);
+    const rows = await getDb()<BookingPgRow[]>`SELECT * FROM delivery_bookings ORDER BY id`;
+    const bookings = rows.map(rowToBooking);
     return {
       status: 200,
       body: {
@@ -544,13 +438,13 @@ export async function handleListBookings(token: string | null): Promise<ApiResul
 }
 
 /** Driver-only: request one or more unassigned orders. Two drivers racing
- * for the same order is resolved as first-write-wins, arbitrated by actual
- * row order in the sheet (Google Sheets serializes writes to one
- * spreadsheet, so whichever append the API processed first lands in the
- * lower row) — not by request arrival order at this function, which two
- * concurrent serverless invocations can't otherwise agree on. Whoever's row
- * isn't first for its orderNo gets demoted to 'rejected' immediately and
- * reported back as a conflict, rather than left as a second live booking. */
+ * for the same order is resolved as first-write-wins, arbitrated by the
+ * auto-increment `id` (Postgres assigns these in insert order, so whichever
+ * insert the database processed first gets the lower id) — not by request
+ * arrival order at this function, which two concurrent serverless
+ * invocations can't otherwise agree on. Whoever's row isn't first for its
+ * orderNo gets demoted to 'rejected' immediately and reported back as a
+ * conflict, rather than left as a second live booking. */
 export async function handleCreateBookings(token: string | null, body: unknown): Promise<ApiResult> {
   const payload = verifySessionToken(token);
   if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
@@ -567,9 +461,9 @@ export async function handleCreateBookings(token: string | null, body: unknown):
   if (wanted.length === 0) return { status: 400, body: { error: 'ไม่มีเลขคำสั่งซื้อที่ถูกต้อง' } };
 
   try {
-    const sheets = await getSheetsClient();
-    const existing = await readBookings(sheets);
-    const activeOrderNos = new Set(existing.filter((b) => b.status === 'pending' || b.status === 'confirmed').map((b) => b.orderNo));
+    const sql = getDb();
+    const existing = (await sql<BookingPgRow[]>`SELECT * FROM delivery_bookings WHERE status IN ('pending', 'confirmed')`).map(rowToBooking);
+    const activeOrderNos = new Set(existing.map((b) => b.orderNo));
     const alreadyTaken = wanted.filter((n) => activeOrderNos.has(n));
     const toCreate = wanted.filter((n) => !activeOrderNos.has(n));
 
@@ -578,41 +472,22 @@ export async function handleCreateBookings(token: string | null, body: unknown):
     }
 
     const bookedAt = new Date().toISOString();
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: MAIN_SHEET_ID,
-      range: `${BOOKINGS_TAB_TITLE}!A:H`,
-      valueInputOption: 'RAW',
-      insertDataOption: 'INSERT_ROWS',
-      requestBody: {
-        values: toCreate.map((orderNo) => bookingRowValues({
-          rowIndex: -1, orderNo, driverUsername: payload.username, driverVehicleId: payload.driverVehicleId!,
-          status: 'pending', bookedAt, decidedBy: '', decidedAt: '', note: '',
-        })),
-      },
-    });
+    const insertRows = toCreate.map((orderNo) => [orderNo, payload.username, payload.driverVehicleId!, 'pending', bookedAt]);
+    await sql`INSERT INTO delivery_bookings (order_uid, driver_username, driver_vehicle_id, status, booked_at) VALUES ${sql(bulkRows(insertRows))}`;
 
     // Re-read and resolve: for each order just requested, whichever active
-    // row now has the lowest row index actually won it.
-    const after = await readBookings(sheets);
+    // row now has the lowest id actually won it.
+    const after = (await sql<BookingPgRow[]>`SELECT * FROM delivery_bookings WHERE order_uid = ANY(${toCreate}) AND status IN ('pending', 'confirmed')`).map(rowToBooking);
     const created: string[] = [];
     const conflicts: string[] = [...alreadyTaken];
     for (const orderNo of toCreate) {
-      const rowsForOrder = after
-        .filter((b) => b.orderNo === orderNo && (b.status === 'pending' || b.status === 'confirmed'))
-        .sort((a, b) => a.rowIndex - b.rowIndex);
+      const rowsForOrder = after.filter((b) => b.orderNo === orderNo).sort((a, b) => a.id - b.id);
       const winner = rowsForOrder[0];
       const mine = after.find((b) => b.orderNo === orderNo && b.driverUsername === payload.username && b.status === 'pending' && b.bookedAt === bookedAt);
-      if (mine && winner && winner.rowIndex === mine.rowIndex) {
+      if (mine && winner && winner.id === mine.id) {
         created.push(orderNo);
       } else if (mine) {
-        await sheets.spreadsheets.values.update({
-          spreadsheetId: MAIN_SHEET_ID,
-          range: `${BOOKINGS_TAB_TITLE}!A${mine.rowIndex}:H${mine.rowIndex}`,
-          valueInputOption: 'RAW',
-          requestBody: {
-            values: [bookingRowValues({ ...mine, status: 'rejected', decidedBy: 'system', decidedAt: new Date().toISOString(), note: 'ชนกับคำขอจองอื่นที่มาถึงก่อน' })],
-          },
-        });
+        await sql`UPDATE delivery_bookings SET status = 'rejected', decided_by = 'system', decided_at = now(), note = 'ชนกับคำขอจองอื่นที่มาถึงก่อน' WHERE id = ${mine.id}`;
         conflicts.push(orderNo);
       }
     }
@@ -640,24 +515,14 @@ export async function handleDecideBooking(token: string | null, body: unknown): 
   if (decision !== 'confirm' && decision !== 'reject') return { status: 400, body: { error: 'decision ต้องเป็น confirm หรือ reject' } };
 
   try {
-    const sheets = await getSheetsClient();
-    const bookings = await readBookings(sheets);
-    const booking = bookings.find((b) => b.orderNo === orderNo.trim() && b.status === 'pending');
-    if (!booking) return { status: 404, body: { error: 'ไม่พบคำขอจองที่รอดำเนินการสำหรับออเดอร์นี้ — อาจถูกตัดสินใจไปแล้ว' } };
+    const sql = getDb();
+    const [row] = await sql<BookingPgRow[]>`SELECT * FROM delivery_bookings WHERE order_uid = ${orderNo.trim()} AND status = 'pending' ORDER BY id LIMIT 1`;
+    if (!row) return { status: 404, body: { error: 'ไม่พบคำขอจองที่รอดำเนินการสำหรับออเดอร์นี้ — อาจถูกตัดสินใจไปแล้ว' } };
+    const booking = rowToBooking(row);
 
-    const next: BookingRecord = {
-      ...booking,
-      status: decision === 'confirm' ? 'confirmed' : 'rejected',
-      decidedBy: payload.username,
-      decidedAt: new Date().toISOString(),
-      note: typeof note === 'string' ? note.trim() : '',
-    };
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: MAIN_SHEET_ID,
-      range: `${BOOKINGS_TAB_TITLE}!A${booking.rowIndex}:H${booking.rowIndex}`,
-      valueInputOption: 'RAW',
-      requestBody: { values: [bookingRowValues(next)] },
-    });
+    const nextStatus = decision === 'confirm' ? 'confirmed' : 'rejected';
+    const nextNote = typeof note === 'string' ? note.trim() : '';
+    await sql`UPDATE delivery_bookings SET status = ${nextStatus}, decided_by = ${payload.username}, decided_at = now(), note = ${nextNote} WHERE id = ${booking.id}`;
     return { status: 200, body: { ok: true, driverUsername: booking.driverUsername, driverVehicleId: booking.driverVehicleId } };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'ยืนยัน/ปฏิเสธคำขอจองคิวไม่สำเร็จ';
@@ -667,20 +532,20 @@ export async function handleDecideBooking(token: string | null, body: unknown): 
 
 // ---------- Batch Routes ----------
 // A "Batch Route" is a vehicle's locked delivery run for one day, created by
-// the Planner's "Assign" step. Originally local-only (localStorage), but a
-// driver logging in from their own phone — a different browser than
-// whichever admin planned the route — would never see it: same reasoning as
-// Bookings above, this now gets a real Sheet tab too so date-selection on
-// Driver View works across devices, not just same-browser.
-const BATCH_ROUTES_TAB_TITLE = 'Batch Routes';
-const BATCH_ROUTES_HEADER = [
-  'id', 'vehicleId', 'vehicleName', 'deliveryDate', 'orderNos', 'createdAt', 'createdBy',
-  'updatedAt', 'updatedBy', 'locked', 'codClosed', 'codClosedAt', 'codClosedBy',
-  'cancelled', 'cancelledAt', 'cancelledBy',
-];
-
+// the Planner's "Assign" step. Lives in Postgres's `batch_routes` table —
+// needed across devices (a driver's phone, the office desktop planning it)
+// the same way Bookings does.
+//
+// orderNos is NOT a stored column (unlike the old Sheets version) — batch
+// membership is normalized onto orders.batch_route_id (a foreign key), and
+// stop sequence within the batch onto orders.stop_sequence (see
+// db/migrations/0002_writeback_support.sql). The one exception: a CANCELLED
+// batch's orders get batch_route_id cleared (freeing them for re-planning),
+// so its "what did this used to contain" history is preserved separately in
+// batch_routes.cancelled_order_uids, snapshotted at the moment of
+// cancellation. handleListBatchRoutes reads whichever is appropriate;
+// handleUpsertBatchRoutes is what reconciles orders' FK/sequence to match.
 interface BatchRouteRecord {
-  rowIndex: number;
   id: string;
   vehicleId: string;
   vehicleName: string;
@@ -699,80 +564,60 @@ interface BatchRouteRecord {
   cancelledBy: string;
 }
 
-async function ensureBatchRoutesSheet(sheets: SheetsClient): Promise<void> {
-  const meta = await sheets.spreadsheets.get({ spreadsheetId: MAIN_SHEET_ID });
-  const exists = meta.data.sheets?.some((s) => s.properties?.title === BATCH_ROUTES_TAB_TITLE);
-  if (!exists) {
-    await sheets.spreadsheets.batchUpdate({
-      spreadsheetId: MAIN_SHEET_ID,
-      requestBody: { requests: [{ addSheet: { properties: { title: BATCH_ROUTES_TAB_TITLE } } }] },
-    });
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: MAIN_SHEET_ID,
-      range: `${BATCH_ROUTES_TAB_TITLE}!A1:P1`,
-      valueInputOption: 'RAW',
-      requestBody: { values: [BATCH_ROUTES_HEADER] },
-    });
-    return;
-  }
-
-  // A sheet created before the cancelled/cancelledAt/cancelledBy columns
-  // existed keeps its old, shorter header row — back it up to the full
-  // header (additive only, row 1 only) so those columns actually get
-  // labeled instead of silently reading as blank forever.
-  const headerRes = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${BATCH_ROUTES_TAB_TITLE}!A1:P1` });
-  const currentHeader = headerRes.data.values?.[0] ?? [];
-  if (currentHeader.length < BATCH_ROUTES_HEADER.length) {
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: MAIN_SHEET_ID,
-      range: `${BATCH_ROUTES_TAB_TITLE}!A1:P1`,
-      valueInputOption: 'RAW',
-      requestBody: { values: [BATCH_ROUTES_HEADER] },
-    });
-  }
+interface BatchRoutePgRow {
+  id: string;
+  vehicle_id: string;
+  vehicle_name: string;
+  delivery_date: string | null;
+  created_at: Date | string | null;
+  created_by: string;
+  updated_at: Date | string | null;
+  updated_by: string;
+  locked: boolean;
+  cod_closed: boolean;
+  cod_closed_at: Date | string | null;
+  cod_closed_by: string;
+  cancelled: boolean;
+  cancelled_at: Date | string | null;
+  cancelled_by: string;
+  cancelled_order_uids: string[] | null;
+  live_order_uids: string[];
 }
 
-// orderNos is the one array-valued field — order numbers observed in this
-// sheet are plain alphanumeric-with-hyphens, so "|" is a safe, human-readable
-// join that will never collide with a real value.
-async function readBatchRoutes(sheets: SheetsClient): Promise<BatchRouteRecord[]> {
-  await ensureBatchRoutesSheet(sheets);
-  const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${BATCH_ROUTES_TAB_TITLE}!A:P` });
-  const rows = res.data.values ?? [];
-  const out: BatchRouteRecord[] = [];
-  for (let i = 1; i < rows.length; i++) {
-    const r = rows[i] ?? [];
-    const id = String(r[0] ?? '').trim();
-    if (!id) continue;
-    out.push({
-      rowIndex: i + 1,
-      id,
-      vehicleId: String(r[1] ?? '').trim(),
-      vehicleName: String(r[2] ?? '').trim(),
-      deliveryDate: String(r[3] ?? '').trim(),
-      orderNos: String(r[4] ?? '').split('|').map((s) => s.trim()).filter(Boolean),
-      createdAt: String(r[5] ?? '').trim(),
-      createdBy: String(r[6] ?? '').trim(),
-      updatedAt: String(r[7] ?? '').trim(),
-      updatedBy: String(r[8] ?? '').trim(),
-      locked: String(r[9] ?? '').trim().toUpperCase() === 'TRUE',
-      codClosed: String(r[10] ?? '').trim().toUpperCase() === 'TRUE',
-      codClosedAt: String(r[11] ?? '').trim(),
-      codClosedBy: String(r[12] ?? '').trim(),
-      cancelled: String(r[13] ?? '').trim().toUpperCase() === 'TRUE',
-      cancelledAt: String(r[14] ?? '').trim(),
-      cancelledBy: String(r[15] ?? '').trim(),
-    });
-  }
-  return out;
+async function readBatchRoutesRawPg(sql: ReturnType<typeof getDb>): Promise<BatchRoutePgRow[]> {
+  return sql<BatchRoutePgRow[]>`
+    SELECT
+      br.id, br.vehicle_id, br.vehicle_name, br.delivery_date::text AS delivery_date,
+      br.created_at, br.created_by, br.updated_at, br.updated_by,
+      br.locked, br.cod_closed, br.cod_closed_at, br.cod_closed_by,
+      br.cancelled, br.cancelled_at, br.cancelled_by, br.cancelled_order_uids,
+      COALESCE(array_agg(o.order_uid ORDER BY o.stop_sequence) FILTER (WHERE o.order_uid IS NOT NULL), '{}') AS live_order_uids
+    FROM batch_routes br
+    LEFT JOIN orders o ON o.batch_route_id = br.id
+    GROUP BY br.id
+    ORDER BY br.created_at
+  `;
 }
 
-function batchRouteRowValues(b: Omit<BatchRouteRecord, 'rowIndex'>): unknown[] {
-  return [
-    b.id, b.vehicleId, b.vehicleName, b.deliveryDate, b.orderNos.join('|'), b.createdAt, b.createdBy,
-    b.updatedAt, b.updatedBy, b.locked ? 'TRUE' : 'FALSE', b.codClosed ? 'TRUE' : 'FALSE', b.codClosedAt, b.codClosedBy,
-    b.cancelled ? 'TRUE' : 'FALSE', b.cancelledAt, b.cancelledBy,
-  ];
+function batchRouteRecordFromRow(r: BatchRoutePgRow): BatchRouteRecord {
+  return {
+    id: r.id,
+    vehicleId: r.vehicle_id,
+    vehicleName: r.vehicle_name,
+    deliveryDate: r.delivery_date ?? '',
+    orderNos: r.cancelled ? (r.cancelled_order_uids ?? []) : r.live_order_uids,
+    createdAt: r.created_at ? new Date(r.created_at).toISOString() : '',
+    createdBy: r.created_by,
+    updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : '',
+    updatedBy: r.updated_by,
+    locked: r.locked,
+    codClosed: r.cod_closed,
+    codClosedAt: r.cod_closed_at ? new Date(r.cod_closed_at).toISOString() : '',
+    codClosedBy: r.cod_closed_by,
+    cancelled: r.cancelled,
+    cancelledAt: r.cancelled_at ? new Date(r.cancelled_at).toISOString() : '',
+    cancelledBy: r.cancelled_by,
+  };
 }
 
 /** Any authenticated user can list batch routes — same reasoning as
@@ -783,14 +628,8 @@ export async function handleListBatchRoutes(token: string | null): Promise<ApiRe
   const payload = verifySessionToken(token);
   if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
   try {
-    const sheets = await getSheetsClient();
-    const records = await readBatchRoutes(sheets);
-    return {
-      status: 200,
-      body: {
-        batchRoutes: records.map(({ rowIndex: _rowIndex, ...b }) => b),
-      },
-    };
+    const rows = await readBatchRoutesRawPg(getDb());
+    return { status: 200, body: { batchRoutes: rows.map(batchRouteRecordFromRow) } };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'โหลด Batch Route ไม่สำเร็จ';
     return { status: 500, body: { error: message } };
@@ -799,7 +638,16 @@ export async function handleListBatchRoutes(token: string | null): Promise<ApiRe
 
 /** Bulk upsert — the client always sends its whole current batchRoutes list
  * (never large: a handful of vehicles × at most a couple of batches each per
- * day), matched back to sheet rows by id; unmatched ids are appended.
+ * day), matched by id; unmatched ids are created.
+ *
+ * Unlike the old Sheets version, this single call now ALSO reconciles every
+ * affected order's batch_route_id/route/assigned_driver/stop_sequence to
+ * match each batch's orderNos, transactionally — previously this required a
+ * second, entirely separate round trip per order (stampCourierOrders writing
+ * "คนส่ง" on the คำสั่งซื้อ VS tab) that could partially fail independently of
+ * the batch-route write itself (see the now-removed courierStampWarning on
+ * the frontend). Folding both into one Postgres transaction removes that
+ * whole class of "batch says X but the order still shows Y" inconsistency.
  *
  * administrator/manager/admin_staff may write any field (this mirrors the
  * exact same set of roles the Planner's own batch-editing actions already
@@ -823,7 +671,7 @@ export async function handleUpsertBatchRoutes(token: string | null, body: unknow
   const { batchRoutes } = (body ?? {}) as Record<string, unknown>;
   if (!Array.isArray(batchRoutes)) return { status: 400, body: { error: 'ต้องระบุ batchRoutes เป็น array' } };
 
-  const incoming: Omit<BatchRouteRecord, 'rowIndex'>[] = [];
+  const incoming: BatchRouteRecord[] = [];
   for (const raw of batchRoutes) {
     const b = (raw ?? {}) as Record<string, unknown>;
     if (typeof b.id !== 'string' || !b.id.trim()) return { status: 400, body: { error: 'batchRoutes ทุกรายการต้องมี id' } };
@@ -833,7 +681,7 @@ export async function handleUpsertBatchRoutes(token: string | null, body: unknow
       vehicleName: typeof b.vehicleName === 'string' ? b.vehicleName : '',
       deliveryDate: typeof b.deliveryDate === 'string' ? b.deliveryDate : '',
       orderNos: Array.isArray(b.orderNos) ? b.orderNos.filter((n): n is string => typeof n === 'string') : [],
-      createdAt: typeof b.createdAt === 'string' ? b.createdAt : '',
+      createdAt: typeof b.createdAt === 'string' && b.createdAt ? b.createdAt : new Date().toISOString(),
       createdBy: typeof b.createdBy === 'string' ? b.createdBy : '',
       updatedAt: typeof b.updatedAt === 'string' ? b.updatedAt : new Date().toISOString(),
       updatedBy: typeof b.updatedBy === 'string' ? b.updatedBy : payload.username,
@@ -848,9 +696,10 @@ export async function handleUpsertBatchRoutes(token: string | null, body: unknow
   }
 
   try {
-    const sheets = await getSheetsClient();
-    const existing = await readBatchRoutes(sheets);
-    const existingById = new Map(existing.map((b) => [b.id, b]));
+    const sql = getDb();
+    const existingRaw = await readBatchRoutesRawPg(sql);
+    const existingRawById = new Map(existingRaw.map((r) => [r.id, r]));
+    const existingById = new Map(existingRaw.map((r) => [r.id, batchRouteRecordFromRow(r)]));
 
     if (payload.role === 'driver') {
       for (const b of incoming) {
@@ -880,28 +729,69 @@ export async function handleUpsertBatchRoutes(token: string | null, body: unknow
       }
     }
 
-    const updates: { range: string; values: unknown[][] }[] = [];
-    const appends: unknown[][] = [];
-    for (const b of incoming) {
-      const cur = existingById.get(b.id);
-      if (cur) {
-        updates.push({ range: `${BATCH_ROUTES_TAB_TITLE}!A${cur.rowIndex}:P${cur.rowIndex}`, values: [batchRouteRowValues(b)] });
-      } else {
-        appends.push(batchRouteRowValues(b));
+    const users = await readUsersPg(sql);
+
+    await sql.begin(async (tx) => {
+      for (const b of incoming) {
+        const curRaw = existingRawById.get(b.id);
+        const wasAlreadyCancelled = curRaw?.cancelled ?? false;
+        const isNewlyCancelled = b.cancelled && !wasAlreadyCancelled;
+        const cancelledSnapshot = isNewlyCancelled ? (curRaw?.live_order_uids ?? b.orderNos) : (curRaw?.cancelled_order_uids ?? null);
+
+        await tx`
+          INSERT INTO batch_routes (
+            id, vehicle_id, vehicle_name, delivery_date, created_at, created_by, updated_at, updated_by,
+            locked, cod_closed, cod_closed_at, cod_closed_by, cancelled, cancelled_at, cancelled_by, cancelled_order_uids
+          )
+          VALUES (
+            ${b.id}, ${b.vehicleId}, ${b.vehicleName}, ${b.deliveryDate || null}, ${b.createdAt || null}, ${b.createdBy},
+            ${b.updatedAt}, ${b.updatedBy}, ${b.locked}, ${b.codClosed}, ${b.codClosedAt || null}, ${b.codClosedBy},
+            ${b.cancelled}, ${b.cancelledAt || null}, ${b.cancelledBy}, ${cancelledSnapshot}
+          )
+          ON CONFLICT (id) DO UPDATE SET
+            vehicle_id = EXCLUDED.vehicle_id, vehicle_name = EXCLUDED.vehicle_name, delivery_date = EXCLUDED.delivery_date,
+            updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by, locked = EXCLUDED.locked,
+            cod_closed = EXCLUDED.cod_closed, cod_closed_at = EXCLUDED.cod_closed_at, cod_closed_by = EXCLUDED.cod_closed_by,
+            cancelled = EXCLUDED.cancelled, cancelled_at = EXCLUDED.cancelled_at, cancelled_by = EXCLUDED.cancelled_by,
+            cancelled_order_uids = EXCLUDED.cancelled_order_uids
+        `;
+
+        const previousLiveMembers = curRaw?.live_order_uids ?? [];
+        if (b.cancelled) {
+          if (previousLiveMembers.length > 0) {
+            await tx`
+              UPDATE orders SET batch_route_id = NULL, route = '', assigned_driver = '', assigned_at = NULL, stop_sequence = NULL, updated_at = now()
+              WHERE batch_route_id = ${b.id}
+            `;
+          }
+        } else {
+          const desired = new Set(b.orderNos);
+          const toRemove = previousLiveMembers.filter((id) => !desired.has(id));
+          if (toRemove.length > 0) {
+            await tx`
+              UPDATE orders SET batch_route_id = NULL, route = '', assigned_driver = '', assigned_at = NULL, stop_sequence = NULL, updated_at = now()
+              WHERE order_uid = ANY(${toRemove}) AND batch_route_id = ${b.id}
+            `;
+          }
+          if (b.orderNos.length > 0) {
+            // Driver's own display name is their username, resolved here
+            // (never sent from the frontend) — same reasoning the old
+            // courier-stamp write used: listing Users is admin/manager-only
+            // and admin_staff, who can also run the Planner, has no access
+            // to /api/users.
+            const driver = users.find((u) => u.active && u.role === 'driver' && u.driverVehicleId === b.vehicleId);
+            for (let i = 0; i < b.orderNos.length; i++) {
+              await tx`
+                UPDATE orders SET
+                  batch_route_id = ${b.id}, route = ${b.vehicleName}, assigned_driver = ${driver?.username ?? ''},
+                  assigned_at = COALESCE(assigned_at, now()), stop_sequence = ${i}, updated_at = now()
+                WHERE order_uid = ${b.orderNos[i]}
+              `;
+            }
+          }
+        }
       }
-    }
-    for (const u of updates) {
-      await sheets.spreadsheets.values.update({ spreadsheetId: MAIN_SHEET_ID, range: u.range, valueInputOption: 'RAW', requestBody: { values: u.values } });
-    }
-    if (appends.length > 0) {
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: MAIN_SHEET_ID,
-        range: `${BATCH_ROUTES_TAB_TITLE}!A:P`,
-        valueInputOption: 'RAW',
-        insertDataOption: 'INSERT_ROWS',
-        requestBody: { values: appends },
-      });
-    }
+    });
 
     return { status: 200, body: { ok: true } };
   } catch (err: unknown) {
@@ -917,18 +807,25 @@ export function handleHealth(): ApiResult {
     body: {
       ok: true,
       serviceAccountConfigured: configured,
+      databaseConfigured: !!process.env.DATABASE_URL?.trim(),
       driveFolderConfigured: !!process.env[DRIVE_ROOT_FOLDER_ENV]?.trim(),
       driveMockMode: !configured || !process.env[DRIVE_ROOT_FOLDER_ENV]?.trim(),
     },
   };
 }
 
+/** Customer lat/lng override — see db/README.md's customers table notes.
+ * Matched by phone (the table's primary key), not name+phone fuzzy matching
+ * like the old Sheets version needed (real sheet rows had no enforced
+ * uniqueness at all). A customer never seen before (no row yet — the
+ * migration script only captured what existed at the time it ran) gets one
+ * created on the spot rather than rejected with 404; this endpoint still
+ * only ever touches lat_override/lng_override, same field-level restriction
+ * as before — name is accepted only to seed name_from_unii on that first
+ * insert, never overwritten on an existing row. */
 export async function handleUpdateCsMasterLocation(token: string | null, body: unknown): Promise<ApiResult> {
   const payload = verifySessionToken(token);
   if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
-  // This endpoint only ever writes lat/lng, never any other customer field —
-  // which is exactly the narrower permission a driver has here, so allowing
-  // them through this specific endpoint is itself the field-level restriction.
   if (!['administrator', 'manager', 'admin_staff', 'driver'].includes(payload.role)) {
     return { status: 403, body: { error: 'ไม่มีสิทธิ์แก้ไขพิกัดลูกค้า' } };
   }
@@ -938,6 +835,9 @@ export async function handleUpdateCsMasterLocation(token: string | null, body: u
   if (typeof name !== 'string' || name.trim() === '') {
     return { status: 400, body: { error: 'ต้องระบุชื่อลูกค้า' } };
   }
+  if (typeof phone !== 'string' || phone.trim() === '') {
+    return { status: 400, body: { error: 'ต้องระบุเบอร์โทรลูกค้า' } };
+  }
   if (typeof lat !== 'number' || typeof lng !== 'number' || !Number.isFinite(lat) || !Number.isFinite(lng)) {
     return { status: 400, body: { error: 'lat/lng ต้องเป็นตัวเลข' } };
   }
@@ -946,46 +846,12 @@ export async function handleUpdateCsMasterLocation(token: string | null, body: u
   }
 
   try {
-    const sheets = await getSheetsClient();
-    const title = await resolveSheetTitle(sheets, CS_MASTER_GID);
-
-    const current = await sheets.spreadsheets.values.get({
-      spreadsheetId: MAIN_SHEET_ID,
-      range: `${title}!A:E`,
-    });
-    const rows = current.data.values ?? [];
-
-    // Row 1 is the header; match on name + phone so we update in place
-    // rather than appending a duplicate.
-    const wantedName = name.trim();
-    const wantedPhone = typeof phone === 'string' ? phoneKey(phone) : '';
-    const matches: number[] = [];
-    for (let i = 1; i < rows.length; i++) {
-      const rowName = String(rows[i]?.[NAME_COLUMN_INDEX] ?? '').trim();
-      const rowPhone = phoneKey(String(rows[i]?.[PHONE_COLUMN_INDEX] ?? ''));
-      if (rowName === wantedName && (wantedPhone === '' || rowPhone === wantedPhone)) {
-        matches.push(i + 1); // sheet rows are 1-based
-      }
-    }
-
-    if (matches.length === 0) {
-      return { status: 404, body: { error: `ไม่พบลูกค้า "${wantedName}" ในชีท CS Master` } };
-    }
-    // Refuse to guess when the identifiers are ambiguous — writing to the
-    // wrong customer's row is worse than making someone disambiguate.
-    if (matches.length > 1) {
-      return { status: 409, body: { error: `พบลูกค้าชื่อ "${wantedName}" ซ้ำกัน ${matches.length} แถว (แถว ${matches.join(', ')}) — โปรดแก้ไขในชีทโดยตรง` } };
-    }
-    const targetRow = matches[0];
-
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: MAIN_SHEET_ID,
-      range: `${title}!${LAT_COLUMN}${targetRow}:${LNG_COLUMN}${targetRow}`,
-      valueInputOption: 'RAW',
-      requestBody: { values: [[lat, lng]] },
-    });
-
-    return { status: 200, body: { ok: true, updatedRow: targetRow } };
+    await getDb()`
+      INSERT INTO customers (phone, name_from_unii, lat_override, lng_override)
+      VALUES (${phone.trim()}, ${name.trim()}, ${lat}, ${lng})
+      ON CONFLICT (phone) DO UPDATE SET lat_override = EXCLUDED.lat_override, lng_override = EXCLUDED.lng_override, updated_at = now()
+    `;
+    return { status: 200, body: { ok: true } };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
     console.error('[cs-master/update-location]', message);
@@ -993,25 +859,93 @@ export async function handleUpdateCsMasterLocation(token: string | null, body: u
   }
 }
 
+/** Every customer with a saved lat/lng override, keyed by phone — the
+ * frontend still reads its base customer list (name/address/etc.) straight
+ * from the CS Master Google Sheet, unchanged; this endpoint supplies just
+ * the override on top, since that's the one piece this app now writes to
+ * Postgres instead (see handleUpdateCsMasterLocation) and Sheets would
+ * otherwise never reflect it again. Same "any authenticated user" reasoning
+ * as Bookings/Batch Routes — nothing here is more sensitive than the
+ * Customer Master page itself. */
+export async function handleListCustomerLocationOverrides(token: string | null): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  try {
+    const rows = await getDb()`
+      SELECT phone, lat_override, lng_override FROM customers WHERE lat_override IS NOT NULL AND lng_override IS NOT NULL
+    `;
+    return {
+      status: 200,
+      body: { overrides: rows.map((r) => ({ phone: r.phone as string, lat: Number(r.lat_override), lng: Number(r.lng_override) })) },
+    };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'โหลดพิกัดลูกค้าที่แก้ไขไว้ไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
+}
+
+/** Every staff-entered order field — delivery date/note/tax invoice/
+ * operational status/archived/courier assignment — read from Postgres's
+ * `orders` table instead of the old "คำสั่งซื้อ VS" Sheets tab. Shaped
+ * exactly like the old StaffOrderInfo the frontend already knows how to
+ * join against ApiImportOrder (still read live from the "API Import" Sheet,
+ * unchanged this round — see db/README.md), so joinRouteOrders itself needs
+ * no changes at all, only what it's fed. courierStamp is composed from the
+ * normalized route/assigned_driver/batch_route_id columns to match the old
+ * "{driver} / {vehicle} / {batchId}" text shape exactly, for the same
+ * reason. Any authenticated user may read this — same as Bookings/Batch
+ * Routes, nothing here is more sensitive than what Order Management already
+ * shows everyone who can reach it. */
+export async function handleListRouteOrders(token: string | null): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  try {
+    const rows = await getDb()`
+      SELECT
+        order_uid, delivery_date::text AS delivery_date, note, needs_tax_invoice,
+        delivery_issue, delivery_issue_at, archived, route, assigned_driver, batch_route_id
+      FROM orders
+    `;
+    return {
+      status: 200,
+      body: {
+        orders: rows.map((r) => ({
+          orderUid: r.order_uid as string,
+          plannedDeliveryDate: (r.delivery_date as string | null) ?? '',
+          note: r.note as string,
+          taxInvoiceOverride: r.needs_tax_invoice as boolean | null,
+          operationalStatus: r.delivery_issue as string,
+          operationalStatusAt: r.delivery_issue_at ? new Date(r.delivery_issue_at as string).toISOString() : '',
+          courierStamp: r.batch_route_id ? `${r.assigned_driver} / ${r.route} / ${r.batch_route_id}` : '',
+          archived: r.archived as boolean,
+          newCustomer: '', // staff never had an edit control for this free-text sheet column — dropped, see db/README.md
+        })),
+      },
+    };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'โหลดข้อมูลออเดอร์ไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
+}
+
 /**
- * Create-or-update a "คำสั่งซื้อ VS" row for one order, matched purely by
+ * Create-or-update one order's staff-entered fields in Postgres, matched by
  * Order UID — an existing row gets its changed fields updated in place; a
- * brand new order (no row yet, since this tab is now populated lazily, only
- * once staff actually enter something for it) gets a fresh row appended.
- * This tab holds ONLY what staff enter through this app's own UI — never a
- * copy of anything API Import already has (see config/sheets.ts).
+ * brand new order (no row yet — this table is populated lazily, only once
+ * staff actually enter something for it, same as the old "คำสั่งซื้อ VS" tab
+ * was) gets one created. Courier/batch assignment is no longer set through
+ * this endpoint — see handleUpsertBatchRoutes, which now reconciles it
+ * transactionally alongside the batch route itself.
  */
 export async function handleUpdateRouteOrder(token: string | null, body: unknown): Promise<ApiResult> {
   const payload = verifySessionToken(token);
   if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
 
-  const { orderNo, plannedDeliveryDate, note, wantsTaxInvoice, markDelivered, status, archived, courierVehicleId, courierVehicleName, courierBatchId, clearCourierStamp } =
-    (body ?? {}) as Record<string, unknown>;
+  const { orderNo, plannedDeliveryDate, note, wantsTaxInvoice, markDelivered, status, archived } = (body ?? {}) as Record<string, unknown>;
 
   if (typeof orderNo !== 'string' || orderNo.trim() === '') {
     return { status: 400, body: { error: 'ต้องระบุ Order UID' } };
   }
-  if (!isRouteOrdersTabConfigured()) return { status: 500, body: { error: ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE } };
   // Different fields on this one endpoint serve different features with
   // different permission requirements: markDelivered and the
   // DELIVERY_FAILED_STATUS_VALUE status are the driver's own actions from
@@ -1033,17 +967,7 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
   } else if (!['administrator', 'manager', 'admin_staff'].includes(payload.role)) {
     return { status: 403, body: { error: 'ไม่มีสิทธิ์แก้ไขออเดอร์' } };
   }
-  const wantsCourierStamp = courierVehicleId !== undefined || courierVehicleName !== undefined || courierBatchId !== undefined;
-  if (
-    plannedDeliveryDate === undefined &&
-    note === undefined &&
-    wantsTaxInvoice === undefined &&
-    markDelivered === undefined &&
-    status === undefined &&
-    archived === undefined &&
-    !wantsCourierStamp &&
-    clearCourierStamp === undefined
-  ) {
+  if (plannedDeliveryDate === undefined && note === undefined && wantsTaxInvoice === undefined && markDelivered === undefined && status === undefined && archived === undefined) {
     return { status: 400, body: { error: 'ไม่มีข้อมูลให้บันทึก' } };
   }
   if (plannedDeliveryDate !== undefined && typeof plannedDeliveryDate !== 'string') {
@@ -1064,157 +988,46 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
   if (archived !== undefined && typeof archived !== 'boolean') {
     return { status: 400, body: { error: 'archived ต้องเป็น true/false' } };
   }
-  if (wantsCourierStamp && (typeof courierVehicleId !== 'string' || typeof courierVehicleName !== 'string' || typeof courierBatchId !== 'string' || !courierVehicleId.trim() || !courierVehicleName.trim() || !courierBatchId.trim())) {
-    return { status: 400, body: { error: 'courierVehicleId/courierVehicleName/courierBatchId ต้องระบุทั้งสามค่าเป็นข้อความที่ไม่ว่าง' } };
-  }
-  if (clearCourierStamp !== undefined && clearCourierStamp !== true) {
-    return { status: 400, body: { error: 'clearCourierStamp ต้องเป็น true เท่านั้น' } };
-  }
-  if (wantsCourierStamp && clearCourierStamp === true) {
-    return { status: 400, body: { error: 'ระบุ courierVehicleId/courierVehicleName/courierBatchId หรือ clearCourierStamp อย่างใดอย่างหนึ่งเท่านั้น' } };
-  }
 
-  let sheetDate: string | null = null;
-  if (typeof plannedDeliveryDate === 'string') {
-    try {
-      sheetDate = isoToSheetDate(plannedDeliveryDate);
-    } catch (err: unknown) {
-      return { status: 400, body: { error: err instanceof Error ? err.message : 'วันที่ไม่ถูกต้อง' } };
-    }
+  let nextStatus: string | undefined;
+  let nextStatusAt: string | undefined;
+  if (markDelivered === true) {
+    nextStatus = DELIVERED_STATUS_VALUE;
+    nextStatusAt = new Date().toISOString();
+  } else if (typeof status === 'string') {
+    nextStatus = status;
+    nextStatusAt = new Date().toISOString();
   }
 
   try {
-    const sheets = await getSheetsClient();
-    const title = await resolveSheetTitle(sheets, ROUTE_ORDERS_GID);
-
-    const current = await sheets.spreadsheets.values.get({
-      spreadsheetId: MAIN_SHEET_ID,
-      range: `${title}!A:Z`,
-    });
-    const rows = current.data.values ?? [];
-    const header = rows[0] ?? [];
-    const headerAt = (name: string) => header.findIndex((h) => String(h ?? '').trim() === name);
-
-    const uidCol = headerAt(STAFF_ORDER_UID_HEADER);
-    if (uidCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_ORDER_UID_HEADER}" ในชีท` } };
-
+    const sql = getDb();
     const wanted = orderNo.trim();
-    const matches: number[] = [];
-    for (let i = 1; i < rows.length; i++) {
-      if (String(rows[i]?.[uidCol] ?? '').trim() === wanted) matches.push(i + 1); // sheet rows are 1-based
-    }
-    if (matches.length > 1) {
-      return { status: 409, body: { error: `พบ Order UID "${wanted}" ซ้ำกัน ${matches.length} แถว (แถว ${matches.join(', ')}) — โปรดแก้ไขในชีทโดยตรง` } };
-    }
-    const targetRow: number | null = matches[0] ?? null;
+    // note/delivery_issue/archived are NOT NULL columns with their own
+    // defaults, so a plain COALESCE(EXCLUDED.x, orders.x) — which relies on
+    // "not provided" meaning SQL NULL — doesn't work for them; each needs an
+    // explicit "keep the existing value" fragment on the UPDATE side instead.
+    // delivery_date/needs_tax_invoice/delivery_issue_at are nullable, where
+    // COALESCE against the old row works directly.
+    const noteSet = typeof note === 'string' ? sql`${note}` : sql`orders.note`;
+    const archivedSet = typeof archived === 'boolean' ? sql`${archived}` : sql`orders.archived`;
+    const statusSet = nextStatus !== undefined ? sql`${nextStatus}` : sql`orders.delivery_issue`;
 
-    // Resolve every target column up front so a missing column fails the
-    // whole request before anything is written, rather than leaving a
-    // partial edit behind. Every header is expected to already exist (the
-    // real sheet is set up by hand with STAFF_ORDER_INFO_HEADERS) — no
-    // bootstrap-a-new-column fallback needed anymore.
-    let deliveryDateCol = -1;
-    if (sheetDate !== null) {
-      deliveryDateCol = headerAt(STAFF_DELIVERY_DATE_HEADER);
-      if (deliveryDateCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_DELIVERY_DATE_HEADER}" ในชีท` } };
-    }
-    let noteCol = -1;
-    if (typeof note === 'string') {
-      noteCol = headerAt(STAFF_NOTE_HEADER);
-      if (noteCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_NOTE_HEADER}" ในชีท` } };
-    }
-    let taxInvoiceCol = -1;
-    if (typeof wantsTaxInvoice === 'boolean') {
-      taxInvoiceCol = headerAt(STAFF_TAX_INVOICE_HEADER);
-      if (taxInvoiceCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_TAX_INVOICE_HEADER}" ในชีท` } };
-    }
-    let statusCol = -1;
-    let statusAtCol = -1;
-    if (markDelivered === true || typeof status === 'string') {
-      statusCol = headerAt(STAFF_OPERATIONAL_STATUS_HEADER);
-      if (statusCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_OPERATIONAL_STATUS_HEADER}" ในชีท` } };
-      statusAtCol = headerAt(STAFF_OPERATIONAL_STATUS_AT_HEADER);
-      if (statusAtCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_OPERATIONAL_STATUS_AT_HEADER}" ในชีท` } };
-    }
-    let archivedCol = -1;
-    if (typeof archived === 'boolean') {
-      archivedCol = headerAt(STAFF_ARCHIVED_HEADER);
-      if (archivedCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_ARCHIVED_HEADER}" ในชีท` } };
-    }
-    let courierCol = -1;
-    let courierStampText = '';
-    if (wantsCourierStamp || clearCourierStamp === true) {
-      courierCol = headerAt(STAFF_COURIER_HEADER);
-      if (courierCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_COURIER_HEADER}" ในชีท` } };
-    }
-    if (wantsCourierStamp) {
-      // The driver's display name is just their username, resolved here
-      // (never sent from the frontend) since listing Users is admin/manager-
-      // only and admin_staff — who can also run the Planner and trigger this
-      // write — has no access to /api/users.
-      const users = await readUsers(sheets);
-      const driver = users.find((u) => u.active && u.role === 'driver' && u.driverVehicleId === courierVehicleId);
-      courierStampText = `${driver?.username ?? ''} / ${courierVehicleName as string} / ${courierBatchId as string}`;
-    }
-
-    // Collect every cell this request needs to write, keyed by column —
-    // shared between the update-existing-row and append-new-row paths below.
-    const writes = new Map<number, string>();
-    if (sheetDate !== null) writes.set(deliveryDateCol, sheetDate);
-    if (typeof note === 'string') writes.set(noteCol, note);
-    if (typeof wantsTaxInvoice === 'boolean') writes.set(taxInvoiceCol, wantsTaxInvoice ? 'ใช่' : 'ไม่ใช่');
-    if (typeof archived === 'boolean') writes.set(archivedCol, archived ? 'ใช่' : '');
-    if (wantsCourierStamp) writes.set(courierCol, courierStampText);
-    if (clearCourierStamp === true) writes.set(courierCol, '');
-    if (typeof status === 'string') {
-      writes.set(statusCol, status);
-      writes.set(statusAtCol, nowSheetDateTime());
-    }
-    if (markDelivered === true) {
-      writes.set(statusCol, DELIVERED_STATUS_VALUE);
-      writes.set(statusAtCol, nowSheetDateTime());
-    }
-
-    if (targetRow != null) {
-      // USER_ENTERED for the date so Sheets parses it the same way a person
-      // typing it in would; RAW for everything else so free text (a note
-      // starting with "=", for instance) can never be read as a formula.
-      if (sheetDate !== null) {
-        await sheets.spreadsheets.values.update({
-          spreadsheetId: MAIN_SHEET_ID,
-          range: `${title}!${columnLetter(deliveryDateCol)}${targetRow}`,
-          valueInputOption: 'USER_ENTERED',
-          requestBody: { values: [[sheetDate]] },
-        });
-      }
-      const rawWrites = new Map(writes);
-      rawWrites.delete(deliveryDateCol);
-      for (const [col, value] of rawWrites) {
-        await sheets.spreadsheets.values.update({
-          spreadsheetId: MAIN_SHEET_ID,
-          range: `${title}!${columnLetter(col)}${targetRow}`,
-          valueInputOption: 'RAW',
-          requestBody: { values: [[value]] },
-        });
-      }
-    } else {
-      // Brand new order — this tab has no row for it yet. Append one with
-      // just the UID and whatever was actually passed; every other column
-      // starts blank, same as if the row already existed with nothing set.
-      // RAW throughout (including the date) so nothing in a single-shot
-      // append can ever be misread as a formula.
-      const rowValues: unknown[] = new Array(header.length).fill('');
-      rowValues[uidCol] = wanted;
-      for (const [col, value] of writes) rowValues[col] = value;
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: MAIN_SHEET_ID,
-        range: `${title}!A:Z`,
-        valueInputOption: 'RAW',
-        insertDataOption: 'INSERT_ROWS',
-        requestBody: { values: [rowValues] },
-      });
-    }
-
+    await sql`
+      INSERT INTO orders (order_uid, delivery_date, note, needs_tax_invoice, delivery_issue, delivery_issue_at, archived)
+      VALUES (
+        ${wanted}, ${typeof plannedDeliveryDate === 'string' ? plannedDeliveryDate : null}, ${typeof note === 'string' ? note : ''},
+        ${typeof wantsTaxInvoice === 'boolean' ? wantsTaxInvoice : null}, ${nextStatus ?? ''}, ${nextStatusAt ?? null},
+        ${typeof archived === 'boolean' ? archived : false}
+      )
+      ON CONFLICT (order_uid) DO UPDATE SET
+        delivery_date = COALESCE(EXCLUDED.delivery_date, orders.delivery_date),
+        note = ${noteSet},
+        needs_tax_invoice = COALESCE(EXCLUDED.needs_tax_invoice, orders.needs_tax_invoice),
+        delivery_issue = ${statusSet},
+        delivery_issue_at = COALESCE(EXCLUDED.delivery_issue_at, orders.delivery_issue_at),
+        archived = ${archivedSet},
+        updated_at = now()
+    `;
     return { status: 200, body: { ok: true } };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
@@ -1223,14 +1036,52 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
   }
 }
 
+/** Every promotion, read from Postgres instead of the old public "โปรโมชั่น"
+ * CSV export — shaped as the exact same column-name keys
+ * (src/data/sources/promotionsSheet.ts's rowToPromo reads `row['SKU']`,
+ * `row['Promotion Term']`, etc.) so that parsing logic needs no changes at
+ * all, only what feeds it. Any authenticated user may read this — same
+ * reasoning as every other list endpoint here. */
+export async function handleListPromotions(token: string | null): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  try {
+    const rows = await getDb()`
+      SELECT sku, product_name, status, term_text, start_date::text AS start_date, end_date::text AS end_date,
+        period_days, promotion_price, box_price, single_price
+      FROM promotions ORDER BY sku
+    `;
+    return {
+      status: 200,
+      body: {
+        promotions: rows.map((r) => ({
+          SKU: r.sku,
+          Status: r.status,
+          'Product Name': r.product_name,
+          'Promotion Term': r.term_text,
+          เริ่มโปร: r.start_date ?? '',
+          สินสุด: r.end_date ?? '',
+          'Promotion Price': r.promotion_price !== null ? String(r.promotion_price) : '',
+          'Box Price': r.box_price !== null ? String(r.box_price) : '',
+          'Single Price': r.single_price !== null ? String(r.single_price) : '',
+        })),
+      },
+    };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'โหลดโปรโมชั่นไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
+}
+
 /**
- * Create-or-update a promotion row in the "โปรโมชั่น" tab, matched by SKU —
- * an existing SKU updates that row in place; a new one is written to the
- * first row past the sheet's current data (never via values.append, so the
- * exact target row is always known up front). The frontend is responsible
- * for turning whatever pricing shape the user entered (stepped tiers or
- * per-packaging-unit prices) into the plain termText + numeric columns this
- * handler writes — this endpoint doesn't need to know which shape it was.
+ * Create-or-update a promotion row in Postgres's `promotions` table, matched
+ * by SKU (its primary key) — an existing SKU updates in place; a new one is
+ * inserted. Postgres DATE columns take ISO YYYY-MM-DD directly, so (unlike
+ * the old Sheets version) start/end need no format conversion — only
+ * period_days is still derived. The frontend is responsible for turning
+ * whatever pricing shape the user entered (stepped tiers or per-packaging-
+ * unit prices) into the plain termText + numeric columns this handler
+ * writes — this endpoint doesn't need to know which shape it was.
  */
 export async function handleUpsertPromotion(token: string | null, body: unknown): Promise<ApiResult> {
   const payload = verifySessionToken(token);
@@ -1250,80 +1101,30 @@ export async function handleUpsertPromotion(token: string | null, body: unknown)
   if (boxPrice !== undefined && typeof boxPrice !== 'number') return { status: 400, body: { error: 'boxPrice ต้องเป็นตัวเลข' } };
   if (singlePrice !== undefined && typeof singlePrice !== 'number') return { status: 400, body: { error: 'singlePrice ต้องเป็นตัวเลข' } };
 
-  let sheetStart: string | null = null;
-  let sheetEnd: string | null = null;
-  let periodDays: number | null = null;
-  try {
-    if (typeof start === 'string' && start) sheetStart = isoToPromoSheetDate(start);
-    if (typeof end === 'string' && end) sheetEnd = isoToPromoSheetDate(end);
-    if (typeof start === 'string' && start && typeof end === 'string' && end) periodDays = daysBetweenIso(start, end);
-  } catch (err: unknown) {
-    return { status: 400, body: { error: err instanceof Error ? err.message : 'วันที่ไม่ถูกต้อง' } };
-  }
+  const periodDays = typeof start === 'string' && start && typeof end === 'string' && end ? daysBetweenIso(start, end) : null;
+  const wanted = sku.trim();
 
   try {
-    const sheets = await getSheetsClient();
-    const title = await resolveSheetTitle(sheets, PROMOTIONS_GID);
-
-    const current = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${title}!A:Z` });
-    const rows = current.data.values ?? [];
-    const header = rows[0] ?? [];
-    const headerAt = (name: string) => header.findIndex((h) => String(h ?? '').trim() === name);
-
-    const skuCol = headerAt(PROMO_SKU_HEADER);
-    if (skuCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${PROMO_SKU_HEADER}" ในชีท` } };
-    const statusCol = headerAt(PROMO_STATUS_HEADER);
-    if (statusCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${PROMO_STATUS_HEADER}" ในชีท` } };
-    const nameCol = headerAt(PROMO_PRODUCT_NAME_HEADER);
-    if (nameCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${PROMO_PRODUCT_NAME_HEADER}" ในชีท` } };
-    const termCol = headerAt(PROMO_TERM_HEADER);
-    if (termCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${PROMO_TERM_HEADER}" ในชีท` } };
-    // These four are optional — some sheets may not have every one of them,
-    // and a missing column just means that particular field is skipped
-    // rather than failing the whole save.
-    const startCol = headerAt(PROMO_START_HEADER);
-    const endCol = headerAt(PROMO_END_HEADER);
-    const priceCol = headerAt(PROMO_PRICE_HEADER);
-    const boxCol = headerAt(PROMO_BOX_PRICE_HEADER);
-    const singleCol = headerAt(PROMO_SINGLE_PRICE_HEADER);
-    const periodCol = headerAt(PROMO_PERIOD_HEADER);
-
-    const wanted = sku.trim();
-    const matches: number[] = [];
-    for (let i = 1; i < rows.length; i++) {
-      if (String(rows[i]?.[skuCol] ?? '').trim() === wanted) matches.push(i + 1); // sheet rows are 1-based
-    }
-    if (matches.length > 1) {
-      return { status: 409, body: { error: `พบ SKU "${wanted}" ซ้ำกัน ${matches.length} แถว (แถว ${matches.join(', ')}) — โปรดแก้ไขในชีทโดยตรง` } };
-    }
-    const isNew = matches.length === 0;
-    const targetRow = isNew ? rows.length + 1 : matches[0];
-
-    // RAW for free text so a SKU/name/term starting with "=" can never be
-    // read as a formula; USER_ENTERED only for the two date cells, so Sheets
-    // parses them the same way a person typing a date in would.
-    const writeCell = async (col: number, value: string | number, valueInputOption: 'RAW' | 'USER_ENTERED' = 'RAW') => {
-      if (col === -1) return;
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: MAIN_SHEET_ID,
-        range: `${title}!${columnLetter(col)}${targetRow}`,
-        valueInputOption,
-        requestBody: { values: [[value]] },
-      });
-    };
-
-    await writeCell(skuCol, wanted);
-    await writeCell(statusCol, 'Active');
-    await writeCell(nameCol, productName.trim());
-    await writeCell(termCol, termText.trim());
-    if (sheetStart !== null) await writeCell(startCol, sheetStart, 'USER_ENTERED');
-    if (sheetEnd !== null) await writeCell(endCol, sheetEnd, 'USER_ENTERED');
-    if (periodDays !== null) await writeCell(periodCol, periodDays);
-    if (typeof promotionPrice === 'number') await writeCell(priceCol, promotionPrice);
-    if (typeof boxPrice === 'number') await writeCell(boxCol, boxPrice);
-    if (typeof singlePrice === 'number') await writeCell(singleCol, singlePrice);
-
-    return { status: 200, body: { ok: true, updatedRow: targetRow, created: isNew } };
+    const sql = getDb();
+    const [existing] = await sql`SELECT id FROM promotions WHERE id = ${wanted}`;
+    await sql`
+      INSERT INTO promotions (id, sku, product_name, status, term_text, start_date, end_date, period_days, promotion_price, box_price, single_price)
+      VALUES (
+        ${wanted}, ${wanted}, ${productName.trim()}, 'Active', ${termText.trim()},
+        ${typeof start === 'string' && start ? start : null}, ${typeof end === 'string' && end ? end : null}, ${periodDays},
+        ${typeof promotionPrice === 'number' ? promotionPrice : null}, ${typeof boxPrice === 'number' ? boxPrice : null},
+        ${typeof singlePrice === 'number' ? singlePrice : null}
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        product_name = EXCLUDED.product_name, status = EXCLUDED.status, term_text = EXCLUDED.term_text,
+        start_date = COALESCE(EXCLUDED.start_date, promotions.start_date), end_date = COALESCE(EXCLUDED.end_date, promotions.end_date),
+        period_days = COALESCE(EXCLUDED.period_days, promotions.period_days),
+        promotion_price = COALESCE(EXCLUDED.promotion_price, promotions.promotion_price),
+        box_price = COALESCE(EXCLUDED.box_price, promotions.box_price),
+        single_price = COALESCE(EXCLUDED.single_price, promotions.single_price),
+        updated_at = now()
+    `;
+    return { status: 200, body: { ok: true, created: !existing } };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
     console.error('[promotions/upsert]', message);
@@ -1417,6 +1218,358 @@ export async function handleLinkLineItemPromo(token: string | null, body: unknow
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
     console.error('[sku-detail/link-promo]', message);
+    return { status: 500, body: { error: message } };
+  }
+}
+
+// ---------- Activity Log ----------
+// User-action audit trail — was browser localStorage only (src/data/
+// activityLog.ts), never sent to any backend at all; now lives in
+// Postgres's `activity_log` table so it's shared across every device/
+// session instead of scattered per-browser. `actor` is always resolved from
+// the session token, never trusted from the request body, so a log entry
+// can never be forged as someone else's action.
+export async function handleListActivityLog(token: string | null): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  try {
+    const rows = await getDb()`SELECT id, at, actor, action, detail, order_uid FROM activity_log ORDER BY at DESC LIMIT 500`;
+    return {
+      status: 200,
+      body: {
+        entries: rows.map((r) => ({
+          id: String(r.id),
+          at: new Date(r.at as string).getTime(),
+          user: r.actor as string,
+          action: r.action as string,
+          detail: r.detail as string,
+          orderNo: (r.order_uid as string | null) || undefined,
+        })),
+      },
+    };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'โหลด Activity Log ไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
+}
+
+export async function handleAppendActivityLog(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+
+  const { action, detail, orderNo } = (body ?? {}) as Record<string, unknown>;
+  if (typeof action !== 'string' || !action.trim()) return { status: 400, body: { error: 'ต้องระบุ action' } };
+  if (typeof detail !== 'string') return { status: 400, body: { error: 'detail ต้องเป็นข้อความ' } };
+  if (orderNo !== undefined && typeof orderNo !== 'string') return { status: 400, body: { error: 'orderNo ต้องเป็นข้อความ' } };
+
+  try {
+    const [row] = await getDb()`
+      INSERT INTO activity_log (actor, action, detail, order_uid)
+      VALUES (${payload.username}, ${action.trim()}, ${detail}, ${typeof orderNo === 'string' ? orderNo : null})
+      RETURNING id, at
+    `;
+    return { status: 200, body: { ok: true, id: String(row.id), at: new Date(row.at as string).getTime() } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'บันทึก Activity Log ไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
+}
+
+// ---------- Batch Picking ----------
+// A "pick lot" merges SKU Detail line items across a set of selected orders
+// into one shared checklist. Was browser localStorage only (src/data/
+// pickLots.ts); now lives in Postgres so an in-progress lot survives a
+// reload AND is visible to every picker/checker, not just whoever's browser
+// created it. The lines/quantities/customer summaries themselves are NOT
+// stored here — those are still derived client-side from live SKU Detail
+// reads (src/data/sources/skuDetail.ts, unchanged, out of scope this round;
+// see db/README.md) — only lot identity, order membership, and the actual
+// picked/closed state (which have no other source) are persisted.
+interface PickLotPg {
+  id: string;
+  createdAt: string;
+  orderNos: string[];
+  ordersWithNoLines: string[];
+  statusSyncPending: string[];
+  picked: Record<string, boolean>;
+  closed: boolean;
+  closedBy: string;
+}
+
+async function readPickLotsPg(sql: ReturnType<typeof getDb>): Promise<PickLotPg[]> {
+  const [lots, orders, picks] = await Promise.all([
+    sql`SELECT id, created_at, closed, closed_by FROM batch_picking ORDER BY created_at DESC`,
+    sql`SELECT lot_id, order_uid, has_no_lines, status_sync_pending FROM batch_picking_orders`,
+    sql`SELECT lot_id, sku, picked FROM batch_picking_picks`,
+  ]);
+  return lots.map((l) => {
+    const myOrders = orders.filter((o) => o.lot_id === l.id);
+    const myPicks = picks.filter((p) => p.lot_id === l.id);
+    return {
+      id: l.id as string,
+      createdAt: new Date(l.created_at as string).toISOString(),
+      orderNos: myOrders.map((o) => o.order_uid as string),
+      ordersWithNoLines: myOrders.filter((o) => o.has_no_lines).map((o) => o.order_uid as string),
+      statusSyncPending: myOrders.filter((o) => o.status_sync_pending).map((o) => o.order_uid as string),
+      picked: Object.fromEntries(myPicks.map((p) => [p.sku as string, p.picked as boolean])),
+      closed: l.closed as boolean,
+      closedBy: l.closed_by as string,
+    };
+  });
+}
+
+/** Any authenticated user can list pick lots — pickers/checkers need to see
+ * an in-progress lot from any device, and nothing here is more sensitive
+ * than the Pick page itself. */
+export async function handleListPickLots(token: string | null): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  try {
+    return { status: 200, body: { pickLots: await readPickLotsPg(getDb()) } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'โหลดล็อตหยิบสินค้าไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
+}
+
+/** Upserts a whole lot's current state — called on create, on every picked-
+ * checkbox toggle, and on close (mirrors savePickLots' "save the whole lot
+ * object" shape, just against Postgres instead of localStorage). Order
+ * membership and the picked map are fully replaced each call (delete then
+ * reinsert, in one transaction) rather than diffed — lot sizes are small
+ * (one delivery run's worth of orders/SKUs), so this stays simple and never
+ * leaves stale rows behind. administrator/manager/picker may create/toggle
+ * (canPickWork); the transition from open to closed additionally requires
+ * administrator/manager/checker (canClosePickLot) — mirrors the frontend's
+ * own two-tier permission exactly. */
+export async function handleSavePickLot(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (!['administrator', 'manager', 'picker', 'checker'].includes(payload.role)) {
+    return { status: 403, body: { error: 'ไม่มีสิทธิ์จัดการล็อตหยิบสินค้า' } };
+  }
+
+  const { id, orderNos, ordersWithNoLines, picked, closed, closedBy, statusSyncPending } = (body ?? {}) as Record<string, unknown>;
+  if (typeof id !== 'string' || !id.trim()) return { status: 400, body: { error: 'ต้องระบุ id' } };
+  if (!Array.isArray(orderNos) || orderNos.some((n) => typeof n !== 'string')) {
+    return { status: 400, body: { error: 'orderNos ต้องเป็น array ของข้อความ' } };
+  }
+  const wantedOrderNos = orderNos as string[];
+  const noLinesSet = new Set(Array.isArray(ordersWithNoLines) ? ordersWithNoLines.filter((n): n is string => typeof n === 'string') : []);
+  const pendingSet = new Set(Array.isArray(statusSyncPending) ? statusSyncPending.filter((n): n is string => typeof n === 'string') : []);
+  const pickedEntries = picked && typeof picked === 'object' ? Object.entries(picked as Record<string, unknown>).filter((e): e is [string, boolean] => typeof e[1] === 'boolean') : [];
+  const nextClosed = closed === true;
+  const nextClosedBy = typeof closedBy === 'string' ? closedBy : '';
+  const lotId = id.trim();
+
+  try {
+    const sql = getDb();
+    const [existing] = await sql`SELECT closed FROM batch_picking WHERE id = ${lotId}`;
+    const isClosingNow = nextClosed && !(existing?.closed ?? false);
+    if (isClosingNow && !['administrator', 'manager', 'checker'].includes(payload.role)) {
+      return { status: 403, body: { error: 'ไม่มีสิทธิ์ปิดล็อตหยิบสินค้า' } };
+    }
+
+    await sql.begin(async (tx) => {
+      await tx`
+        INSERT INTO batch_picking (id, closed, closed_by, closed_at)
+        VALUES (${lotId}, ${nextClosed}, ${nextClosedBy}, ${nextClosed ? new Date().toISOString() : null})
+        ON CONFLICT (id) DO UPDATE SET
+          closed = EXCLUDED.closed, closed_by = EXCLUDED.closed_by,
+          closed_at = CASE WHEN EXCLUDED.closed AND NOT batch_picking.closed THEN now() ELSE batch_picking.closed_at END
+      `;
+      await tx`DELETE FROM batch_picking_orders WHERE lot_id = ${lotId}`;
+      if (wantedOrderNos.length > 0) {
+        const rows = wantedOrderNos.map((no) => [lotId, no, noLinesSet.has(no), pendingSet.has(no)]);
+        await tx`INSERT INTO batch_picking_orders (lot_id, order_uid, has_no_lines, status_sync_pending) VALUES ${tx(bulkRows(rows))}`;
+      }
+      await tx`DELETE FROM batch_picking_picks WHERE lot_id = ${lotId}`;
+      if (pickedEntries.length > 0) {
+        const rows = pickedEntries.map(([sku, v]) => [lotId, sku, v]);
+        await tx`INSERT INTO batch_picking_picks (lot_id, sku, picked) VALUES ${tx(bulkRows(rows))}`;
+      }
+    });
+    return { status: 200, body: { ok: true } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'บันทึกล็อตหยิบสินค้าไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
+}
+
+/** "ยกเลิกล็อตหยิบสินค้า" — only for a lot that never closed (an unclosed lot
+ * never wrote any order status, so there's nothing to undo — same guard the
+ * frontend already checks before offering the button). Hard-deletes the lot
+ * (cascades to its order-membership and picked rows) rather than marking it
+ * cancelled, matching the frontend's own cancelPickLot, which simply drops
+ * the lot from its list — an unclosed lot was never part of any history
+ * worth preserving. */
+export async function handleCancelPickLot(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (!['administrator', 'manager', 'admin_staff'].includes(payload.role)) {
+    return { status: 403, body: { error: 'ไม่มีสิทธิ์ยกเลิกล็อตหยิบสินค้า' } };
+  }
+  const { id } = (body ?? {}) as Record<string, unknown>;
+  if (typeof id !== 'string' || !id.trim()) return { status: 400, body: { error: 'ต้องระบุ id' } };
+
+  try {
+    const sql = getDb();
+    const [existing] = await sql`SELECT closed FROM batch_picking WHERE id = ${id.trim()}`;
+    if (!existing) return { status: 404, body: { error: 'ไม่พบล็อตหยิบสินค้านี้' } };
+    if (existing.closed) return { status: 409, body: { error: 'ล็อตนี้ปิดแล้ว ยกเลิกไม่ได้' } };
+    await sql`DELETE FROM batch_picking WHERE id = ${id.trim()}`;
+    return { status: 200, body: { ok: true } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'ยกเลิกล็อตหยิบสินค้าไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
+}
+
+// ---------- Goods Receiving ----------
+// Was browser localStorage only (src/data/receiving.ts) — no backend ever
+// existed for it. Now lives in Postgres's `goods_receiving` (one row per
+// receiving event) + `goods_receiving_lines` (its SKU line items) tables.
+// Same role set as the "grn" page's own 'edit' access (administrator/
+// manager/admin_staff/checker — see src/config/permissions.ts).
+const GRN_ROLES = ['administrator', 'manager', 'admin_staff', 'checker'];
+
+interface ReceivingLinePg {
+  id: string;
+  skuId: string;
+  uniiName: string;
+  billName: string;
+  billBarcode: string;
+  unit: string;
+  billQty: number;
+  actualQty: number;
+  unitPrice: number;
+  discount: number;
+  discountMode: 'baht' | 'percent';
+  type: string;
+  note: string;
+}
+interface ReceivingRecordPg {
+  id: string;
+  supplier: string;
+  billNo: string;
+  receivedDate: string;
+  recordedBy: string;
+  note: string;
+  createdAt: string;
+  lines: ReceivingLinePg[];
+}
+
+async function readReceivingPg(sql: ReturnType<typeof getDb>): Promise<ReceivingRecordPg[]> {
+  const [records, lines] = await Promise.all([
+    sql`SELECT id, supplier, bill_no, received_date::text AS received_date, recorded_by, note, created_at FROM goods_receiving ORDER BY created_at DESC`,
+    sql`SELECT id, receiving_id, sku_id, unii_name, bill_name, bill_barcode, unit, bill_qty, actual_qty, unit_price, discount, discount_mode, line_type, note FROM goods_receiving_lines`,
+  ]);
+  return records.map((r) => ({
+    id: r.id as string,
+    supplier: r.supplier as string,
+    billNo: r.bill_no as string,
+    receivedDate: (r.received_date as string | null) ?? '',
+    recordedBy: r.recorded_by as string,
+    note: r.note as string,
+    createdAt: new Date(r.created_at as string).toISOString(),
+    lines: lines
+      .filter((l) => l.receiving_id === r.id)
+      .map((l) => ({
+        id: String(l.id),
+        skuId: l.sku_id as string,
+        uniiName: l.unii_name as string,
+        billName: l.bill_name as string,
+        billBarcode: l.bill_barcode as string,
+        unit: l.unit as string,
+        billQty: Number(l.bill_qty),
+        actualQty: Number(l.actual_qty),
+        unitPrice: Number(l.unit_price),
+        discount: Number(l.discount),
+        discountMode: l.discount_mode as 'baht' | 'percent',
+        type: l.line_type as string,
+        note: l.note as string,
+      })),
+  }));
+}
+
+export async function handleListReceiving(token: string | null): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (!GRN_ROLES.includes(payload.role)) return { status: 403, body: { error: 'ไม่มีสิทธิ์เข้าถึงข้อมูลรับสินค้าเข้าคลัง' } };
+  try {
+    return { status: 200, body: { receiving: await readReceivingPg(getDb()) } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'โหลดข้อมูลรับสินค้าเข้าคลังไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
+}
+
+export async function handleCreateReceiving(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (!GRN_ROLES.includes(payload.role)) return { status: 403, body: { error: 'ไม่มีสิทธิ์บันทึกรับสินค้าเข้าคลัง' } };
+
+  const { id, supplier, billNo, receivedDate, note, lines } = (body ?? {}) as Record<string, unknown>;
+  if (typeof id !== 'string' || !id.trim()) return { status: 400, body: { error: 'ต้องระบุ id' } };
+  if (typeof supplier !== 'string' || !supplier.trim()) return { status: 400, body: { error: 'ต้องระบุซัพพลายเออร์' } };
+  if (typeof billNo !== 'string' || !billNo.trim()) return { status: 400, body: { error: 'ต้องระบุเลขบิล' } };
+  if (receivedDate !== undefined && typeof receivedDate !== 'string') return { status: 400, body: { error: 'receivedDate ต้องเป็นข้อความรูปแบบ YYYY-MM-DD' } };
+  if (!Array.isArray(lines)) return { status: 400, body: { error: 'lines ต้องเป็น array' } };
+
+  const parsedLines: unknown[][] = [];
+  for (const raw of lines) {
+    const l = (raw ?? {}) as Record<string, unknown>;
+    if (typeof l.skuId !== 'string') return { status: 400, body: { error: 'แต่ละรายการต้องมี skuId' } };
+    parsedLines.push([
+      id.trim(),
+      l.skuId,
+      typeof l.uniiName === 'string' ? l.uniiName : '',
+      typeof l.billName === 'string' ? l.billName : '',
+      typeof l.billBarcode === 'string' ? l.billBarcode : '',
+      typeof l.unit === 'string' ? l.unit : '',
+      typeof l.billQty === 'number' ? l.billQty : 0,
+      typeof l.actualQty === 'number' ? l.actualQty : 0,
+      typeof l.unitPrice === 'number' ? l.unitPrice : 0,
+      typeof l.discount === 'number' ? l.discount : 0,
+      l.discountMode === 'percent' ? 'percent' : 'baht',
+      typeof l.type === 'string' ? l.type : 'ค่าสินค้า',
+      typeof l.note === 'string' ? l.note : '',
+    ]);
+  }
+
+  try {
+    const sql = getDb();
+    await sql.begin(async (tx) => {
+      await tx`
+        INSERT INTO goods_receiving (id, supplier, bill_no, received_date, recorded_by, note)
+        VALUES (${id.trim()}, ${supplier.trim()}, ${billNo.trim()}, ${typeof receivedDate === 'string' && receivedDate ? receivedDate : null}, ${payload.username}, ${typeof note === 'string' ? note : ''})
+      `;
+      if (parsedLines.length > 0) {
+        await tx`
+          INSERT INTO goods_receiving_lines (receiving_id, sku_id, unii_name, bill_name, bill_barcode, unit, bill_qty, actual_qty, unit_price, discount, discount_mode, line_type, note)
+          VALUES ${tx(parsedLines as (string | number)[][])}
+        `;
+      }
+    });
+    return { status: 200, body: { ok: true } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'บันทึกรับสินค้าเข้าคลังไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
+}
+
+export async function handleDeleteReceiving(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (!GRN_ROLES.includes(payload.role)) return { status: 403, body: { error: 'ไม่มีสิทธิ์ลบข้อมูลรับสินค้าเข้าคลัง' } };
+  const { id } = (body ?? {}) as Record<string, unknown>;
+  if (typeof id !== 'string' || !id.trim()) return { status: 400, body: { error: 'ต้องระบุ id' } };
+
+  try {
+    await getDb()`DELETE FROM goods_receiving WHERE id = ${id.trim()}`;
+    return { status: 200, body: { ok: true } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'ลบข้อมูลรับสินค้าเข้าคลังไม่สำเร็จ';
     return { status: 500, body: { error: message } };
   }
 }

@@ -1,6 +1,18 @@
 // Batch-picking lots: built by merging SKU Detail line items across a set of
-// selected orders. Kept in localStorage (like zones/vehicles/routePlan) so an
-// unclosed lot survives a reload and a picker can resume it.
+// selected orders. Local state (localStorage, like zones/vehicles/
+// routePlan) stays the source of truth for resuming an in-progress lot on
+// THIS device — orderSummaries/lines are derived from live SKU Detail reads
+// and were never persisted anywhere before, and reconstructing them from a
+// bare server record for an arbitrary historical order set is out of scope
+// this round (see db/README.md). What DOES move to Postgres (see
+// server/lib.ts's handleListPickLots/handleSavePickLot/handleCancelPickLot):
+// lot identity, order membership, and the picked/closed state itself — the
+// three pieces that have no other source and are worth having centrally
+// recorded (an administrator can see picking activity even if the picker's
+// own browser data is cleared). Every mutation here also fires a best-effort
+// background sync to Postgres (see store.ts), same "local-first" pattern
+// batchRoutes.ts uses.
+import { authHeaders, type Session } from './session';
 
 export interface PickLotOrderSummary {
   orderNo: string;
@@ -60,5 +72,42 @@ export function savePickLots(lots: PickLot[]): void {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(lots));
   } catch {
     /* storage unavailable — lots stay in memory for this session */
+  }
+}
+
+/** Best-effort background push of one lot's persistent fields (membership,
+ * picked map, closed state) to Postgres — never awaited by callers that
+ * shouldn't block on it (see store.ts), matching persistBatchRoutes. */
+export async function syncPickLotToServer(session: Session | null, lot: PickLot): Promise<void> {
+  const res = await fetch('/api/ops/batch-picking/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders(session) },
+    body: JSON.stringify({
+      id: lot.id,
+      orderNos: lot.orderNos,
+      ordersWithNoLines: lot.ordersWithNoLines,
+      picked: lot.picked,
+      closed: lot.closed,
+      closedBy: lot.closedBy,
+      statusSyncPending: lot.statusSyncPending,
+    }),
+  });
+  if (!res.ok) {
+    const body: unknown = await res.json().catch(() => null);
+    const message = body && typeof body === 'object' && 'error' in body ? String((body as { error: unknown }).error) : null;
+    throw new Error(message || `ซิงค์ล็อตหยิบสินค้าขึ้นเซิร์ฟเวอร์ไม่สำเร็จ (HTTP ${res.status})`);
+  }
+}
+
+export async function cancelPickLotOnServer(session: Session | null, id: string): Promise<void> {
+  const res = await fetch('/api/ops/batch-picking/cancel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders(session) },
+    body: JSON.stringify({ id }),
+  });
+  if (!res.ok) {
+    const body: unknown = await res.json().catch(() => null);
+    const message = body && typeof body === 'object' && 'error' in body ? String((body as { error: unknown }).error) : null;
+    throw new Error(message || `ยกเลิกล็อตหยิบสินค้าบนเซิร์ฟเวอร์ไม่สำเร็จ (HTTP ${res.status})`);
   }
 }

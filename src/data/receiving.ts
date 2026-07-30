@@ -1,6 +1,10 @@
 // Goods-receiving records: what a supplier's bill said versus what actually
-// arrived. Structure follows the "Stock Unii Master (LPN)" sheet so the data
-// can be pushed there later; for now it is stored in the browser.
+// arrived. Lives in Postgres now (see server/lib.ts's handleListReceiving/
+// handleCreateReceiving/handleDeleteReceiving) instead of browser
+// localStorage only — a local cache is still kept (same "instant on load"
+// pattern as activityLog.ts/batchRoutes.ts) so the page has something to
+// show before the network fetch resolves.
+import { authHeaders, type Session } from './session';
 
 export const RECEIVING_TYPES = ['ค่าสินค้า', 'ค่าขนส่ง', 'ส่วนลด'] as const;
 export type ReceivingType = (typeof RECEIVING_TYPES)[number];
@@ -81,6 +85,53 @@ export function saveReceivingLog(log: ReceivingRecord[]): void {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(log));
   } catch {
     /* storage unavailable — the log stays in memory for this session */
+  }
+}
+
+/** Every receiving record, from Postgres — the real source of truth now.
+ * Also refreshes the local cache so the next mount has something instant to
+ * show even before this resolves. */
+export async function fetchReceivingLog(session: Session | null): Promise<ReceivingRecord[]> {
+  let res: Response;
+  try {
+    res = await fetch('/api/ops/receiving', { headers: authHeaders(session) });
+  } catch {
+    throw new Error('เชื่อมต่อ backend ไม่ได้ — ลองใหม่อีกครั้ง');
+  }
+  if (!res.ok) {
+    const body: unknown = await res.json().catch(() => null);
+    const message = body && typeof body === 'object' && 'error' in body ? String((body as { error: unknown }).error) : null;
+    throw new Error(message || `โหลดข้อมูลรับสินค้าเข้าคลังไม่สำเร็จ (HTTP ${res.status})`);
+  }
+  const body = (await res.json()) as { receiving?: ReceivingRecord[] };
+  const records = Array.isArray(body.receiving) ? body.receiving : [];
+  saveReceivingLog(records);
+  return records;
+}
+
+export async function createReceivingOnServer(session: Session | null, record: ReceivingRecord): Promise<void> {
+  const res = await fetch('/api/ops/receiving/create', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders(session) },
+    body: JSON.stringify(record),
+  });
+  if (!res.ok) {
+    const body: unknown = await res.json().catch(() => null);
+    const message = body && typeof body === 'object' && 'error' in body ? String((body as { error: unknown }).error) : null;
+    throw new Error(message || `บันทึกรับสินค้าเข้าคลังไม่สำเร็จ (HTTP ${res.status})`);
+  }
+}
+
+export async function deleteReceivingOnServer(session: Session | null, id: string): Promise<void> {
+  const res = await fetch('/api/ops/receiving/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders(session) },
+    body: JSON.stringify({ id }),
+  });
+  if (!res.ok) {
+    const body: unknown = await res.json().catch(() => null);
+    const message = body && typeof body === 'object' && 'error' in body ? String((body as { error: unknown }).error) : null;
+    throw new Error(message || `ลบข้อมูลรับสินค้าเข้าคลังไม่สำเร็จ (HTTP ${res.status})`);
   }
 }
 
