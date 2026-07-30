@@ -1,56 +1,35 @@
-import { SHEET_TABS, csvExportUrl } from '../../config/sheets';
+// Order data straight from the Unii API, via this app's own backend proxy
+// (server/ locally, api/ on Vercel — see server/unii.ts and server/lib.ts's
+// handleFetchApiImportOrders). Replaces the old public "API Import" Google
+// Sheets CSV export entirely — Unii has no public/anonymous read path, so
+// this now requires a session, same as every other Postgres-backed read in
+// this app. Shaped identically to the old ApiImportOrder the frontend
+// already knows how to join against StaffOrderInfo (see routeOrders.ts's
+// joinRouteOrders), so nothing downstream of this fetch needed to change.
 import type { ApiImportOrder } from '../types';
-import { fetchSheetRows } from './sheetCsv';
+import { authHeaders, type Session } from '../session';
 
-const CSV_URL = csvExportUrl(SHEET_TABS.apiImport);
-
-function toNumber(v: string | undefined): number {
-  const cleaned = (v ?? '').replace(/,/g, '').trim();
-  const n = Number(cleaned);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function toLatLng(v: string | undefined): number | null {
-  const s = (v ?? '').trim();
-  if (!s) return null;
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
-}
-
-function rowToOrder(row: Record<string, string>): ApiImportOrder | null {
-  const orderUid = (row['Order UID'] ?? '').trim();
-  if (!orderUid) return null;
-  return {
-    no: (row['No.'] ?? '').trim(),
-    orderUid,
-    status: (row['สถานะ'] ?? '').trim(),
-    paymentType: (row['ประเภทชำระเงิน'] ?? '').trim(),
-    paid: (row['ชำระเงินแล้ว'] ?? '').trim(),
-    itemCount: toNumber(row['จำนวนรายการ']),
-    totalAmount: toNumber(row['ยอดขายรวม']),
-    customer: (row['ลูกค้า'] ?? '').trim(),
-    phone: (row['เบอร์โทร'] ?? '').trim(),
-    address: (row['ที่อยู่'] ?? '').trim(),
-    district: (row['อำเภอ'] ?? '').trim(),
-    province: (row['จังหวัด'] ?? '').trim(),
-    orderedAt: (row['วันที่สั่ง'] ?? '').trim(),
-    deliveredAt: (row['วันที่จัดส่ง'] ?? '').trim(),
-    completedAt: (row['วันที่ส่งสำเร็จ'] ?? '').trim(),
-    wantsTaxInvoice: (row['ขอใบกำกับภาษี'] ?? '').trim(),
-    updatedAt: (row['วันที่อัปเดต'] ?? '').trim(),
-    lat: toLatLng(row['Latitude']),
-    lng: toLatLng(row['Longitude']),
-    // Observed under these exact snake_case names (unlike every other column
-    // here) — likely passed through by Unii without a Thai relabel. Optional:
-    // null when this tab doesn't carry them, same as if they were never read.
-    distanceFromWhKm: toLatLng(row['far_from_wh']),
-    whLat: toLatLng(row['wh_lat']),
-    whLng: toLatLng(row['wh_long']),
-    raw: row,
-  };
-}
-
-export async function fetchApiImportOrders(): Promise<ApiImportOrder[]> {
-  const rows = await fetchSheetRows(CSV_URL);
-  return rows.map(rowToOrder).filter((o): o is ApiImportOrder => o !== null);
+/**
+ * On a Unii outage/expired token the backend still returns 200 with
+ * whatever cached data it has (`stale: true`) rather than an error — this
+ * only throws when the backend itself reports it has nothing to show
+ * (non-2xx), which the caller's existing error-banner handling covers.
+ */
+export async function fetchApiImportOrders(session: Session | null): Promise<ApiImportOrder[]> {
+  let res: Response;
+  try {
+    res = await fetch('/api/route-orders/api-import', { headers: authHeaders(session) });
+  } catch {
+    throw new Error('เชื่อมต่อ backend ไม่ได้ — ลองใหม่อีกครั้ง');
+  }
+  if (!res.ok) {
+    const body: unknown = await res.json().catch(() => null);
+    const message = body && typeof body === 'object' && 'error' in body ? String((body as { error: unknown }).error) : null;
+    throw new Error(message || `โหลดออเดอร์จาก Unii API ไม่สำเร็จ (HTTP ${res.status})`);
+  }
+  const body = (await res.json()) as { orders?: ApiImportOrder[]; stale?: boolean; error?: string | null };
+  if (body.stale) {
+    console.warn('[api-import] showing last known Unii order data — live fetch failed:', body.error);
+  }
+  return Array.isArray(body.orders) ? body.orders : [];
 }

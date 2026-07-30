@@ -12,6 +12,7 @@ import {
   handleDecideBooking,
   handleDeleteReceiving,
   handleDriveUpload,
+  handleFetchApiImportOrders,
   handleHealth,
   handleListActivityLog,
   handleListBatchRoutes,
@@ -92,6 +93,11 @@ app.get('/api/route-orders', async (req, res) => {
 
 app.post('/api/route-orders/update', async (req, res) => {
   const { status, body } = await handleUpdateRouteOrder(bearerToken(req.headers.authorization), req.body);
+  res.status(status).json(body);
+});
+
+app.get('/api/route-orders/api-import', async (req, res) => {
+  const { status, body } = await handleFetchApiImportOrders(bearerToken(req.headers.authorization));
   res.status(status).json(body);
 });
 
@@ -209,6 +215,9 @@ app.listen(PORT, () => {
   console.log(`Warehouse Ops API listening on http://localhost:${PORT}`);
   if (!process.env.DATABASE_URL?.trim()) {
     console.warn('⚠  DATABASE_URL is not set — every Postgres-backed feature (orders, customers, batch routes, users, bookings, promotions, activity log, batch picking, goods receiving) will fail');
+  }
+  if (!process.env.UNII_API_TOKEN?.trim()) {
+    console.warn('⚠  UNII_API_TOKEN is not set — order data (Dashboard, Order Management, Planner, etc.) will fail to load');
   }
   if (!process.env.GOOGLE_SERVICE_ACCOUNT_KEY?.trim()) {
     console.warn('⚠  GOOGLE_SERVICE_ACCOUNT_KEY is not set — SKU Detail promo-link write-back will fail; Drive uploads run in mock mode');

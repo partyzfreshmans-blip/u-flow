@@ -4,8 +4,10 @@ import { Readable } from 'node:stream';
 import { DRIVE_ROOT_FOLDER_ENV, driveFolderPath, isAllowedFile, type AttachmentScope } from '../src/config/drive.js';
 import { GEOCODE_MIN_INTERVAL_MS, NOMINATIM_REVERSE_URL, NOMINATIM_USER_AGENT } from '../src/config/geocoding.js';
 import { MAIN_SHEET_ID, SHEET_TABS } from '../src/config/sheets.js';
+import type { ApiImportOrder } from '../src/data/types.js';
 import { getDb } from './db.js';
 import { createSessionToken, verifySessionToken } from './session.js';
+import { fetchApiImportOrdersFromUnii } from './unii.js';
 
 // Shared core for the backend. Most write-back features (users, orders,
 // customers, batch routes, bookings, promotions, activity log, batch
@@ -808,6 +810,7 @@ export function handleHealth(): ApiResult {
       ok: true,
       serviceAccountConfigured: configured,
       databaseConfigured: !!process.env.DATABASE_URL?.trim(),
+      uniiApiConfigured: !!process.env.UNII_API_TOKEN?.trim(),
       driveFolderConfigured: !!process.env[DRIVE_ROOT_FOLDER_ENV]?.trim(),
       driveMockMode: !configured || !process.env[DRIVE_ROOT_FOLDER_ENV]?.trim(),
     },
@@ -925,6 +928,66 @@ export async function handleSyncCustomerNames(token: string | null, body: unknow
     console.error('[cs-master/sync-names]', message);
     return { status: 500, body: { error: message } };
   }
+}
+
+/** Upserts customers.{name_from_unii,lat_from_unii,lng_from_unii,
+ * address_from_unii} by phone from a batch of orders fresh off the Unii API
+ * — called only when handleFetchApiImportOrders actually talked to Unii just
+ * now (see UniiFetchResult.freshlyFetched), never on a request that only
+ * re-served the in-process cache. Deliberately leaves lat_override/
+ * lng_override untouched, same as handleSyncCustomerNames — a manually
+ * corrected pin always wins over whatever Unii itself reports. Orders come
+ * back sorted createdAt:desc, so the FIRST order seen for a phone is the
+ * most recent one — that's the customer snapshot that should win if the same
+ * phone appears on more than one order in this batch. */
+async function syncCustomersFromApiImportOrders(orders: ApiImportOrder[]): Promise<void> {
+  const byPhone = new Map<string, { name: string; lat: number | null; lng: number | null; address: string }>();
+  for (const o of orders) {
+    const phone = o.phone.trim();
+    if (!phone || byPhone.has(phone)) continue;
+    byPhone.set(phone, { name: o.customer.trim(), lat: o.lat, lng: o.lng, address: o.address.trim() });
+  }
+  if (byPhone.size === 0) return;
+
+  const sql = getDb();
+  const rows = Array.from(byPhone.entries()).map(([phone, c]) => [phone, c.name, c.lat, c.lng, c.address]);
+  await sql`
+    INSERT INTO customers (phone, name_from_unii, lat_from_unii, lng_from_unii, address_from_unii)
+    VALUES ${sql(bulkRows(rows))}
+    ON CONFLICT (phone) DO UPDATE SET
+      name_from_unii = EXCLUDED.name_from_unii,
+      lat_from_unii = EXCLUDED.lat_from_unii,
+      lng_from_unii = EXCLUDED.lng_from_unii,
+      address_from_unii = EXCLUDED.address_from_unii,
+      updated_at = now()
+  `;
+}
+
+/** Order data straight from the Unii API (see server/unii.ts) — replaces the
+ * old public "API Import" Sheets CSV export as the source of order data.
+ * Session-gated like every other Postgres-backed read now (Unii has no
+ * public/anonymous read path either), unlike the old CSV export which needed
+ * no login. On a Unii outage/expired token this still returns 200 with
+ * whatever cached data is available (stale: true) rather than an error
+ * status, so the frontend can keep showing last-known-good orders instead of
+ * an error screen — only returns non-2xx when there is truly nothing to
+ * show. */
+export async function handleFetchApiImportOrders(token: string | null): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+
+  const result = await fetchApiImportOrdersFromUnii();
+  if (result.orders === null) {
+    return { status: 502, body: { error: result.error ?? 'เชื่อมต่อ Unii API ไม่สำเร็จ', orders: [] } };
+  }
+
+  if (result.freshlyFetched) {
+    syncCustomersFromApiImportOrders(result.orders).catch((err: unknown) => {
+      console.error('[unii/sync-customers]', err instanceof Error ? err.message : err);
+    });
+  }
+
+  return { status: 200, body: { orders: result.orders, stale: result.stale, error: result.error } };
 }
 
 /** Every staff-entered order field — delivery date/note/tax invoice/

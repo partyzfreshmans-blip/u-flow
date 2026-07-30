@@ -110,11 +110,13 @@ export interface Sku {
   location: string;
 }
 
-// ---------- "API Import" tab: the one raw source of truth for order data,
-// straight from Unii. Every column the tab has is captured — named fields
-// for everything the app currently knows about, plus `raw` holding the
-// complete original row keyed by its exact header text, so a column nobody
-// has written code for yet is still sitting in state, ready the moment
+// ---------- Order data straight from the Unii API (server/unii.ts proxies
+// GET /api/orders/branch/{id} — see that file for the live shape). Used to
+// be a Google Sheets "API Import" tab kept in sync with Unii by some external
+// process; reading Unii directly removes that sync step and its lag
+// entirely. Every field the app currently knows about is named below, plus
+// `raw` holding the complete original JSON object for a field nobody has
+// written code for yet, so it's still sitting in state, ready the moment
 // something needs it (no re-fetch, no code change to "start capturing" it). ----------
 export interface ApiImportOrder {
   no: string;
@@ -152,12 +154,11 @@ export interface ApiImportOrder {
   distanceFromWhKm: number | null;
   whLat: number | null;
   whLng: number | null;
-  /** The complete row exactly as Papa Parse returned it, header text -> cell
-   * text, with every column the tab has today — including any not named
-   * above. The single guarantee this redesign is built around: nothing from
-   * API Import is ever silently dropped, whether or not the app has a typed
-   * field for it yet. */
-  raw: Record<string, string>;
+  /** The complete order object exactly as Unii's API returned it, including
+   * every field not named above. The single guarantee this design is built
+   * around: nothing Unii sends is ever silently dropped, whether or not the
+   * app has a typed field for it yet. */
+  raw: Record<string, unknown>;
 }
 
 // ---------- "คำสั่งซื้อ VS" tab: ONLY what staff enter through this app's own

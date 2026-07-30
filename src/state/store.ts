@@ -963,27 +963,43 @@ export function useAppStore() {
     };
   }, []);
 
+  // Order data now comes straight from the Unii API via this app's backend
+  // proxy (see src/data/sources/apiImportOrders.ts), which — unlike the old
+  // public CSV export — needs a session to read. Gated on state.session like
+  // the staff-order-overlay effect right below. Polls every 45s (matching
+  // the backend's own cache window — see server/unii.ts's CACHE_TTL_MS) so a
+  // bill edited in Unii (items/discount changed, status moved) shows up here
+  // without anyone having to hit the manual "Sync" button.
   useEffect(() => {
+    if (!state.session) return;
     let cancelled = false;
-    fetchApiImportOrders()
-      .then((apiOrders) => {
-        if (!cancelled) {
-          dispatch({ type: 'patch', patch: { apiOrders, apiOrdersLoading: false, apiOrdersError: null } });
-          noteNewOrders(apiOrders);
-          recordSyncSuccess();
-        }
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          const message = err instanceof Error ? err.message : 'โหลดออเดอร์ใหม่ไม่สำเร็จ';
-          dispatch({ type: 'patch', patch: { apiOrdersLoading: false, apiOrdersError: message } });
-          recordSyncFailure('ออเดอร์ใหม่ (API Import)', message);
-        }
-      });
+    const load = () => {
+      const session = loadSession();
+      if (!session) return;
+      fetchApiImportOrders(session)
+        .then((apiOrders) => {
+          if (!cancelled) {
+            dispatch({ type: 'patch', patch: { apiOrders, apiOrdersLoading: false, apiOrdersError: null } });
+            noteNewOrders(apiOrders);
+            recordSyncSuccess();
+          }
+        })
+        .catch((err: unknown) => {
+          if (!cancelled) {
+            const message = err instanceof Error ? err.message : 'โหลดออเดอร์ใหม่ไม่สำเร็จ';
+            dispatch({ type: 'patch', patch: { apiOrdersLoading: false, apiOrdersError: message } });
+            recordSyncFailure('ออเดอร์ใหม่ (API Import)', message);
+          }
+        });
+    };
+    load();
+    const interval = setInterval(load, 45000);
     return () => {
       cancelled = true;
+      clearInterval(interval);
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.session?.username]);
 
   // Route orders' staff-entered overlay now lives in Postgres (see
   // src/data/sources/staffOrderInfo.ts), which — unlike the old public CSV
@@ -2076,14 +2092,12 @@ export function useAppStore() {
         dispatch({ type: 'patch', patch: { syncing: true } });
 
         // routeOrders (Postgres) and promotions (Postgres) no longer go
-        // through fetchSheetRows' CSV cache — only these three still do.
-        [csvExportUrl(SHEET_TABS.apiImport), csvExportUrl(SHEET_TABS.skuDetail), csvExportUrl(SHEET_TABS.csMaster), csvExportUrl(SHEET_TABS.skuMaster)].forEach(
-          invalidateSheetCache,
-        );
+        // through fetchSheetRows' CSV cache — only these two still do.
+        [csvExportUrl(SHEET_TABS.skuDetail), csvExportUrl(SHEET_TABS.csMaster), csvExportUrl(SHEET_TABS.skuMaster)].forEach(invalidateSheetCache);
 
         const session = loadSession();
         const [apiOrdersR, routeOrdersR, lineItemsR, promosR, customersR, overridesR, skusR] = await Promise.allSettled([
-          fetchApiImportOrders(),
+          fetchApiImportOrders(session),
           fetchRouteOrders(session),
           fetchAllOrderLineItems(),
           fetchPromotions(session),

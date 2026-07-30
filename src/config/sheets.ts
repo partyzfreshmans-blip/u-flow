@@ -6,17 +6,15 @@ export const MAIN_SHEET_ID = '1m1Cb_BEwPjqF3CgXNssGgjyewIgPNw_BU4EkduuV59U';
 export const SKU_SHEET_ID = '1gfbuVcH88ugwXgar393voAfcdOsS_qoi9galIFbWNXM';
 
 export const SHEET_TABS = {
-  // The one raw source of truth for order data, straight from Unii — read
-  // live every time (src/data/sources/apiImportOrders.ts), never synced
-  // anywhere else. Every column this tab has gets captured (named fields for
-  // known ones, a `raw` passthrough for everything else).
-  apiImport: { sheetId: MAIN_SHEET_ID, gid: '665542805' },
-  // Staff-entered order fields (delivery date, note, tax invoice, courier,
-  // archive, etc.) and promotions both moved off Sheets into Postgres — see
-  // server/lib.ts's handleListRouteOrders/handleUpsertBatchRoutes and
+  // Order data (the old "API Import" tab) moved off Sheets entirely — it now
+  // reads straight from the Unii API via server/unii.ts, see
+  // src/data/sources/apiImportOrders.ts. Staff-entered order fields (delivery
+  // date, note, tax invoice, courier, archive, etc.) and promotions both
+  // moved off Sheets into Postgres too — see server/lib.ts's
+  // handleListRouteOrders/handleUpsertBatchRoutes and
   // handleListPromotions/handleUpsertPromotion. joinRouteOrders
-  // (src/data/sources/routeOrders.ts) still joins that Postgres data with
-  // this tab by Order UID at render time. skuDetail is still read live for
+  // (src/data/sources/routeOrders.ts) joins that Postgres data with the Unii
+  // order data by Order UID at render time. skuDetail is still read live for
   // line items and promo links.
   skuDetail: { sheetId: MAIN_SHEET_ID, gid: '772187603' },
   csMaster: { sheetId: MAIN_SHEET_ID, gid: '514841442' },

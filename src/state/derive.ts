@@ -145,8 +145,8 @@ export const orderById: Record<string, Order> = {};
 orders.forEach((o) => (orderById[o.id] = o));
 
 export const pageTitles: Record<AppState['route'], [string, string]> = {
-  dashboard: ['แดชบอร์ด / ออเดอร์ใหม่', 'ออเดอร์ล่าสุดที่ยังไม่ได้จัดเส้นทาง · จาก Google Sheet (API Import)'],
-  route: ['จัดการออเดอร์', 'ข้อมูลจริงจาก Google Sheet (คำสั่งซื้อ VS) · แก้ไขวันที่จัดส่ง/หมายเหตุ/ใบกำกับภาษีแล้วบันทึกกลับชีทได้'],
+  dashboard: ['แดชบอร์ด / ออเดอร์ใหม่', 'ออเดอร์ล่าสุดที่ยังไม่ได้จัดเส้นทาง · ข้อมูลสดจาก Unii API'],
+  route: ['จัดการออเดอร์', 'ข้อมูลจริงจาก Unii API · แก้ไขวันที่จัดส่ง/หมายเหตุ/ใบกำกับภาษีแล้วบันทึกลงฐานข้อมูลได้'],
   planner: ['วางแผนจัดรูท', 'จัดออเดอร์ลงรถ · เรียงลำดับส่งจากไกลไปใกล้คลัง · ออกลำดับโหลด'],
   // App.tsx renders DriverPage full-screen before this map is ever read for
   // 'driver' — this entry only exists to satisfy the Record type.

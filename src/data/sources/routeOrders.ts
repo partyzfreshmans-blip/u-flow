@@ -64,10 +64,10 @@ export function joinRouteOrders(apiImportOrders: ApiImportOrder[], staffInfos: S
  * should call for order data. Kept under this name (unchanged from the old
  * sync-based design) so every existing call site — the mount effect and
  * actions.syncNow in store.ts — needed no changes beyond passing a session.
- * ApiImportOrder still comes from the public "API Import" Sheet CSV export
- * (unchanged this round); StaffOrderInfo now comes from Postgres via an
- * authenticated backend call, hence the session parameter. */
+ * ApiImportOrder now comes straight from the Unii API via this app's backend
+ * proxy (server/unii.ts), and StaffOrderInfo comes from Postgres — both
+ * authenticated backend calls now, hence the session parameter on both. */
 export async function fetchRouteOrders(session: Session | null): Promise<RouteOrder[]> {
-  const [apiImportOrders, staffInfos] = await Promise.all([fetchApiImportOrders(), fetchStaffOrderInfo(session)]);
+  const [apiImportOrders, staffInfos] = await Promise.all([fetchApiImportOrders(session), fetchStaffOrderInfo(session)]);
   return joinRouteOrders(apiImportOrders, staffInfos);
 }
