@@ -116,26 +116,35 @@ function pickYesNoText(obj: Record<string, unknown>, keys: string[]): string {
   return '';
 }
 
+// Before this app read Unii directly, order data came from a Google Sheet
+// tab literally called "API Import" — populated by Unii's own integration,
+// under these exact Thai/mixed column headers (see the pre-migration
+// src/data/sources/apiImportOrders.ts, still in git history at commit
+// f08b120). Since that Sheet's data ultimately came from Unii in the first
+// place, its column names are a much stronger signal for what Unii's raw
+// API JSON keys actually are than a blind camelCase/snake_case guess — so
+// they're tried first, ahead of the original guesses (kept as a fallback
+// in case Unii's API shape differs from what it once pushed into Sheets).
 const FIELD_KEY_CANDIDATES = {
-  orderUid: ['orderUid', 'order_uid', 'uid', 'orderNo', 'order_no', 'orderNumber', 'orderCode', 'id'],
-  no: ['no', 'orderIndex', 'runningNo'],
-  status: ['status', 'orderStatus', 'statusText', 'status_text'],
-  paymentType: ['paymentType', 'payment_type', 'paymentMethod', 'payment_method'],
-  paid: ['paid', 'isPaid', 'paymentStatus', 'payment_status'],
-  itemCount: ['itemCount', 'item_count', 'totalItems', 'total_items'],
-  totalAmount: ['totalAmount', 'total_amount', 'total', 'grandTotal', 'grand_total', 'netTotal', 'net_total'],
-  customer: ['customer.name', 'customerName', 'customer_name', 'receiver.name', 'name'],
-  phone: ['customer.phone', 'customerPhone', 'customer_phone', 'phone', 'receiver.phone', 'tel'],
-  address: ['customer.address', 'address', 'shippingAddress', 'shipping_address', 'deliveryAddress', 'delivery_address'],
-  district: ['customer.district', 'district', 'amphoe', 'customer.amphoe'],
-  province: ['customer.province', 'province', 'changwat', 'customer.changwat'],
-  orderedAt: ['orderedAt', 'ordered_at', 'createdAt', 'created_at'],
-  deliveredAt: ['deliveredAt', 'delivered_at', 'shippedAt', 'shipped_at'],
-  completedAt: ['completedAt', 'completed_at', 'finishedAt', 'finished_at'],
-  updatedAt: ['updatedAt', 'updated_at'],
-  wantsTaxInvoice: ['wantsTaxInvoice', 'wants_tax_invoice', 'taxInvoice', 'tax_invoice', 'requestTaxInvoice'],
-  lat: ['lat', 'latitude', 'customer.lat', 'customer.latitude'],
-  lng: ['lng', 'lon', 'long', 'longitude', 'customer.lng', 'customer.longitude'],
+  orderUid: ['Order UID', 'orderUid', 'order_uid', 'uid', 'orderNo', 'order_no', 'orderNumber', 'orderCode', 'id'],
+  no: ['No', 'no', 'orderIndex', 'runningNo'],
+  status: ['สถานะ', 'status', 'orderStatus', 'statusText', 'status_text'],
+  paymentType: ['ประเภทชำระเงิน', 'paymentType', 'payment_type', 'paymentMethod', 'payment_method'],
+  paid: ['ชำระเงินแล้ว', 'paid', 'isPaid', 'paymentStatus', 'payment_status'],
+  itemCount: ['จำนวนรายการ', 'itemCount', 'item_count', 'totalItems', 'total_items'],
+  totalAmount: ['ยอดขายรวม', 'totalAmount', 'total_amount', 'total', 'grandTotal', 'grand_total', 'netTotal', 'net_total'],
+  customer: ['ลูกค้า', 'customer.name', 'customerName', 'customer_name', 'receiver.name', 'name'],
+  phone: ['เบอร์โทร', 'customer.phone', 'customerPhone', 'customer_phone', 'phone', 'receiver.phone', 'tel'],
+  address: ['ที่อยู่', 'customer.address', 'address', 'shippingAddress', 'shipping_address', 'deliveryAddress', 'delivery_address'],
+  district: ['อำเภอ', 'customer.district', 'district', 'amphoe', 'customer.amphoe'],
+  province: ['จังหวัด', 'customer.province', 'province', 'changwat', 'customer.changwat'],
+  orderedAt: ['วันที่สั่ง', 'orderedAt', 'ordered_at', 'createdAt', 'created_at'],
+  deliveredAt: ['วันที่จัดส่ง', 'deliveredAt', 'delivered_at', 'shippedAt', 'shipped_at'],
+  completedAt: ['วันที่ส่งสำเร็จ', 'completedAt', 'completed_at', 'finishedAt', 'finished_at'],
+  updatedAt: ['วันที่อัปเดต', 'updatedAt', 'updated_at'],
+  wantsTaxInvoice: ['ขอใบกำกับภาษี', 'wantsTaxInvoice', 'wants_tax_invoice', 'taxInvoice', 'tax_invoice', 'requestTaxInvoice'],
+  lat: ['Latitude', 'lat', 'latitude', 'customer.lat', 'customer.latitude'],
+  lng: ['Longitude', 'lng', 'lon', 'long', 'longitude', 'customer.lng', 'customer.longitude'],
   distanceFromWhKm: ['far_from_wh', 'distanceFromWh', 'distance_from_wh'],
   whLat: ['wh_lat', 'whLat'],
   whLng: ['wh_long', 'wh_lng', 'whLng'],

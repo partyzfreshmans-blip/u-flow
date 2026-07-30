@@ -126,3 +126,13 @@ export function canBookStop(role: Role): boolean {
 export function canDecideBooking(role: Role): boolean {
   return role === 'administrator' || role === 'manager' || role === 'admin_staff';
 }
+
+/** Dashboard: viewing the raw Unii API object behind an order row. Exists so
+ * a wrong field-key guess in server/unii.ts's mapUniiOrder (Unii renaming or
+ * never having used a guessed key) can be diagnosed straight from the app —
+ * without Vercel log/DevTools access — rather than only in server logs.
+ * Administrator-only since it's the full unfiltered API payload for that
+ * order, not a normal operational affordance. */
+export function canViewRawOrderDebug(role: Role): boolean {
+  return role === 'administrator';
+}

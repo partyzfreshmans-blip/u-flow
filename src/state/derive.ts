@@ -11,7 +11,7 @@ import { resolveRouteOrderLocations } from '../data/customerLocation';
 import { avgPricePerPiece, detectUnit } from '../data/sources/promotionsSheet';
 import { addDays, dayKey, dayKeyToDate, daysBetweenKeys, formatOrderedAt, formatThaiShortDate, formatThaiWeekdayDate, sheetDateTimeToMs, sheetDateToDayKey, suggestedDeliveryDayKey, todayDayKey } from '../data/dateUtils';
 import { badgeStyle, DELIVERED_STATUSES, DELIVERY_DONE_STATUSES, fmt, ORDER_RESOLVED_FOR_BATCH_STATUSES, sheetStatusStyle } from './helpers';
-import { canBookStop, canCancelBatchRoute, canCancelPickLot, canClosePickLot, canDecideBooking, canEditOrder, canEditPlan, canManageUsers, canPickWork, ROLES, ROLE_LABELS, seesAllActivityLog } from '../config/permissions';
+import { canBookStop, canCancelBatchRoute, canCancelPickLot, canClosePickLot, canDecideBooking, canEditOrder, canEditPlan, canManageUsers, canPickWork, canViewRawOrderDebug, ROLES, ROLE_LABELS, seesAllActivityLog } from '../config/permissions';
 import type { BookingRow } from '../data/sources/bookingsApi';
 import type { AppActions, AppState } from './store';
 
@@ -222,6 +222,11 @@ export function computeDashboard(state: AppState, actions: AppActions) {
     wantsTax: o.wantsTaxInvoice,
     codInfo: codInfoFor(o),
     viewItems: () => actions.openOrderDetail(o.orderUid, o.customer, state.routeOrders.find((r) => r.orderNo === o.orderUid)),
+    // The exact object Unii's API returned for this order, before any of the
+    // key-guessing in server/unii.ts's mapUniiOrder — lets an administrator
+    // check the real field names directly (see canViewRawOrderDebug) when a
+    // column above shows blank/0 despite Unii clearly having sent something.
+    raw: o.raw,
   }));
 
   const visibleApiOrders = state.apiOrders.filter((o) => !archivedOrderNos.has(o.orderUid));
@@ -391,6 +396,7 @@ export function computeDashboard(state: AppState, actions: AppActions) {
     resultCount: list.length,
     noOrders: list.length === 0,
     orders: rows,
+    canViewRawDebug: state.session ? canViewRawOrderDebug(state.session.role) : false,
     stats,
     statusChips,
     forecastDays,

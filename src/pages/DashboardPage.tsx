@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { OrderDetailModal } from '../components/OrderDetailModal';
 import { computeDashboard } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
@@ -9,8 +9,9 @@ type DashboardRow = ReturnType<typeof computeDashboard>['orders'][number];
 
 const PAGE_SIZE = 50;
 
-function DashboardTable({ rows }: { rows: DashboardRow[] }) {
+function DashboardTable({ rows, canViewRawDebug }: { rows: DashboardRow[]; canViewRawDebug: boolean }) {
   const [page, setPage] = useState(1);
+  const [rawOpenFor, setRawOpenFor] = useState<string | null>(null);
   const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
   const visible = rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
@@ -25,39 +26,74 @@ function DashboardTable({ rows }: { rows: DashboardRow[] }) {
         </thead>
         <tbody>
           {visible.map((o) => (
-            <tr key={o.orderUid}>
-              <td style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 500, fontSize: 12.5 }}>{o.orderUid}</td>
-              <td>
-                {o.cust}
-                <div style={{ fontSize: 11, color: 'var(--color-neutral-500)' }}>{o.addr}</div>
-                {o.phone && <div style={{ fontSize: 10.5, color: 'var(--color-neutral-600)', fontVariantNumeric: 'tabular-nums' }}>{o.phone}</div>}
-              </td>
-              <td style={{ textAlign: 'center' }}>{o.items}</td>
-              <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>{o.qtyText}</td>
-              <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{o.amtText}</td>
-              <td style={{ fontSize: 12 }}>
-                {o.paymentType}
-                <div style={{ fontSize: 10.5, color: 'var(--color-neutral-600)' }}>{o.paid}</div>
-                {o.codInfo && (
-                  <div style={{ marginTop: 4 }}>
-                    <span style={o.codInfo.style}>{o.codInfo.label}</span>
-                  </div>
-                )}
-              </td>
-              <td style={{ fontSize: 10.5, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
-                {o.stages.length === 0 ? (
-                  '—'
-                ) : (
-                  o.stages.map((s) => (
-                    <div key={s.label}>
-                      <span style={{ color: 'var(--color-neutral-600)' }}>{s.label}:</span> {s.text}
+            <Fragment key={o.orderUid}>
+              <tr>
+                <td style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 500, fontSize: 12.5 }}>{o.orderUid}</td>
+                <td>
+                  {o.cust}
+                  <div style={{ fontSize: 11, color: 'var(--color-neutral-500)' }}>{o.addr}</div>
+                  {o.phone && <div style={{ fontSize: 10.5, color: 'var(--color-neutral-600)', fontVariantNumeric: 'tabular-nums' }}>{o.phone}</div>}
+                </td>
+                <td style={{ textAlign: 'center' }}>{o.items}</td>
+                <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>{o.qtyText}</td>
+                <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{o.amtText}</td>
+                <td style={{ fontSize: 12 }}>
+                  {o.paymentType}
+                  <div style={{ fontSize: 10.5, color: 'var(--color-neutral-600)' }}>{o.paid}</div>
+                  {o.codInfo && (
+                    <div style={{ marginTop: 4 }}>
+                      <span style={o.codInfo.style}>{o.codInfo.label}</span>
                     </div>
-                  ))
-                )}
-              </td>
-              <td><span style={o.stStyle}>{o.stLabel}</span></td>
-              <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12, whiteSpace: 'nowrap' }} onClick={o.viewItems}>ดูสินค้า</button></td>
-            </tr>
+                  )}
+                </td>
+                <td style={{ fontSize: 10.5, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+                  {o.stages.length === 0 ? (
+                    '—'
+                  ) : (
+                    o.stages.map((s) => (
+                      <div key={s.label}>
+                        <span style={{ color: 'var(--color-neutral-600)' }}>{s.label}:</span> {s.text}
+                      </div>
+                    ))
+                  )}
+                </td>
+                <td><span style={o.stStyle}>{o.stLabel}</span></td>
+                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                  {canViewRawDebug && (
+                    <button
+                      className="btn btn-ghost"
+                      style={{ fontSize: 12, marginRight: 6 }}
+                      title="ดูข้อมูลดิบจาก Unii API (สำหรับตรวจสอบ field ที่ map ผิด)"
+                      onClick={() => setRawOpenFor(rawOpenFor === o.orderUid ? null : o.orderUid)}
+                    >
+                      <i className="ph ph-code" />
+                    </button>
+                  )}
+                  <button className="btn btn-ghost" style={{ fontSize: 12, whiteSpace: 'nowrap' }} onClick={o.viewItems}>ดูสินค้า</button>
+                </td>
+              </tr>
+              {canViewRawDebug && rawOpenFor === o.orderUid && (
+                <tr>
+                  <td colSpan={9} style={{ padding: 0 }}>
+                    <pre
+                      style={{
+                        margin: 0,
+                        padding: 12,
+                        fontSize: 11,
+                        maxHeight: 320,
+                        overflow: 'auto',
+                        background: 'var(--color-surface)',
+                        color: 'var(--color-neutral-300)',
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-all',
+                      }}
+                    >
+                      {JSON.stringify(o.raw, null, 2)}
+                    </pre>
+                  </td>
+                </tr>
+              )}
+            </Fragment>
           ))}
         </tbody>
       </table>
@@ -262,7 +298,7 @@ export function DashboardPage({ state, actions }: { state: AppState; actions: Ap
       </div>
 
       <div className="card elev-sm" style={{ padding: '4px 14px 8px' }}>
-        <DashboardTable key={filterSignature} rows={v.orders} />
+        <DashboardTable key={filterSignature} rows={v.orders} canViewRawDebug={v.canViewRawDebug} />
         {v.noOrders && !v.apiOrdersLoading && (
           <div style={{ padding: 26, textAlign: 'center', color: 'var(--color-neutral-500)', fontSize: 12.5 }}>ไม่พบออเดอร์ที่ตรงกับตัวกรอง</div>
         )}
