@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { OrderDetailModal } from '../components/OrderDetailModal';
 import { canEditOrder } from '../config/permissions';
+import { exportRouteOrdersXlsx } from '../data/sources/exportXlsx';
 import { computeRoute } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 
@@ -240,6 +241,15 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
   const [pendingBatchDialogOpen, setPendingBatchDialogOpen] = useState(false);
   const [pendingBatchCollapsed, setPendingBatchCollapsed] = useState(false);
   const [stuckCollapsed, setStuckCollapsed] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const doExport = () => {
+    setExporting(true);
+    setExportError(null);
+    exportRouteOrdersXlsx(state.session)
+      .catch((err: unknown) => setExportError(err instanceof Error ? err.message : 'Export ไม่สำเร็จ'))
+      .finally(() => setExporting(false));
+  };
   /** "Batch ทั้งหมดที่รอ" doesn't invent a new batch-creation path — it just
    * preselects every pending order into the Planner's existing multi-select
    * (plannerSelectedOrderNos) and drops the user there, where "จัดลงรถ" +
@@ -264,7 +274,7 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
     <div>
       {v.routeOrdersLoading && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: 13, marginBottom: 16, borderRadius: 10, background: 'var(--color-surface)', fontSize: 13, color: 'var(--color-neutral-400)' }}>
-          <i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังโหลดข้อมูลออเดอร์จาก Google Sheet...
+          <i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังโหลดข้อมูลออเดอร์จาก Unii API...
         </div>
       )}
       {v.routeOrdersError && (
@@ -380,7 +390,16 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
           </label>
         )}
         <div style={{ fontSize: 12, color: 'var(--color-neutral-500)', marginLeft: v.canArchive ? 0 : 'auto' }}>{v.resultCount} รายการ</div>
+        <button className="btn btn-ghost" style={{ fontSize: 12 }} disabled={exporting} onClick={doExport}>
+          <i className={exporting ? 'ph ph-circle-notch' : 'ph ph-file-xls'} style={exporting ? { animation: 'spin .8s linear infinite' } : undefined} />
+          {exporting ? 'กำลัง Export...' : 'Export เป็น Excel'}
+        </button>
       </div>
+      {exportError && (
+        <div style={{ display: 'flex', gap: 9, padding: 13, marginBottom: 12, borderRadius: 10, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 13 }}>
+          <i className="ph ph-warning-fill" style={{ flex: 'none' }} />Export ไม่สำเร็จ: {exportError}
+        </div>
+      )}
 
       {v.archivedFilter && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', marginBottom: 12, borderRadius: 10, background: 'var(--color-surface)', boxShadow: 'var(--shadow-sm)', fontSize: 12.5, color: 'var(--color-neutral-400)' }}>

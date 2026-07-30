@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react';
-import type { OrderStatus, SyncStatus } from '../data/types';
+import type { OrderStatus, SyncStatus } from '../data/types.js';
 
 export function fmt(n: number): string {
   return '฿' + Number(n).toLocaleString('en-US');

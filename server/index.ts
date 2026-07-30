@@ -12,6 +12,8 @@ import {
   handleDecideBooking,
   handleDeleteReceiving,
   handleDriveUpload,
+  handleExportBatchRouteHistory,
+  handleExportRouteOrders,
   handleFetchApiImportOrders,
   handleHealth,
   handleListActivityLog,
@@ -34,8 +36,10 @@ import {
   handleUpdateUser,
   handleUpsertBatchRoutes,
   handleUpsertPromotion,
+  isFileResult,
 } from './lib.js';
 import { bearerToken } from './session.js';
+import type { ApiResult, FileResult } from './lib.js';
 
 // Local dev server: thin Express wrapper around server/lib.ts. The same
 // handlers are also called from api/*.ts as Vercel serverless functions in
@@ -45,6 +49,21 @@ import { bearerToken } from './session.js';
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+/** Same file-vs-JSON branch as api/_send.ts's sendResult — kept as a
+ * separate small copy here rather than a shared import, since this file is
+ * Express-specific (res here is Express's Response, not the Vercel-shaped
+ * ApiResponse api/_send.ts is typed against) and the two runtimes are
+ * intentionally kept independent of each other. */
+function sendResult(res: express.Response, result: ApiResult | FileResult): void {
+  if (isFileResult(result)) {
+    res.setHeader('Content-Type', result.contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+    res.status(result.status).end(result.buffer);
+    return;
+  }
+  res.status(result.status).json(result.body);
+}
 
 const PORT = Number(process.env.SERVER_PORT ?? 8787);
 
@@ -99,6 +118,10 @@ app.post('/api/route-orders/update', async (req, res) => {
 app.get('/api/route-orders/api-import', async (req, res) => {
   const { status, body } = await handleFetchApiImportOrders(bearerToken(req.headers.authorization));
   res.status(status).json(body);
+});
+
+app.get('/api/route-orders/export', async (req, res) => {
+  sendResult(res, await handleExportRouteOrders(bearerToken(req.headers.authorization)));
 });
 
 app.get('/api/promotions', async (req, res) => {
@@ -209,6 +232,10 @@ app.get('/api/batch-routes', async (req, res) => {
 app.post('/api/batch-routes/upsert', async (req, res) => {
   const { status, body } = await handleUpsertBatchRoutes(bearerToken(req.headers.authorization), req.body);
   res.status(status).json(body);
+});
+
+app.get('/api/batch-routes/export', async (req, res) => {
+  sendResult(res, await handleExportBatchRouteHistory(bearerToken(req.headers.authorization)));
 });
 
 app.listen(PORT, () => {

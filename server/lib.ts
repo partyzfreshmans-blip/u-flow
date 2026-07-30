@@ -1,10 +1,12 @@
+import ExcelJS from 'exceljs';
 import { google } from 'googleapis';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { DRIVE_ROOT_FOLDER_ENV, driveFolderPath, isAllowedFile, type AttachmentScope } from '../src/config/drive.js';
 import { GEOCODE_MIN_INTERVAL_MS, NOMINATIM_REVERSE_URL, NOMINATIM_USER_AGENT } from '../src/config/geocoding.js';
 import { MAIN_SHEET_ID, SHEET_TABS } from '../src/config/sheets.js';
-import type { ApiImportOrder } from '../src/data/types.js';
+import type { ApiImportOrder, RouteOrder, StaffOrderInfo } from '../src/data/types.js';
+import { DELIVERY_DONE_STATUSES } from '../src/state/helpers.js';
 import { getDb } from './db.js';
 import { createSessionToken, verifySessionToken } from './session.js';
 import { fetchApiImportOrdersFromUnii } from './unii.js';
@@ -48,6 +50,27 @@ const LINE_ITEM_PROMO_SKU_HEADER = 'Promo SKU';
 export interface ApiResult {
   status: number;
   body: unknown;
+}
+
+/** Returned by the .xlsx export handlers instead of ApiResult — a binary
+ * file body rather than a JSON one, so every route dispatcher (api/*.ts and
+ * server/index.ts) checks for this shape first (see its `isFileResult`
+ * helper) and sends the buffer directly instead of calling res.json(). */
+export interface FileResult {
+  status: number;
+  filename: string;
+  contentType: string;
+  // exceljs's own index.d.ts declares `declare interface Buffer extends
+  // ArrayBuffer {}` — a legacy compat shim that global-merges with (and
+  // structurally conflicts with) @types/node's real Buffer. Every call site
+  // that hands a workbook.xlsx.writeBuffer() result to this field casts
+  // through `unknown` first to work around it (a known exceljs quirk, not a
+  // bug in this project's own types).
+  buffer: Buffer;
+}
+
+export function isFileResult(result: ApiResult | FileResult): result is FileResult {
+  return 'buffer' in result;
 }
 
 /** postgres.js's bulk-insert helper (sql(rows)) types each cell as
@@ -638,6 +661,112 @@ export async function handleListBatchRoutes(token: string | null): Promise<ApiRe
   }
 }
 
+/** "Export เป็น Excel" on Batch Route History — one summary row per batch
+ * plus a second sheet with one row per order-within-a-batch (the "stops"
+ * BatchRouteHistoryPanel expands to show), joined against the same
+ * Unii-plus-Postgres order data as handleExportRouteOrders. COD cash figures
+ * (expected/collected/diff/transfer) are deliberately left out — that state
+ * only ever lived in the browser's local COD-clearing store, never in
+ * Postgres, so there's nothing server-side to export for it. */
+export async function handleExportBatchRouteHistory(token: string | null): Promise<ApiResult | FileResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+
+  const sql = getDb();
+  const [uniiResult, staffInfos, batchRawRows] = await Promise.all([
+    fetchApiImportOrdersFromUnii(),
+    readStaffOrderInfoPg(sql),
+    readBatchRoutesRawPg(sql),
+  ]);
+  if (uniiResult.orders === null) {
+    return { status: 502, body: { error: uniiResult.error ?? 'เชื่อมต่อ Unii API ไม่สำเร็จ — export ไม่ได้' } };
+  }
+
+  const orderByNo = new Map(joinRouteOrdersForExport(uniiResult.orders, staffInfos).map((o): [string, RouteOrder] => [o.orderNo, o]));
+  const batches = batchRawRows.map(batchRouteRecordFromRow);
+
+  const workbook = new ExcelJS.Workbook();
+
+  const summarySheet = workbook.addWorksheet('Batch Routes');
+  summarySheet.columns = [
+    { header: 'Batch ID', key: 'id', width: 16 },
+    { header: 'รถ', key: 'vehicleName', width: 16 },
+    { header: 'วันที่จัดส่ง', key: 'deliveryDate', width: 14 },
+    { header: 'จำนวนออเดอร์', key: 'orderCount', width: 12 },
+    { header: 'ยอดรวม', key: 'totalAmount', width: 14 },
+    { header: 'ส่งสำเร็จแล้ว', key: 'deliveredCount', width: 12 },
+    { header: 'สถานะ', key: 'statusText', width: 16 },
+    { header: 'สร้างโดย', key: 'createdBy', width: 14 },
+    { header: 'สร้างเมื่อ', key: 'createdAt', width: 22 },
+    { header: 'แก้ไขล่าสุดโดย', key: 'updatedBy', width: 14 },
+    { header: 'แก้ไขล่าสุดเมื่อ', key: 'updatedAt', width: 22 },
+    { header: 'ยกเลิกโดย', key: 'cancelledBy', width: 14 },
+    { header: 'ยกเลิกเมื่อ', key: 'cancelledAt', width: 22 },
+    { header: 'ปิด COD โดย', key: 'codClosedBy', width: 14 },
+    { header: 'ปิด COD เมื่อ', key: 'codClosedAt', width: 22 },
+  ];
+  summarySheet.getRow(1).font = { bold: true };
+
+  const stopsSheet = workbook.addWorksheet('ออเดอร์ในแต่ละ Batch');
+  stopsSheet.columns = [
+    { header: 'Batch ID', key: 'batchId', width: 16 },
+    { header: 'รถ', key: 'vehicleName', width: 16 },
+    { header: 'เลขคำสั่งซื้อ', key: 'orderNo', width: 16 },
+    { header: 'ลูกค้า', key: 'customer', width: 24 },
+    { header: 'ยอดขาย', key: 'totalAmount', width: 12 },
+    { header: 'สถานะ', key: 'status', width: 18 },
+  ];
+  stopsSheet.getRow(1).font = { bold: true };
+
+  for (const b of batches) {
+    const stops = b.orderNos.map((no) => orderByNo.get(no)).filter((o): o is RouteOrder => o != null);
+    const totalAmount = stops.reduce((sum, o) => sum + o.totalAmount, 0);
+    const deliveredCount = stops.filter((o) => DELIVERY_DONE_STATUSES.includes(o.status)).length;
+    const statusText = b.cancelled ? 'ยกเลิกแล้ว' : b.codClosed ? 'ปิด COD แล้ว' : b.locked ? 'ล็อกแล้ว' : 'ใช้งานอยู่';
+
+    summarySheet.addRow({
+      id: b.id,
+      vehicleName: b.vehicleName,
+      deliveryDate: b.deliveryDate,
+      orderCount: b.orderNos.length,
+      totalAmount,
+      deliveredCount,
+      statusText,
+      createdBy: b.createdBy,
+      createdAt: b.createdAt,
+      updatedBy: b.updatedBy,
+      updatedAt: b.updatedAt,
+      cancelledBy: b.cancelled ? b.cancelledBy : '',
+      cancelledAt: b.cancelled ? b.cancelledAt : '',
+      codClosedBy: b.codClosed ? b.codClosedBy : '',
+      codClosedAt: b.codClosed ? b.codClosedAt : '',
+    });
+
+    for (const no of b.orderNos) {
+      const o = orderByNo.get(no);
+      stopsSheet.addRow({
+        batchId: b.id,
+        vehicleName: b.vehicleName,
+        orderNo: no,
+        customer: o?.customer ?? '',
+        totalAmount: o?.totalAmount ?? '',
+        status: o?.status ?? '',
+      });
+    }
+  }
+
+  // exceljs's own type declarations shadow the global Buffer interface
+  // with a narrower one (see FileResult's comment) — cast through unknown to
+  // sidestep that structural mismatch rather than the two never unifying.
+  const buffer = (await workbook.xlsx.writeBuffer()) as unknown as Buffer;
+  return {
+    status: 200,
+    filename: `batch-route-history-${new Date().toISOString().slice(0, 10)}.xlsx`,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    buffer,
+  };
+}
+
 /** Bulk upsert — the client always sends its whole current batchRoutes list
  * (never large: a handful of vehicles × at most a couple of batches each per
  * day), matched by id; unmatched ids are created.
@@ -783,11 +912,25 @@ export async function handleUpsertBatchRoutes(token: string | null, body: unknow
             // to /api/users.
             const driver = users.find((u) => u.active && u.role === 'driver' && u.driverVehicleId === b.vehicleId);
             for (let i = 0; i < b.orderNos.length; i++) {
+              // UPSERT, not a plain UPDATE: an order assigned straight into a
+              // batch without ever going through handleUpdateRouteOrder first
+              // (e.g. a brand-new order nobody has edited note/date on yet)
+              // has no `orders` row at all — a plain UPDATE against a
+              // nonexistent row silently affects zero rows and still returns
+              // { ok: true }, so the FK assignment looked successful but
+              // never actually persisted. Found via the Excel export's Batch
+              // Route History sheet coming back with an empty order list for
+              // every batch.
               await tx`
-                UPDATE orders SET
-                  batch_route_id = ${b.id}, route = ${b.vehicleName}, assigned_driver = ${driver?.username ?? ''},
-                  assigned_at = COALESCE(assigned_at, now()), stop_sequence = ${i}, updated_at = now()
-                WHERE order_uid = ${b.orderNos[i]}
+                INSERT INTO orders (order_uid, batch_route_id, route, assigned_driver, assigned_at, stop_sequence)
+                VALUES (${b.orderNos[i]}, ${b.id}, ${b.vehicleName}, ${driver?.username ?? ''}, now(), ${i})
+                ON CONFLICT (order_uid) DO UPDATE SET
+                  batch_route_id = EXCLUDED.batch_route_id,
+                  route = EXCLUDED.route,
+                  assigned_driver = EXCLUDED.assigned_driver,
+                  assigned_at = COALESCE(orders.assigned_at, EXCLUDED.assigned_at),
+                  stop_sequence = EXCLUDED.stop_sequence,
+                  updated_at = now()
               `;
             }
           }
@@ -1002,36 +1145,162 @@ export async function handleFetchApiImportOrders(token: string | null): Promise<
  * reason. Any authenticated user may read this — same as Bookings/Batch
  * Routes, nothing here is more sensitive than what Order Management already
  * shows everyone who can reach it. */
+async function readStaffOrderInfoPg(sql: ReturnType<typeof getDb>): Promise<StaffOrderInfo[]> {
+  const rows = await sql`
+    SELECT
+      order_uid, delivery_date::text AS delivery_date, note, needs_tax_invoice,
+      delivery_issue, delivery_issue_at, archived, route, assigned_driver, batch_route_id
+    FROM orders
+  `;
+  return rows.map((r) => ({
+    orderUid: r.order_uid as string,
+    plannedDeliveryDate: (r.delivery_date as string | null) ?? '',
+    note: r.note as string,
+    taxInvoiceOverride: r.needs_tax_invoice as boolean | null,
+    operationalStatus: r.delivery_issue as string,
+    operationalStatusAt: r.delivery_issue_at ? new Date(r.delivery_issue_at as string).toISOString() : '',
+    courierStamp: r.batch_route_id ? `${r.assigned_driver} / ${r.route} / ${r.batch_route_id}` : '',
+    archived: r.archived as boolean,
+    newCustomer: '', // staff never had an edit control for this free-text sheet column — dropped, see db/README.md
+  }));
+}
+
 export async function handleListRouteOrders(token: string | null): Promise<ApiResult> {
   const payload = verifySessionToken(token);
   if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
   try {
-    const rows = await getDb()`
-      SELECT
-        order_uid, delivery_date::text AS delivery_date, note, needs_tax_invoice,
-        delivery_issue, delivery_issue_at, archived, route, assigned_driver, batch_route_id
-      FROM orders
-    `;
-    return {
-      status: 200,
-      body: {
-        orders: rows.map((r) => ({
-          orderUid: r.order_uid as string,
-          plannedDeliveryDate: (r.delivery_date as string | null) ?? '',
-          note: r.note as string,
-          taxInvoiceOverride: r.needs_tax_invoice as boolean | null,
-          operationalStatus: r.delivery_issue as string,
-          operationalStatusAt: r.delivery_issue_at ? new Date(r.delivery_issue_at as string).toISOString() : '',
-          courierStamp: r.batch_route_id ? `${r.assigned_driver} / ${r.route} / ${r.batch_route_id}` : '',
-          archived: r.archived as boolean,
-          newCustomer: '', // staff never had an edit control for this free-text sheet column — dropped, see db/README.md
-        })),
-      },
-    };
+    const orders = await readStaffOrderInfoPg(getDb());
+    return { status: 200, body: { orders } };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'โหลดข้อมูลออเดอร์ไม่สำเร็จ';
     return { status: 500, body: { error: message } };
   }
+}
+
+/** Same field-for-field join as src/data/sources/routeOrders.ts's
+ * joinRouteOrders — deliberately re-implemented here rather than imported.
+ * Importing that module directly would pull its own imports (fetchApiImport
+ * Orders/fetchStaffOrderInfo, which reference the DOM-lib fetch/Response
+ * types) into this file's Node-only TypeScript program (tsconfig.node.json,
+ * no "dom" lib) — that combination genuinely produces conflicting global
+ * ArrayBufferLike/Buffer types between @types/node's own fetch typings and
+ * lib.dom.d.ts's, breaking exceljs's Buffer-returning APIs elsewhere in this
+ * file. Keeping the export path's join logic server-owned avoids ever
+ * crossing that boundary; if joinRouteOrders' behavior ever changes, this
+ * copy needs the same change made twice. */
+function joinRouteOrdersForExport(apiImportOrders: ApiImportOrder[], staffInfos: StaffOrderInfo[]): RouteOrder[] {
+  const staffByUid = new Map(staffInfos.map((s) => [s.orderUid, s]));
+  return apiImportOrders.map((o): RouteOrder => {
+    const staff = staffByUid.get(o.orderUid);
+    const districtProvince = [o.district, o.province].filter(Boolean).join(', ');
+    const mapLink = o.lat != null && o.lng != null ? `https://www.google.com/maps/search/?api=1&query=${o.lat},${o.lng}` : '';
+    return {
+      orderedAtText: o.orderedAt,
+      customer: o.customer,
+      orderNo: o.orderUid,
+      itemCount: o.itemCount,
+      totalAmount: o.totalAmount,
+      paymentType: o.paymentType,
+      status: staff?.operationalStatus || o.status,
+      plannedDeliveryDate: staff?.plannedDeliveryDate ?? '',
+      note: staff?.note ?? '',
+      isNewCustomer: staff?.newCustomer ?? '',
+      orderedDate: o.orderedAt,
+      deliveredDate: o.deliveredAt,
+      completedDate: o.completedAt,
+      updatedDate: o.updatedAt,
+      wantsTaxInvoice: staff?.taxInvoiceOverride ?? /^(ใช่|yes|true|y)$/i.test(o.wantsTaxInvoice.trim()),
+      archived: staff?.archived ?? false,
+      districtProvince,
+      addressFromUnii: o.address,
+      mapLink,
+      lat: o.lat,
+      lng: o.lng,
+      phone: o.phone,
+      distanceFromWhKm: o.distanceFromWhKm,
+      whLat: o.whLat,
+      whLng: o.whLng,
+      courierStamp: staff?.courierStamp ?? '',
+    };
+  });
+}
+
+/** "Export เป็น Excel" on Order Management — same Unii-plus-Postgres join
+ * every page reads (joinRouteOrdersForExport, above), written out as a
+ * .xlsx instead of rendered as a table. A couple of on-screen columns are
+ * deliberately left out because they only exist as client-side computed
+ * state with no server-side equivalent: the route/zone label (from local
+ * zoneRules + geocode matching), promo-line badges (from a live SKU Detail
+ * read), and delivery-failure photo counts (from the browser's local photo
+ * queue). Everything that actually lives in Postgres or comes straight off
+ * Unii is included. */
+export async function handleExportRouteOrders(token: string | null): Promise<ApiResult | FileResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+
+  const [uniiResult, staffInfos] = await Promise.all([fetchApiImportOrdersFromUnii(), readStaffOrderInfoPg(getDb())]);
+  if (uniiResult.orders === null) {
+    return { status: 502, body: { error: uniiResult.error ?? 'เชื่อมต่อ Unii API ไม่สำเร็จ — export ไม่ได้' } };
+  }
+
+  const rows = joinRouteOrdersForExport(uniiResult.orders, staffInfos);
+
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('ออเดอร์');
+  sheet.columns = [
+    { header: 'เลขคำสั่งซื้อ', key: 'orderNo', width: 16 },
+    { header: 'ลูกค้า', key: 'customer', width: 24 },
+    { header: 'เบอร์โทร', key: 'phone', width: 14 },
+    { header: 'ที่อยู่', key: 'address', width: 32 },
+    { header: 'อำเภอ/จังหวัด', key: 'districtProvince', width: 24 },
+    { header: 'ยอดขาย', key: 'totalAmount', width: 12 },
+    { header: 'จำนวนรายการ', key: 'itemCount', width: 12 },
+    { header: 'ประเภทชำระเงิน', key: 'paymentType', width: 16 },
+    { header: 'สถานะ', key: 'status', width: 18 },
+    { header: 'วันที่สั่ง', key: 'orderedAtText', width: 20 },
+    { header: 'วันที่จะจัดส่ง', key: 'plannedDeliveryDate', width: 14 },
+    { header: 'วันที่จัดส่ง (Unii)', key: 'deliveredDate', width: 20 },
+    { header: 'วันที่ส่งสำเร็จ', key: 'completedDate', width: 20 },
+    { header: 'หมายเหตุ', key: 'note', width: 28 },
+    { header: 'ขอใบกำกับภาษี', key: 'wantsTaxInvoice', width: 14 },
+    { header: 'คนส่ง / รถ / Batch', key: 'courierStamp', width: 24 },
+    { header: 'Archived', key: 'archived', width: 10 },
+    { header: 'ลูกค้าใหม่', key: 'isNewCustomer', width: 12 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+  for (const o of rows) {
+    sheet.addRow({
+      orderNo: o.orderNo,
+      customer: o.customer,
+      phone: o.phone,
+      address: o.addressFromUnii,
+      districtProvince: o.districtProvince,
+      totalAmount: o.totalAmount,
+      itemCount: o.itemCount,
+      paymentType: o.paymentType,
+      status: o.status,
+      orderedAtText: o.orderedAtText,
+      plannedDeliveryDate: o.plannedDeliveryDate,
+      deliveredDate: o.deliveredDate,
+      completedDate: o.completedDate,
+      note: o.note,
+      wantsTaxInvoice: o.wantsTaxInvoice ? 'ใช่' : '',
+      courierStamp: o.courierStamp,
+      archived: o.archived ? 'ใช่' : '',
+      isNewCustomer: o.isNewCustomer,
+    });
+  }
+
+  // exceljs's own type declarations shadow the global Buffer interface
+  // with a narrower one (see FileResult's comment) — cast through unknown to
+  // sidestep that structural mismatch rather than the two never unifying.
+  const buffer = (await workbook.xlsx.writeBuffer()) as unknown as Buffer;
+  return {
+    status: 200,
+    filename: `orders-${new Date().toISOString().slice(0, 10)}.xlsx`,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    buffer,
+  };
 }
 
 /**

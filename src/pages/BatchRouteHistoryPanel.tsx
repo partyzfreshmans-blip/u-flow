@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { exportBatchRouteHistoryXlsx } from '../data/sources/exportXlsx';
 import { computeBatchRouteHistory } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 
@@ -7,6 +8,15 @@ export function BatchRouteHistoryPanel({ state, actions }: { state: AppState; ac
   const [openId, setOpenId] = useState<string | null>(null);
   const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null);
   const confirmingRow = v.rows.find((b) => b.id === confirmCancelId) ?? null;
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const doExport = () => {
+    setExporting(true);
+    setExportError(null);
+    exportBatchRouteHistoryXlsx(state.session)
+      .catch((err: unknown) => setExportError(err instanceof Error ? err.message : 'Export ไม่สำเร็จ'))
+      .finally(() => setExporting(false));
+  };
 
   return (
     <div>
@@ -22,7 +32,16 @@ export function BatchRouteHistoryPanel({ state, actions }: { state: AppState; ac
           />
         </div>
         <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-neutral-500)' }}>{v.rows.length}/{v.totalCount} batch</div>
+        <button className="btn btn-ghost" style={{ fontSize: 12 }} disabled={exporting} onClick={doExport}>
+          <i className={exporting ? 'ph ph-circle-notch' : 'ph ph-file-xls'} style={exporting ? { animation: 'spin .8s linear infinite' } : undefined} />
+          {exporting ? 'กำลัง Export...' : 'Export เป็น Excel'}
+        </button>
       </div>
+      {exportError && (
+        <div style={{ display: 'flex', gap: 9, padding: 13, marginBottom: 12, borderRadius: 10, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 13 }}>
+          <i className="ph ph-warning-fill" style={{ flex: 'none' }} />Export ไม่สำเร็จ: {exportError}
+        </div>
+      )}
 
       {v.isEmpty ? (
         <div className="card elev-sm" style={{ padding: 26, textAlign: 'center', color: 'var(--color-neutral-500)', fontSize: 12.5 }}>

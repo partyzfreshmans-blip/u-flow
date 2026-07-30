@@ -15,6 +15,7 @@
     "@phosphor-icons/web": "^2.1.2",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
+    "exceljs": "^4.4.0",
     "express": "^5.2.1",
     "googleapis": "^173.0.0",
     "leaflet": "^1.9.4",
@@ -24,6 +25,9 @@
     "postgres": "^3.4.9",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
+  },
+  "overrides": {
+    "@types/node": "$@types/node"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",

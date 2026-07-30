@@ -1,5 +1,6 @@
-import { handleListBatchRoutes, handleUpsertBatchRoutes } from '../../server/lib.js';
+import { handleExportBatchRouteHistory, handleListBatchRoutes, handleUpsertBatchRoutes } from '../../server/lib.js';
 import { bearerToken } from '../../server/session.js';
+import { sendResult } from '../_send.js';
 import { routeSlug } from '../_routing.js';
 import type { ApiRequest, ApiResponse } from '../_types.js';
 
@@ -19,6 +20,10 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   if (slug === 'upsert' && req.method === 'POST') {
     const { status, body } = await handleUpsertBatchRoutes(token, req.body);
     res.status(status).json(body);
+    return;
+  }
+  if (slug === 'export' && req.method === 'GET') {
+    sendResult(res, await handleExportBatchRouteHistory(token));
     return;
   }
   res.status(404).json({ error: 'Not found' });
