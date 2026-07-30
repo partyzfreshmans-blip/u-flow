@@ -100,6 +100,18 @@ export function sheetStatusColor(status: string): string {
  * cancelled. Anything else with a delivery date in the past is a stuck order. */
 export const DELIVERY_DONE_STATUSES = ['ส่งสำเร็จ', 'ได้รับแล้ว', 'ยกเลิก'];
 
+/** Statuses that mean a batch no longer needs to physically carry this
+ * order — done moving (DELIVERY_DONE_STATUSES) OR the driver already
+ * reported a failed attempt (which has its own follow-up flow via Driver
+ * View's "ส่งไม่สำเร็จ" report, so it isn't "forgotten" the way a stalled
+ * "กำลังจัดส่ง" order is). Deliberately NOT the same set as
+ * DELIVERY_DONE_STATUSES above — that one still treats ส่งไม่สำเร็จ as
+ * "needs follow-up" for the general ออเดอร์ตกหล่น panel, a different,
+ * correct concern from "should this order still occupy a spot on a truck's
+ * manifest." Used only to gate the cross-day stuck-order batch-detach
+ * mechanism (see derive.ts's ordersNeedingStuckBatchDetach). */
+export const ORDER_RESOLVED_FOR_BATCH_STATUSES = [...DELIVERY_DONE_STATUSES, DELIVERY_FAILED_STATUS];
+
 /** Narrower than DELIVERY_DONE_STATUSES above — actually-delivered outcomes
  * only, deliberately excluding "ยกเลิก" (an order the customer/Unii itself
  * cancelled upstream, unrelated to this app's own Batch Route). Used to gate

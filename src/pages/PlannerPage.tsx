@@ -101,6 +101,12 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
           <button className="btn btn-ghost" style={{ fontSize: 12, marginLeft: 'auto' }} onClick={v.dismissCourierStampWarning}>ปิด</button>
         </div>
       )}
+      {v.plannerAssignSkippedMessage && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: 13, marginBottom: 16, borderRadius: 10, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 13 }}>
+          <i className="ph ph-calendar-x" style={{ flex: 'none' }} />{v.plannerAssignSkippedMessage}
+          <button className="btn btn-ghost" style={{ fontSize: 12, marginLeft: 'auto' }} onClick={v.dismissPlannerAssignSkippedMessage}>ปิด</button>
+        </div>
+      )}
 
       {v.canEdit && (
         <div className="seg" style={{ marginBottom: 14, width: 'fit-content' }}>
@@ -540,6 +546,14 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                               <i className="ph ph-clock-countdown" />เลยกำหนดส่ง
                             </span>
                           )}
+                          {o.stuckDetached && (
+                            <span
+                              style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, padding: '2px 7px', borderRadius: 6, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontWeight: 600, whiteSpace: 'nowrap' }}
+                              title={`ปลดออกจาก ${o.stuckDetachedFromText} อัตโนมัติ — ยังไม่ได้ส่งก่อนหมดวันจัดส่ง จัดคิวใหม่เป็นอันดับต้นๆ`}
+                            >
+                              <i className="ph ph-truck" />ตกหล่นจากวันก่อนหน้า
+                            </span>
+                          )}
                           {o.bookedByDriver && (
                             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, padding: '2px 7px', borderRadius: 6, background: 'var(--st-warn-bg)', color: 'var(--st-warn-fg)', fontWeight: 600, whiteSpace: 'nowrap' }}>
                               <i className="ph ph-hand-tap" />จองคิวโดย {o.bookedByDriver}
@@ -626,8 +640,15 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                               </button>
                             </div>
                           )
+                        ) : o.noDeliveryDate || !o.assignTo ? (
+                          <span
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--st-bad-fg)' }}
+                            title="ระบุวันที่จะจัดส่งก่อน จึงจะจัดลงรถได้"
+                          >
+                            <i className="ph ph-calendar-x" />ต้องระบุวันที่จัดส่งก่อน
+                          </span>
                         ) : (
-                          <select className="input" style={{ minHeight: 30, fontSize: 12, width: '100%' }} value="" onChange={(e) => e.target.value && o.assignTo(e.target.value)}>
+                          <select className="input" style={{ minHeight: 30, fontSize: 12, width: '100%' }} value="" onChange={(e) => e.target.value && o.assignTo?.(e.target.value)}>
                             <option value="">เลือกรถ…</option>
                             {v.vehicles.filter((veh) => !veh.batchLocked).map((veh) => <option key={veh.id} value={veh.id}>{veh.name}</option>)}
                           </select>

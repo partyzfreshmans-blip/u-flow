@@ -10,15 +10,17 @@ import { coordKey, type GeocodeCache } from '../data/geocodeCache';
 import { resolveRouteOrderLocations } from '../data/customerLocation';
 import { avgPricePerPiece, detectUnit } from '../data/sources/promotionsSheet';
 import { addDays, dayKey, dayKeyToDate, daysBetweenKeys, formatOrderedAt, formatThaiShortDate, formatThaiWeekdayDate, sheetDateTimeToMs, sheetDateToDayKey, suggestedDeliveryDayKey, todayDayKey } from '../data/dateUtils';
-import { badgeStyle, DELIVERED_STATUSES, DELIVERY_DONE_STATUSES, fmt, sheetStatusStyle } from './helpers';
+import { badgeStyle, DELIVERED_STATUSES, DELIVERY_DONE_STATUSES, fmt, ORDER_RESOLVED_FOR_BATCH_STATUSES, sheetStatusStyle } from './helpers';
 import { canBookStop, canCancelBatchRoute, canCancelPickLot, canClosePickLot, canDecideBooking, canEditOrder, canEditPlan, canManageUsers, canPickWork, ROLES, ROLE_LABELS, seesAllActivityLog } from '../config/permissions';
 import type { BookingRow } from '../data/sources/bookingsApi';
 import type { AppActions, AppState } from './store';
 
 /** Delivery date, straight off the "คำสั่งซื้อ" sheet — edits go through
  * saveOrderEdit and only land in state.routeOrders once the sheet write
- * actually succeeds, so this value is always the real, current one. */
-function effectiveDeliveryDayKey(o: RouteOrder): string | null {
+ * actually succeeds, so this value is always the real, current one. Exported
+ * so store.ts can apply the same no-delivery-date gate defensively inside
+ * createPickLot, without duplicating the date-parsing logic. */
+export function effectiveDeliveryDayKey(o: RouteOrder): string | null {
   return sheetDateToDayKey(o.plannedDeliveryDate);
 }
 
@@ -90,6 +92,29 @@ function stuckRouteOrders(state: AppState, today: string): RouteOrder[] {
     if (!key || key >= today) return false;
     return !DELIVERY_DONE_STATUSES.includes(o.status);
   });
+}
+
+/** Stuck orders (see stuckRouteOrders above, narrowed to
+ * ORDER_RESOLVED_FOR_BATCH_STATUSES — see that constant's comment for why
+ * "ส่งไม่สำเร็จ" is excluded here but not from the general stuck-order
+ * view) that are STILL sitting in some live Batch Route's manifest — the
+ * "driver never touched this stop before their delivery day ended" case
+ * store.ts's autoDetachStuckOrder acts on. An order that was simply never
+ * assigned to any vehicle at all doesn't need this — it's already just
+ * "unassigned," nothing to detach. */
+export function ordersNeedingStuckBatchDetach(state: AppState, today: string): { orderNo: string; batch: BatchRoute }[] {
+  const batchByOrderNo = new Map<string, BatchRoute>();
+  for (const b of state.batchRoutes) {
+    if (b.cancelled) continue;
+    for (const no of b.orderNos) batchByOrderNo.set(no, b);
+  }
+  const out: { orderNo: string; batch: BatchRoute }[] = [];
+  for (const o of stuckRouteOrders(state, today)) {
+    if (ORDER_RESOLVED_FOR_BATCH_STATUSES.includes(o.status)) continue;
+    const batch = batchByOrderNo.get(o.orderNo);
+    if (batch) out.push({ orderNo: o.orderNo, batch });
+  }
+  return out;
 }
 
 /** How many days an order can sit at "รอชำระเงิน" before the bell flags it —
@@ -386,6 +411,17 @@ export function computeDashboard(state: AppState, actions: AppActions) {
 // ---------- NOTIFICATIONS (header bell) ----------
 export function computeNotifications(state: AppState, actions: AppActions) {
   const today = todayDayKey();
+  const role = state.session?.role;
+
+  // A stuck-detach alert stays "active" only while its order hasn't been
+  // picked back up into some batch yet — once reassigned, it's off the
+  // truck-manifest problem this alert exists for, so it clears itself
+  // rather than nagging forever. Targeted at Picker/Checker/Admin Staff
+  // specifically, per the "who needs to physically pull it off the truck"
+  // reasoning — everyone else already sees the underlying order via the
+  // general stuck-order item above.
+  const stillBatchedOrderNos = new Set(state.batchRoutes.filter((b) => !b.cancelled).flatMap((b) => b.orderNos));
+  const seesStuckDetachAlerts = role === 'picker' || role === 'checker' || role === 'admin_staff';
 
   // Standing-condition items recompute fresh from current data every render
   // (no persisted "it happened" record needed — they're just currently-true
@@ -411,6 +447,17 @@ export function computeNotifications(state: AppState, actions: AppActions) {
         orderNo: o.orderUid as string | undefined,
       };
     }),
+    ...(seesStuckDetachAlerts
+      ? Object.values(state.stuckDetachments)
+          .filter((d) => !stillBatchedOrderNos.has(d.orderNo))
+          .map((d) => ({
+            id: `stuck-detach-${d.orderNo}`,
+            kind: 'stuck-detach' as const,
+            message: `เอาสินค้าออเดอร์ ${d.orderNo} ลงจากรถ ${d.fromVehicleName} (batch ${d.fromBatchId}) — ตกหล่นจากวันก่อนหน้า ต้องนำไปจัดใหม่`,
+            createdAt: new Date(d.detectedAt).getTime(),
+            orderNo: d.orderNo as string | undefined,
+          }))
+      : []),
   ];
 
   const combined = [
@@ -420,8 +467,12 @@ export function computeNotifications(state: AppState, actions: AppActions) {
 
   const readSet = new Set(state.notificationReadIds);
   const iconFor = (kind: string) =>
-    kind === 'new-order' ? 'ph ph-package' : kind === 'sync-error' ? 'ph ph-warning-fill' : kind === 'stuck-order' ? 'ph ph-clock-countdown' : 'ph ph-currency-circle-dollar';
-  const colorFor = (kind: string) => (kind === 'sync-error' ? 'var(--st-bad-fg)' : kind === 'new-order' ? 'var(--st-info-fg)' : 'var(--st-warn-fg)');
+    kind === 'new-order' ? 'ph ph-package' :
+    kind === 'sync-error' ? 'ph ph-warning-fill' :
+    kind === 'stuck-order' ? 'ph ph-clock-countdown' :
+    kind === 'stuck-detach' ? 'ph ph-truck' :
+    'ph ph-currency-circle-dollar';
+  const colorFor = (kind: string) => (kind === 'sync-error' || kind === 'stuck-detach' ? 'var(--st-bad-fg)' : kind === 'new-order' ? 'var(--st-info-fg)' : 'var(--st-warn-fg)');
 
   const items = combined.map((n) => ({
     id: n.id,
@@ -693,8 +744,16 @@ export function computeRoute(state: AppState, actions: AppActions) {
       stLabel: o.status || '—',
       stStyle: sheetStatusStyle(o.status),
       batchReady: routePlanVehicleByOrderNo.has(o.orderNo),
+      // Gate: an order with no delivery date can't be batched at all yet —
+      // shown here (not hidden) so staff sees it needs a date, but excluded
+      // from "จัด Batch ทั้งหมดที่รอ" (see pendingBatchReadyOrderNos below)
+      // and from the Planner's own assign controls (computePlanner's
+      // noDeliveryDate/assignTo).
+      noDeliveryDate: effectiveDeliveryDayKey(o) === null,
       viewItems: () => actions.openOrderDetail(o.orderNo, o.customer, o),
     }));
+  const pendingBatchReadyOrderNos = pendingBatchOrders.filter((o) => !o.noDeliveryDate).map((o) => o.orderNo);
+  const pendingBatchNoDateCount = pendingBatchOrders.length - pendingBatchReadyOrderNos.length;
 
   const rows = filtered.map((o) => {
     const batchStamp = batchStampByOrderNo.get(o.orderNo) ?? null;
@@ -806,6 +865,8 @@ export function computeRoute(state: AppState, actions: AppActions) {
     stuckCount: stuckOrders.length,
     pendingBatchOrders,
     pendingBatchCount: pendingBatchOrders.length,
+    pendingBatchReadyOrderNos,
+    pendingBatchNoDateCount,
 
     // ---- archive feature ----
     archivedFilter: state.routeArchivedFilter,
@@ -1101,10 +1162,25 @@ export function computePlanner(state: AppState, actions: AppActions) {
     .map((o) => {
       const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
       const booking = activeBookingByOrderNo.get(o.orderNo) ?? null;
+      // Gate: no delivery date yet — never assignable to a vehicle. Kept
+      // visible in this table (with a badge) rather than hidden, so staff
+      // sees exactly which orders are blocked and why; assignTo becomes
+      // undefined (same pattern as confirmBooking/rejectBooking below) so
+      // the row's "จัดลงรถ" dropdown has nothing to call even if some other
+      // code path tried to render it enabled.
+      const noDeliveryDate = effectiveDeliveryDayKey(o) === null;
+      const stuckDetachment = state.stuckDetachments[o.orderNo] ?? null;
       return {
         orderNo: o.orderNo,
         customer: o.customer,
         duplicateCustomer: (unassignedCustomerCounts.get(o.customer.trim()) ?? 0) > 1,
+        // Cross-day stuck-order detector's own badge — see
+        // ordersNeedingStuckBatchDetach/autoDetachStuckOrders. Shows here
+        // because this row exists at all (order is currently unassigned);
+        // once reassigned to a batch it leaves this table entirely, so no
+        // separate "resolved" flag is needed.
+        stuckDetached: stuckDetachment != null,
+        stuckDetachedFromText: stuckDetachment ? `${stuckDetachment.fromBatchId} · ${stuckDetachment.fromVehicleName}` : '',
         address: o.addressFromUnii || o.districtProvince,
         districtProvince: o.districtProvince || '—',
         phone: o.phone || '—',
@@ -1128,18 +1204,20 @@ export function computePlanner(state: AppState, actions: AppActions) {
         selected: state.plannerSelectedOrderNos.includes(o.orderNo),
         toggleSelect: () => actions.togglePlannerSelect(o.orderNo, state.plannerSelectedOrderNos),
         editLocation: () => actions.openEditOrderLocation(o),
-        assignTo: (vehicleId: string) => {
-          if (isVehicleLocked(vehicleId)) return;
-          const next = [...currentOrderNos(vehicleId), o.orderNo];
-          applyVehicleOrderNos(vehicleId, next);
-          actions.logActivity('จัดออเดอร์ลงรถ (วางแผนจัดรูท)', `${vehicleNameById.get(vehicleId) ?? vehicleId}`, o.orderNo);
-          syncBatchAfterEdit(vehicleId, next, `เพิ่ม ${o.orderNo}`);
-        },
+        assignTo: noDeliveryDate
+          ? undefined
+          : (vehicleId: string) => {
+              if (isVehicleLocked(vehicleId)) return;
+              const next = [...currentOrderNos(vehicleId), o.orderNo];
+              applyVehicleOrderNos(vehicleId, next);
+              actions.logActivity('จัดออเดอร์ลงรถ (วางแผนจัดรูท)', `${vehicleNameById.get(vehicleId) ?? vehicleId}`, o.orderNo);
+              syncBatchAfterEdit(vehicleId, next, `เพิ่ม ${o.orderNo}`);
+            },
         bookedByDriver: booking?.driverUsername ?? null,
         canDecideBooking: canDecide,
         confirmBooking: booking ? () => confirmBookingFor(o.orderNo, booking.driverUsername, booking.driverVehicleId) : undefined,
         rejectBooking: booking ? (note?: string) => rejectBookingFor(o.orderNo, booking.driverUsername, note) : undefined,
-        noDeliveryDate: effectiveDeliveryDayKey(o) === null,
+        noDeliveryDate,
         isOverdue: (() => {
           const key = effectiveDeliveryDayKey(o);
           return key !== null && key < today;
@@ -1152,16 +1230,29 @@ export function computePlanner(state: AppState, actions: AppActions) {
   const selectedInUnassigned = state.plannerSelectedOrderNos.filter((no) => unassignedOrderNos.includes(no));
   const allUnassignedSelected = unassignedOrderNos.length > 0 && selectedInUnassigned.length === unassignedOrderNos.length;
   const toggleSelectAllUnassigned = () => actions.setPlannerSelection(allUnassignedSelected ? [] : unassignedOrderNos);
+  // Gate: same no-delivery-date rule as the single-row assignTo above,
+  // applied to the bulk "จัดลงรถ" dropdown — silently dropping a selected
+  // no-date order would look like a bug, so this rejects with an explicit
+  // dismissible message instead (plannerAssignSkippedMessage).
+  const noDateByOrderNo = new Map(unassigned.map((u) => [u.orderNo, u.noDeliveryDate]));
   const assignSelectedTo = (vehicleId: string) => {
     if (selectedInUnassigned.length === 0 || isVehicleLocked(vehicleId)) return;
-    const next = [...currentOrderNos(vehicleId), ...selectedInUnassigned];
+    const blocked = selectedInUnassigned.filter((no) => noDateByOrderNo.get(no));
+    const eligible = selectedInUnassigned.filter((no) => !noDateByOrderNo.get(no));
+    if (blocked.length > 0) {
+      actions.patch({
+        plannerAssignSkippedMessage: `ข้าม ${blocked.length} ออเดอร์ที่ยังไม่มีวันที่จัดส่ง (${blocked.join(', ')}) — ต้องระบุวันที่จัดส่งก่อนจึงจะจัดลงรถได้`,
+      });
+    }
+    if (eligible.length === 0) return;
+    const next = [...currentOrderNos(vehicleId), ...eligible];
     applyVehicleOrderNos(vehicleId, next);
     actions.setPlannerSelection([]);
     actions.logActivity(
       'จัดออเดอร์ลงรถ (วางแผนจัดรูท, เลือกหลายรายการ)',
-      `${vehicleNameById.get(vehicleId) ?? vehicleId} · ${selectedInUnassigned.length} ออเดอร์ (${selectedInUnassigned.join(', ')})`,
+      `${vehicleNameById.get(vehicleId) ?? vehicleId} · ${eligible.length} ออเดอร์ (${eligible.join(', ')})`,
     );
-    syncBatchAfterEdit(vehicleId, next, `เพิ่ม ${selectedInUnassigned.length} ออเดอร์ (${selectedInUnassigned.join(', ')})`);
+    syncBatchAfterEdit(vehicleId, next, `เพิ่ม ${eligible.length} ออเดอร์ (${eligible.join(', ')})`);
   };
   const clearSelection = () => actions.setPlannerSelection([]);
 
@@ -1388,7 +1479,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
     if (fromVehicleId) {
       moveOrderToVehicle(orderNo, fromVehicleId, toVehicleId, null);
     } else {
-      unassigned.find((u) => u.orderNo === orderNo)?.assignTo(toVehicleId);
+      unassigned.find((u) => u.orderNo === orderNo)?.assignTo?.(toVehicleId);
     }
   };
 
@@ -1488,6 +1579,8 @@ export function computePlanner(state: AppState, actions: AppActions) {
     error: state.routeOrdersError,
     canEdit,
     courierStampWarning: state.courierStampWarning,
+    plannerAssignSkippedMessage: state.plannerAssignSkippedMessage,
+    dismissPlannerAssignSkippedMessage: () => actions.dismissPlannerAssignSkippedMessage(),
     dismissCourierStampWarning: () => actions.dismissCourierStampWarning(),
     vehicles,
     unassigned,
@@ -2124,6 +2217,11 @@ function computePickOrderSelection(state: AppState, actions: AppActions) {
     if (o.archived) return false;
     if (o.status !== 'กำลังดำเนินการ') return false;
     if (alreadyInALot.has(o.orderNo)) return false;
+    // Gate: no delivery date yet — can't be lotted for picking. Hidden
+    // outright here (unlike Order Management's "รอจัด Batch", which shows
+    // these with a badge) since the spec for this page is "must not appear
+    // in the list that can be picked at all."
+    if (effectiveDeliveryDayKey(o) === null) return false;
     if (q && !(o.customer.toLowerCase().includes(q) || o.orderNo.toLowerCase().includes(q))) return false;
     return true;
   });

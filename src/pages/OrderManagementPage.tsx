@@ -247,7 +247,11 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
    * app. A single click can't safely pick vehicles across orders that may
    * span many different delivery dates on its own. */
   const confirmBatchAllPending = () => {
-    actions.setPlannerSelection(v.pendingBatchOrders.map((o) => o.orderNo));
+    // Gate: orders with no delivery date are excluded from the preselection
+    // — see pendingBatchReadyOrderNos in computeRoute — they stay listed in
+    // "รอจัด Batch" with a warning badge instead, so staff sees them without
+    // being able to sweep them into a batch by mistake.
+    actions.setPlannerSelection(v.pendingBatchReadyOrderNos);
     // Pending orders can span many different delivery dates — clear the
     // Planner's own date filter too, so whichever ones are still selectable
     // (i.e. not already queued on some vehicle's routePlan) are visible
@@ -312,15 +316,24 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
                       <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.orderedAtText}</td>
                       <td style={{ whiteSpace: 'nowrap' }}>
                         <span style={o.stStyle}>{o.stLabel}</span>
-                        <span
-                          style={{
-                            marginLeft: 6, fontSize: 10, padding: '1px 6px', borderRadius: 5,
-                            background: o.batchReady ? 'var(--st-ok-bg)' : 'var(--st-warn-bg)',
-                            color: o.batchReady ? 'var(--st-ok-fg)' : 'var(--st-warn-fg)',
-                          }}
-                        >
-                          {o.batchReady ? 'พร้อม batch' : 'รอ batch'}
-                        </span>
+                        {o.noDeliveryDate ? (
+                          <span
+                            style={{ marginLeft: 6, fontSize: 10, padding: '1px 6px', borderRadius: 5, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)' }}
+                            title="ระบุวันที่จะจัดส่งในตารางด้านล่างก่อน จึงจะจัดลงรถ/จัดล็อตได้"
+                          >
+                            <i className="ph ph-calendar-x" style={{ marginRight: 3 }} />ต้องระบุวันที่จัดส่งก่อน
+                          </span>
+                        ) : (
+                          <span
+                            style={{
+                              marginLeft: 6, fontSize: 10, padding: '1px 6px', borderRadius: 5,
+                              background: o.batchReady ? 'var(--st-ok-bg)' : 'var(--st-warn-bg)',
+                              color: o.batchReady ? 'var(--st-ok-fg)' : 'var(--st-warn-fg)',
+                            }}
+                          >
+                            {o.batchReady ? 'พร้อม batch' : 'รอ batch'}
+                          </span>
+                        )}
                       </td>
                       <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={o.viewItems}>ดูสินค้า</button></td>
                     </tr>
@@ -337,11 +350,19 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
           <div className="dialog" onClick={(e) => e.stopPropagation()}>
             <div className="dialog-title">ยืนยันจัด Batch ทั้งหมดที่รอ</div>
             <div className="dialog-body">
-              เลือกออเดอร์ที่รอ batch ทั้งหมด {v.pendingBatchCount} รายการไว้แล้ว แล้วพาไปหน้า "วางแผนจัดรูท" — จากนั้นเลือกรถจากดรอปดาวน์ "จัดลงรถ…" แล้วกด "ยืนยันรูท (Assign)" ตามขั้นตอนปกติเพื่อสร้าง Batch Route จริง (ออเดอร์ที่คนละวันจัดส่งกันต้อง Assign แยกรอบกัน เพราะหนึ่ง Batch ผูกกับวันที่จัดส่งเดียว)
+              เลือกออเดอร์ที่รอ batch ทั้งหมด {v.pendingBatchReadyOrderNos.length} รายการไว้แล้ว แล้วพาไปหน้า "วางแผนจัดรูท" — จากนั้นเลือกรถจากดรอปดาวน์ "จัดลงรถ…" แล้วกด "ยืนยันรูท (Assign)" ตามขั้นตอนปกติเพื่อสร้าง Batch Route จริง (ออเดอร์ที่คนละวันจัดส่งกันต้อง Assign แยกรอบกัน เพราะหนึ่ง Batch ผูกกับวันที่จัดส่งเดียว)
+              {v.pendingBatchNoDateCount > 0 && (
+                <div style={{ marginTop: 10, padding: '8px 10px', borderRadius: 8, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 12.5 }}>
+                  <i className="ph ph-warning-fill" style={{ marginRight: 5 }} />
+                  ข้าม {v.pendingBatchNoDateCount} ออเดอร์ที่ยังไม่มีวันที่จัดส่ง — ระบุวันที่จัดส่งในตารางก่อน แล้วค่อยจัด Batch ให้ทีหลัง
+                </div>
+              )}
             </div>
             <div className="dialog-actions">
               <button className="btn btn-secondary" onClick={() => setPendingBatchDialogOpen(false)}>ยกเลิก</button>
-              <button className="btn btn-primary" onClick={confirmBatchAllPending}>ไปเลือกรถที่วางแผนจัดรูท</button>
+              <button className="btn btn-primary" onClick={confirmBatchAllPending} disabled={v.pendingBatchReadyOrderNos.length === 0}>
+                ไปเลือกรถที่วางแผนจัดรูท
+              </button>
             </div>
           </div>
         </div>

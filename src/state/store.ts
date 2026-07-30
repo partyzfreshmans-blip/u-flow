@@ -23,11 +23,13 @@ import { updateRouteOrder } from '../data/sources/routeOrdersWrite';
 import { loadDriverQueue, saveDriverQueue } from '../data/driverQueue';
 import { loadPickLots, savePickLots, type PickLot, type PickLotLine } from '../data/pickLots';
 import { loadBatchRoutes, saveBatchRoutes, type BatchRoute } from '../data/batchRoutes';
+import { loadStuckDetachments, saveStuckDetachments, type StuckDetachmentIndex } from '../data/stuckDetachments';
 import { loadDeliveryFailures, saveDeliveryFailures, type DeliveryFailureIndex, type DeliveryFailureRecord } from '../data/deliveryFailures';
 import { loadPreDepartureChecklists, savePreDepartureChecklists, type PreDepartureChecklistIndex } from '../data/preDeparture';
 import { loadFailedDeliveryQueue, removeFailedDeliveryQueueItem, saveFailedDeliveryQueueItem, type FailedDeliveryQueueItem } from '../data/failedDeliveryQueue';
 import { fetchBatchRoutes as apiFetchBatchRoutes, upsertBatchRoutes as apiUpsertBatchRoutes } from '../data/sources/batchRoutesApi';
 import { DELIVERED_STATUSES, DELIVERY_FAILED_STATUS, PICK_CLOSED_STATUS } from './helpers';
+import { effectiveDeliveryDayKey, ordersNeedingStuckBatchDetach } from './derive';
 import type { AttachmentScope } from '../config/drive';
 import type { ApiImportOrder, CsMasterCustomer, OrderLineItem, Promo, PromoPackUnit, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
 import { csvExportUrl, SHEET_TABS } from '../config/sheets';
@@ -38,7 +40,7 @@ import { loadSidebarCollapsed, saveSidebarCollapsed } from '../data/sidebarState
 import { clearSession, loadSession, saveSession, type Session } from '../data/session';
 import { createUser as apiCreateUser, fetchUsers as apiFetchUsers, login as apiLogin, updateUser as apiUpdateUser, type UserListRow } from '../data/sources/authApi';
 import { createBookings as apiCreateBookings, decideBookingRequest as apiDecideBooking, fetchBookings as apiFetchBookings, type BookingRow } from '../data/sources/bookingsApi';
-import { defaultRouteFor, type Role } from '../config/permissions';
+import { canEditPlan, defaultRouteFor, type Role } from '../config/permissions';
 
 export interface OrderEditDraft {
   /** ISO YYYY-MM-DD, '' = not set. */
@@ -150,6 +152,11 @@ export interface AppState {
   // batch routes — permanent per-vehicle "confirmed run" records created by
   // the Planner's "Assign" step (see src/data/batchRoutes.ts)
   batchRoutes: BatchRoute[];
+  /** orderNo -> record of the cross-day stuck-order detector having pulled
+   * it off a Batch Route (see ordersNeedingStuckBatchDetach in derive.ts and
+   * autoDetachStuckOrders below) — drives the Planner's "ตกหล่นจากวันก่อนหน้า"
+   * badge on that now-unassigned order. */
+  stuckDetachments: StuckDetachmentIndex;
   /** batchId -> true while that batch's locked sequence/membership is
    * temporarily unlocked for editing. Deliberately not persisted — a reload
    * re-locks everything, which is the safer default. */
@@ -166,6 +173,11 @@ export interface AppState {
    * on the Planner page. The batch itself is never rolled back for this;
    * it's a "go check/retry" notice, not a blocker. */
   courierStampWarning: string | null;
+  /** Set when the Planner's "จัดลงรถ" bulk-assign includes an order with no
+   * delivery date — those get dropped from the assignment (see the gate in
+   * computePlanner's assignSelectedTo) and this dismissible message names
+   * them, so the rejection is explicit rather than a silent no-op. */
+  plannerAssignSkippedMessage: string | null;
   /** Set when a background push of batchRoutes to the shared backend (see
    * src/data/sources/batchRoutesApi.ts) fails — the edit itself is never
    * rolled back (local state + localStorage already have it), this is only
@@ -464,11 +476,13 @@ export const initialState: AppState = {
   routeSortDirection: {},
   plannerSelectedOrderNos: [],
   batchRoutes: [],
+  stuckDetachments: {},
   batchRouteUnlocked: {},
   batchRouteQ: '',
   plannerTab: 'plan',
   assignDialogOpen: false,
   courierStampWarning: null,
+  plannerAssignSkippedMessage: null,
   batchRoutesSyncWarning: null,
   assignSelectedVehicleIds: [],
   orderLocationOrderNo: null,
@@ -878,13 +892,17 @@ export function useAppStore() {
    * state immediately. Called from every user action that changes something
    * meaningful (order edits, planner moves, pick-lot closes, lat/lng fixes,
    * receiving, attachments) — see each action below. */
-  function logActivity(action: string, detail: string, orderNo?: string) {
-    const username = loadSession()?.username ?? 'ไม่ทราบผู้ใช้';
+  /** userOverride is for the rare system-triggered entry (see
+   * autoDetachStuckOrders) that shouldn't be attributed to whichever
+   * session happened to be open and polling when it fired. */
+  function logActivity(action: string, detail: string, orderNo?: string, userOverride?: string) {
+    const username = userOverride ?? loadSession()?.username ?? 'ไม่ทราบผู้ใช้';
     dispatch({
       type: 'patch',
       patch: { activityLog: appendActivityLog(loadActivityLog(), { user: username, action, detail, orderNo }) },
     });
   }
+  const SYSTEM_USER_LABEL = 'ระบบ (ตรวจจับอัตโนมัติ)';
 
   /** Marks a successful refresh of any Google Sheet source — called from
    * every fetch-on-mount effect below and from the manual syncNow action, so
@@ -1080,6 +1098,7 @@ export function useAppStore() {
         driverSyncQueue: loadDriverQueue(),
         pickLots: loadPickLots(),
         batchRoutes: loadBatchRoutes(),
+        stuckDetachments: loadStuckDetachments(),
         deliveryFailures: loadDeliveryFailures(),
         preDepartureChecklists: loadPreDepartureChecklists(),
         lastSyncAt: loadLastSyncAt(),
@@ -1276,6 +1295,55 @@ export function useAppStore() {
         clearOrStampCourier(batch.orderNos, null);
         logActivity('ยกเลิก Batch Route', `${batch.id} · ปลด ${batch.orderNos.length} ออเดอร์ (${batch.orderNos.join(', ')})`);
       },
+      /** Cross-day stuck-order detector's write action (see
+       * ordersNeedingStuckBatchDetach in derive.ts and the effect below that
+       * calls this) — a driver never marked one or more stops delivered (or
+       * failed) before their delivery day ended, so each gets pulled out of
+       * its batch's manifest individually (unlike cancelBatchRoute, this
+       * never touches the rest of that batch's — possibly already
+       * delivered — orders) and freed up for reassignment. Attributed to a
+       * system label, not whichever session happened to be polling when
+       * this fired. Grouped by originating batch so two stuck orders from
+       * the same batch remove cleanly in one state update instead of racing
+       * each other. */
+      autoDetachStuckOrders: (entries: { orderNo: string; batch: BatchRoute }[], batchRoutes: BatchRoute[]) => {
+        if (entries.length === 0) return;
+        const now = new Date().toISOString();
+        const removeByBatchId = new Map<string, Set<string>>();
+        for (const e of entries) {
+          let set = removeByBatchId.get(e.batch.id);
+          if (!set) {
+            set = new Set();
+            removeByBatchId.set(e.batch.id, set);
+          }
+          set.add(e.orderNo);
+        }
+        const next = batchRoutes.map((b) => {
+          const removeSet = removeByBatchId.get(b.id);
+          if (!removeSet) return b;
+          return { ...b, orderNos: b.orderNos.filter((no) => !removeSet.has(no)), updatedAt: now, updatedBy: SYSTEM_USER_LABEL };
+        });
+        persistBatchRoutes(next);
+        clearOrStampCourier(entries.map((e) => e.orderNo), null);
+
+        const detachments = { ...loadStuckDetachments() };
+        for (const e of entries) {
+          detachments[e.orderNo] = { orderNo: e.orderNo, fromBatchId: e.batch.id, fromVehicleName: e.batch.vehicleName, detectedAt: now };
+        }
+        saveStuckDetachments(detachments);
+        dispatch({ type: 'patch', patch: { stuckDetachments: detachments } });
+
+        for (const [batchId, orderNoSet] of removeByBatchId) {
+          const batch = batchRoutes.find((b) => b.id === batchId);
+          const orderNos = [...orderNoSet];
+          logActivity(
+            'ตรวจพบออเดอร์ตกหล่นข้ามวัน',
+            `${batchId} · ${batch?.vehicleName ?? ''} · ${orderNos.length} ออเดอร์ (${orderNos.join(', ')}) — เลยกำหนดส่งแล้วแต่ยังไม่สำเร็จ ปลดออกจากรถแล้ว ต้องเอาสินค้าลงจากรถเพื่อจัดใหม่`,
+            undefined,
+            SYSTEM_USER_LABEL,
+          );
+        }
+      },
       /** Best-effort background write of column N ("คนส่ง") in the คำสั่งซื้อ
        * sheet after a batch Assign or edit — fires once per order via
        * Promise.allSettled (not Promise.all) so one bad row can't hide the
@@ -1286,6 +1354,7 @@ export function useAppStore() {
        * (order pulled out of its batch) instead of setting it. */
       stampCourierOrders: (orderNos: string[], stamp: { vehicleId: string; vehicleName: string; batchId: string } | null) => clearOrStampCourier(orderNos, stamp),
       dismissCourierStampWarning: () => dispatch({ type: 'patch', patch: { courierStampWarning: null } }),
+      dismissPlannerAssignSkippedMessage: () => dispatch({ type: 'patch', patch: { plannerAssignSkippedMessage: null } }),
       saveRouteCod: (collected: Record<string, string>, method: Record<string, 'cash' | 'transfer'>) => {
         saveRouteCodState({ collected, method });
         dispatch({ type: 'patch', patch: { routeCodCollected: collected, routeCodMethod: method } });
@@ -1829,7 +1898,16 @@ export function useAppStore() {
        * across orders into one summed line each, and opens the new lot. An
        * order with zero rows in SKU Detail doesn't fail the whole thing — it's
        * just flagged in ordersWithNoLines so the picker sees it plainly. */
-      createPickLot: async (orderNos: string[], routeOrders: RouteOrder[], skus: Sku[], lots: PickLot[]) => {
+      createPickLot: async (orderNosIn: string[], routeOrders: RouteOrder[], skus: Sku[], lots: PickLot[]) => {
+        // Gate: no delivery date — same rule computePickOrderSelection's
+        // candidates filter already enforces (so this can't normally be hit
+        // via the UI), repeated here defensively in case a selection went
+        // stale (e.g. the order's date was cleared after it was checked).
+        const byOrderNoForGate = new Map(routeOrders.map((o) => [o.orderNo, o]));
+        const orderNos = orderNosIn.filter((no) => {
+          const o = byOrderNoForGate.get(no);
+          return !o || effectiveDeliveryDayKey(o) !== null;
+        });
         if (orderNos.length === 0) return;
         dispatch({ type: 'patch', patch: { pickCreating: true, pickCreateError: null } });
         try {
@@ -2101,6 +2179,24 @@ export function useAppStore() {
     }),
     [],
   );
+
+  // Cross-day stuck-order auto-detach: recomputed on every routeOrders or
+  // batchRoutes change (initial load, manual sync, and the batchRoutes poll
+  // above every 15s — no separate timer needed for "real time" here). Only
+  // administrator/manager/admin_staff sessions actually perform the write
+  // (matching the backend's own permission check on both
+  // /api/route-orders/update's clearCourierStamp path and batch-routes
+  // upsert), so a driver/checker/picker session with the app open never
+  // attempts a call the server would just 403 anyway. Self-healing: once an
+  // order is detached, it drops out of ordersNeedingStuckBatchDetach's
+  // result on the very next recompute (it's no longer in any batch's
+  // orderNos), so this never reprocesses the same order twice.
+  useEffect(() => {
+    if (!state.session || !canEditPlan(state.session.role)) return;
+    const entries = ordersNeedingStuckBatchDetach(state, todayDayKey());
+    if (entries.length > 0) actions.autoDetachStuckOrders(entries, state.batchRoutes);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.routeOrders, state.batchRoutes, state.session?.username]);
 
   return { state, actions };
 }
