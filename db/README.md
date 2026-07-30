@@ -1,10 +1,13 @@
-# Postgres migration — Phase 1 (schema + connection setup)
+# Postgres migration
 
-Status: **scaffolding only**. Nothing in the running app reads from or
-writes to Postgres yet — Google Sheets remains the live source of truth.
-This phase exists so that once a `DATABASE_URL` is set, the schema and
-connection client are ready to use, without the app's actual behavior
-changing at all.
+Status: **schema + historical data are in Postgres; the running app still
+reads/writes Google Sheets exclusively.** Nothing in `server/lib.ts` or
+`api/*.ts` has been switched over — that is a future phase. This phase's
+goal was: get the schema right, and get a faithful copy of everything
+Sheets-accessible into Postgres, without touching a single line of the
+live app's behavior or a single cell of the source spreadsheet.
+
+## Provider: Neon
 
 ## Provider: Neon
 
@@ -62,6 +65,43 @@ table again — it doesn't touch any of the real schema below.
 ```
 psql "$DATABASE_URL" -f db/migrations/0001_init.sql
 ```
+
+## Migrating existing data from Google Sheets
+
+```
+npx tsx scripts/migrate-to-postgres.ts
+```
+
+Requires both `DATABASE_URL` and `GOOGLE_SERVICE_ACCOUNT_KEY` (the same
+credential `server/lib.ts` already uses) set in the environment. Reads
+every Sheets-backed tab and writes into Postgres; never modifies the
+spreadsheet. Safe to re-run any time — each table this script owns
+(`customers`, `sku_master`, `promotions`, `batch_routes`, `users`, `orders`,
+`order_line_items`, `delivery_bookings`) is fully replaced with a fresh copy
+of current Sheets content on every run (`TRUNCATE` + re-insert in one
+transaction), so re-running after fixing a Sheets typo just picks up the
+fix — it never duplicates rows. Prints a per-table report of rows migrated
+and anything skipped, with the reason (e.g. an order whose "คนส่ง" column
+references a batch ID that no longer exists in the Batch Routes tab).
+
+Four features have **no server-reachable source to migrate from** —
+`activity_log`, `goods_receiving`, `batch_picking`, and `attachments` are
+all stored in each browser's own `localStorage` only and have never been
+sent to any backend or Sheet (see the relevant `src/data/*.ts` files' own
+comments). The script reports this plainly for each one rather than
+silently leaving them empty; centralizing that data in a future phase would
+need a new "export from this browser" feature first, since there is
+nothing server-side to read today.
+
+Its core transform/load logic (deduplication, order/customer joins, FK-safe
+handling of dangling references, and the truncate-and-reload idempotency)
+was verified against a local Postgres instance using fixture data standing
+in for Sheets content — including running it twice back-to-back to confirm
+no duplicates and identical results. It has not been run against the real
+production spreadsheet or a real Neon/Supabase database from this
+environment, since neither `GOOGLE_SERVICE_ACCOUNT_KEY` nor a production
+`DATABASE_URL` is available here — run it from an environment that has
+both (e.g. locally with `.env` filled in, or `vercel env pull` first).
 
 ## Tables created
 
