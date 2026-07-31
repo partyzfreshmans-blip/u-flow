@@ -8,7 +8,7 @@ import type { ApiImportOrder, RouteOrder, StaffOrderInfo } from '../src/data/typ
 import { DELIVERY_DONE_STATUSES } from '../src/state/helpers.js';
 import { getDb } from './db.js';
 import { createSessionToken, verifySessionToken } from './session.js';
-import { fetchApiImportOrdersFromUnii } from './unii.js';
+import { fetchAllUniiOrders } from './unii.js';
 
 // Shared core for the backend. Most write-back features (users, orders,
 // customers, batch routes, bookings, promotions, activity log, batch
@@ -673,12 +673,12 @@ export async function handleExportBatchRouteHistory(token: string | null): Promi
 
   const sql = getDb();
   const [uniiResult, staffInfos, batchRawRows] = await Promise.all([
-    fetchApiImportOrdersFromUnii(),
+    readCachedApiImportOrders(),
     readStaffOrderInfoPg(sql),
     readBatchRoutesRawPg(sql),
   ]);
-  if (uniiResult.orders === null) {
-    return { status: 502, body: { error: uniiResult.error ?? 'เชื่อมต่อ Unii API ไม่สำเร็จ — export ไม่ได้' } };
+  if (uniiResult.orders.length === 0) {
+    return { status: 502, body: { error: uniiResult.error ?? 'ยังไม่มีข้อมูลออเดอร์ — export ไม่ได้' } };
   }
 
   const orderByNo = new Map(joinRouteOrdersForExport(uniiResult.orders, staffInfos).map((o): [string, RouteOrder] => [o.orderNo, o]));
@@ -1104,14 +1104,13 @@ export async function handleSyncCustomerNames(token: string | null, body: unknow
 
 /** Upserts customers.{name_from_unii,lat_from_unii,lng_from_unii,
  * address_from_unii} by phone from a batch of orders fresh off the Unii API
- * — called only when handleFetchApiImportOrders actually talked to Unii just
- * now (see UniiFetchResult.freshlyFetched), never on a request that only
- * re-served the in-process cache. Deliberately leaves lat_override/
- * lng_override untouched, same as handleSyncCustomerNames — a manually
- * corrected pin always wins over whatever Unii itself reports. Orders come
- * back sorted createdAt:desc, so the FIRST order seen for a phone is the
- * most recent one — that's the customer snapshot that should win if the same
- * phone appears on more than one order in this batch. */
+ * — called only from handleSyncUniiOrders, right after a successful live
+ * Unii fetch. Deliberately leaves lat_override/lng_override untouched, same
+ * as handleSyncCustomerNames — a manually corrected pin always wins over
+ * whatever Unii itself reports. Orders come back sorted createdAt:desc, so
+ * the FIRST order seen for a phone is the most recent one — that's the
+ * customer snapshot that should win if the same phone appears on more than
+ * one order in this batch. */
 async function syncCustomersFromApiImportOrders(orders: ApiImportOrder[]): Promise<void> {
   const byPhone = new Map<string, { name: string; lat: number | null; lng: number | null; address: string }>();
   for (const o of orders) {
@@ -1135,31 +1134,247 @@ async function syncCustomersFromApiImportOrders(orders: ApiImportOrder[]): Promi
   `;
 }
 
-/** Order data straight from the Unii API (see server/unii.ts) — replaces the
- * old public "API Import" Sheets CSV export as the source of order data.
- * Session-gated like every other Postgres-backed read now (Unii has no
- * public/anonymous read path either), unlike the old CSV export which needed
- * no login. On a Unii outage/expired token this still returns 200 with
- * whatever cached data is available (stale: true) rather than an error
- * status, so the frontend can keep showing last-known-good orders instead of
- * an error screen — only returns non-2xx when there is truly nothing to
- * show. */
+const UNII_ORDER_CACHE_COLUMNS = [
+  'order_uid',
+  'no',
+  'status',
+  'payment_type',
+  'paid',
+  'item_count',
+  'total_amount',
+  'customer',
+  'phone',
+  'address',
+  'district',
+  'province',
+  'ordered_at',
+  'delivered_at',
+  'completed_at',
+  'wants_tax_invoice',
+  'unii_updated_at',
+  'lat',
+  'lng',
+  'distance_from_wh_km',
+  'wh_lat',
+  'wh_lng',
+  'raw',
+] as const;
+
+// Comfortably under postgres.js's ~65534-parameter-per-query ceiling (22
+// columns * 500 rows = 11,000 params) — chunked so a branch with an
+// unusually large order history can never hit that limit in one INSERT.
+const UPSERT_CHUNK_SIZE = 500;
+
+/** Upserts every order into unii_order_cache, keyed by order_uid — never
+ * deletes anything (see db/migrations/0003_unii_order_cache.sql's header
+ * comment for why: a sync that stops early on Unii's pagination time budget
+ * must never be read as "these orders don't exist anymore"). Chunked to
+ * stay well under postgres.js's per-query parameter limit regardless of how
+ * many orders one sync fetches. */
+async function upsertUniiOrderCache(sql: ReturnType<typeof getDb>, orders: ApiImportOrder[]): Promise<void> {
+  if (orders.length === 0) return;
+  const rows = orders.map((o) => ({
+    order_uid: o.orderUid,
+    no: o.no,
+    status: o.status,
+    payment_type: o.paymentType,
+    paid: o.paid,
+    item_count: o.itemCount,
+    total_amount: o.totalAmount,
+    customer: o.customer,
+    phone: o.phone,
+    address: o.address,
+    district: o.district,
+    province: o.province,
+    ordered_at: o.orderedAt,
+    delivered_at: o.deliveredAt,
+    completed_at: o.completedAt,
+    wants_tax_invoice: o.wantsTaxInvoice,
+    unii_updated_at: o.updatedAt,
+    lat: o.lat,
+    lng: o.lng,
+    distance_from_wh_km: o.distanceFromWhKm,
+    wh_lat: o.whLat,
+    wh_lng: o.whLng,
+    // o.raw is Unii's own parsed JSON response body (server/unii.ts's
+    // mapUniiOrder), so it's always plain-JSON-serializable at runtime —
+    // postgres.js's JSONValue type just doesn't structurally match a
+    // Record<string, unknown> index signature.
+    raw: sql.json(o.raw as Parameters<typeof sql.json>[0]),
+  }));
+
+  for (let i = 0; i < rows.length; i += UPSERT_CHUNK_SIZE) {
+    const chunk = rows.slice(i, i + UPSERT_CHUNK_SIZE);
+    await sql`
+      INSERT INTO unii_order_cache ${sql(chunk, ...UNII_ORDER_CACHE_COLUMNS)}
+      ON CONFLICT (order_uid) DO UPDATE SET
+        no = EXCLUDED.no,
+        status = EXCLUDED.status,
+        payment_type = EXCLUDED.payment_type,
+        paid = EXCLUDED.paid,
+        item_count = EXCLUDED.item_count,
+        total_amount = EXCLUDED.total_amount,
+        customer = EXCLUDED.customer,
+        phone = EXCLUDED.phone,
+        address = EXCLUDED.address,
+        district = EXCLUDED.district,
+        province = EXCLUDED.province,
+        ordered_at = EXCLUDED.ordered_at,
+        delivered_at = EXCLUDED.delivered_at,
+        completed_at = EXCLUDED.completed_at,
+        wants_tax_invoice = EXCLUDED.wants_tax_invoice,
+        unii_updated_at = EXCLUDED.unii_updated_at,
+        lat = EXCLUDED.lat,
+        lng = EXCLUDED.lng,
+        distance_from_wh_km = EXCLUDED.distance_from_wh_km,
+        wh_lat = EXCLUDED.wh_lat,
+        wh_lng = EXCLUDED.wh_lng,
+        raw = EXCLUDED.raw,
+        synced_at = now()
+    `;
+  }
+}
+
+interface UniiOrderCacheRow {
+  order_uid: string;
+  no: string;
+  status: string;
+  payment_type: string;
+  paid: string;
+  item_count: number;
+  total_amount: string | number;
+  customer: string;
+  phone: string;
+  address: string;
+  district: string;
+  province: string;
+  ordered_at: string;
+  delivered_at: string;
+  completed_at: string;
+  wants_tax_invoice: string;
+  unii_updated_at: string;
+  lat: string | number | null;
+  lng: string | number | null;
+  distance_from_wh_km: string | number | null;
+  wh_lat: string | number | null;
+  wh_lng: string | number | null;
+  raw: Record<string, unknown> | null;
+}
+
+function numOrNull(v: string | number | null): number | null {
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** The one read path every consumer of Unii order data now goes through —
+ * Dashboard, Order Management, Planner, exports, all of it — instead of each
+ * calling Unii live. `stale`/`error` reflect unii_sync_status.last_error:
+ * true only when the MOST RECENT sync attempt failed, cleared back to false
+ * the moment a later sync succeeds, so a since-resolved failure never lingers
+ * as a false alarm. Never throws and never 502s except when the cache is
+ * still completely empty (a brand-new database whose first sync hasn't run
+ * yet) — any other case, however stale, still has real data worth showing. */
+async function readCachedApiImportOrders(): Promise<{ orders: ApiImportOrder[]; stale: boolean; error: string | null }> {
+  const sql = getDb();
+  const [rows, statusRows] = await Promise.all([
+    sql<UniiOrderCacheRow[]>`SELECT * FROM unii_order_cache ORDER BY synced_at DESC`,
+    sql<{ last_error: string | null }[]>`SELECT last_error FROM unii_sync_status WHERE id = 'singleton'`,
+  ]);
+
+  const orders: ApiImportOrder[] = rows.map((r) => ({
+    no: r.no,
+    orderUid: r.order_uid,
+    status: r.status,
+    paymentType: r.payment_type,
+    paid: r.paid,
+    itemCount: Number(r.item_count),
+    totalAmount: Number(r.total_amount),
+    customer: r.customer,
+    phone: r.phone,
+    address: r.address,
+    district: r.district,
+    province: r.province,
+    orderedAt: r.ordered_at,
+    deliveredAt: r.delivered_at,
+    completedAt: r.completed_at,
+    wantsTaxInvoice: r.wants_tax_invoice,
+    updatedAt: r.unii_updated_at,
+    lat: numOrNull(r.lat),
+    lng: numOrNull(r.lng),
+    distanceFromWhKm: numOrNull(r.distance_from_wh_km),
+    whLat: numOrNull(r.wh_lat),
+    whLng: numOrNull(r.wh_lng),
+    raw: r.raw ?? {},
+  }));
+
+  const lastError = statusRows[0]?.last_error ?? null;
+  return { orders, stale: !!lastError, error: lastError };
+}
+
+/** Order data from the persisted Unii mirror (see readCachedApiImportOrders)
+ * — replaces the old direct-per-request Unii call and, before that, the old
+ * public "API Import" Sheets CSV export. Session-gated like every other
+ * Postgres-backed read now (Unii has no public/anonymous read path either).
+ * Only returns non-2xx when unii_order_cache is still completely empty (no
+ * sync has ever succeeded) — a failed sync on top of previously-good data
+ * still returns 200 with stale:true, so the frontend keeps showing
+ * last-known-good orders instead of an error screen. */
 export async function handleFetchApiImportOrders(token: string | null): Promise<ApiResult> {
   const payload = verifySessionToken(token);
   if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
 
-  const result = await fetchApiImportOrdersFromUnii();
-  if (result.orders === null) {
-    return { status: 502, body: { error: result.error ?? 'เชื่อมต่อ Unii API ไม่สำเร็จ', orders: [] } };
-  }
-
-  if (result.freshlyFetched) {
-    syncCustomersFromApiImportOrders(result.orders).catch((err: unknown) => {
-      console.error('[unii/sync-customers]', err instanceof Error ? err.message : err);
-    });
+  const result = await readCachedApiImportOrders();
+  if (result.orders.length === 0) {
+    return { status: 502, body: { error: result.error ?? 'ยังไม่มีข้อมูลออเดอร์ — รอรอบ sync ถัดไป หรือสั่ง sync ด้วยตนเองก่อน', orders: [] } };
   }
 
   return { status: 200, body: { orders: result.orders, stale: result.stale, error: result.error } };
+}
+
+/** Cron-triggered refresh of unii_order_cache (see vercel.json) — the only
+ * thing that ever calls Unii live now (see server/unii.ts's header comment).
+ * Vercel automatically attaches `Authorization: Bearer $CRON_SECRET` to its
+ * own cron requests once CRON_SECRET is set as a project env var; checked
+ * here so this endpoint can't be triggered by anyone who merely guesses its
+ * path. A signed-in administrator/manager session also authorizes a call,
+ * so a sync can be kicked off manually (e.g. while testing, or from a future
+ * "sync now" button) without needing the cron secret on hand. Never lets a
+ * Unii-side failure take down anything else: the failure is recorded on
+ * unii_sync_status and returned here, but every existing row in
+ * unii_order_cache is untouched, so every page read keeps working off
+ * whatever was last synced successfully. */
+export async function handleSyncUniiOrders(token: string | null): Promise<ApiResult> {
+  const cronSecret = process.env.CRON_SECRET?.trim();
+  const isCron = !!cronSecret && token === cronSecret;
+  const session = isCron ? null : verifySessionToken(token);
+  const isPrivilegedUser = !!session && (session.role === 'administrator' || session.role === 'manager');
+  if (!isCron && !isPrivilegedUser) {
+    return { status: 401, body: { error: 'ต้องใช้ CRON_SECRET หรือ session ของ administrator/manager' } };
+  }
+
+  const sql = getDb();
+  await sql`
+    INSERT INTO unii_sync_status (id, last_attempt_at) VALUES ('singleton', now())
+    ON CONFLICT (id) DO UPDATE SET last_attempt_at = now()
+  `;
+
+  try {
+    const orders = await fetchAllUniiOrders();
+    await upsertUniiOrderCache(sql, orders);
+    syncCustomersFromApiImportOrders(orders).catch((err: unknown) => {
+      console.error('[unii-sync/sync-customers]', err instanceof Error ? err.message : err);
+    });
+    await sql`
+      UPDATE unii_sync_status SET last_success_at = now(), last_error = NULL, row_count = ${orders.length} WHERE id = 'singleton'
+    `;
+    return { status: 200, body: { ok: true, synced: orders.length } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'ซิงค์ข้อมูล Unii ไม่สำเร็จ';
+    console.error('[unii-sync]', message);
+    await sql`UPDATE unii_sync_status SET last_error = ${message} WHERE id = 'singleton'`;
+    return { status: 502, body: { error: message } };
+  }
 }
 
 /** Every staff-entered order field — delivery date/note/tax invoice/
@@ -1267,9 +1482,9 @@ export async function handleExportRouteOrders(token: string | null): Promise<Api
   const payload = verifySessionToken(token);
   if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
 
-  const [uniiResult, staffInfos] = await Promise.all([fetchApiImportOrdersFromUnii(), readStaffOrderInfoPg(getDb())]);
-  if (uniiResult.orders === null) {
-    return { status: 502, body: { error: uniiResult.error ?? 'เชื่อมต่อ Unii API ไม่สำเร็จ — export ไม่ได้' } };
+  const [uniiResult, staffInfos] = await Promise.all([readCachedApiImportOrders(), readStaffOrderInfoPg(getDb())]);
+  if (uniiResult.orders.length === 0) {
+    return { status: 502, body: { error: uniiResult.error ?? 'ยังไม่มีข้อมูลออเดอร์ — export ไม่ได้' } };
   }
 
   const rows = joinRouteOrdersForExport(uniiResult.orders, staffInfos);

@@ -2,8 +2,17 @@
 // Import" tab as the source of order data (see src/data/types.ts's
 // ApiImportOrder). UNII_API_TOKEN lives ONLY here, in a Node-only env var,
 // exactly like GOOGLE_SERVICE_ACCOUNT_KEY/DATABASE_URL — never sent to the
-// browser bundle. The frontend only ever calls this app's own backend (see
-// server/lib.ts's handleFetchApiImportOrders), never Unii directly.
+// browser bundle.
+//
+// Nothing calls Unii live on a page read anymore. server/lib.ts's
+// handleSyncUniiOrders — triggered on a schedule by Vercel Cron, see
+// vercel.json — is now the ONLY caller of fetchAllUniiOrders below; it
+// upserts the result into Postgres's unii_order_cache table (see
+// db/migrations/0003_unii_order_cache.sql), and every page read goes
+// straight to that table (server/lib.ts's readCachedApiImportOrders)
+// instead. A Unii outage/timeout/rate-limit only ever affects the next
+// sync's success, never a page load — see unii_sync_status for how a
+// failed sync surfaces without ever becoming a hard page error.
 //
 // IMPORTANT — the exact JSON shape Unii returns has not been seen firsthand
 // (this environment has no network access to mart.iinuhcet.com to sample a
@@ -37,38 +46,8 @@ const PAGE_LIMIT = 100;
 // dedicated historical-backfill endpoint would need to look like.
 const MAX_PAGES = 40;
 const REQUEST_TIMEOUT_MS = 8_000;
-// Cache freshness window — comfortably inside the 30-60s range asked for.
-// Best-effort only: this is a plain module-level variable, so it only helps
-// within one warm serverless function instance; a cold start (or a
-// different instance handling the next request) always re-fetches. Good
-// enough to cut Unii calls under normal traffic without adding a shared
-// cache store the task didn't ask for.
-const CACHE_TTL_MS = 45_000;
 
-interface UniiCache {
-  orders: ApiImportOrder[];
-  fetchedAt: number;
-}
-
-let cache: UniiCache | null = null;
 let loggedUnmappedWarning = false;
-
-export interface UniiFetchResult {
-  /** null only when there has never been a successful fetch in this process
-   * AND the attempt just now also failed — the caller has nothing to show. */
-  orders: ApiImportOrder[] | null;
-  /** True when `orders` is left over from an earlier successful fetch
-   * because the live attempt just now failed (expired token, Unii down,
-   * rate limited, etc.) — the caller should still render `orders`, just with
-   * a soft "showing last known data" indicator instead of a hard error. */
-  stale: boolean;
-  /** True only when this call actually talked to Unii successfully just
-   * now (not served from the in-process cache) — the caller uses this to
-   * decide whether to run the customers.name_from_unii/etc. sync, so a
-   * request that only re-serves the 45s cache doesn't hit Postgres too. */
-  freshlyFetched: boolean;
-  error: string | null;
-}
 
 function pick(obj: Record<string, unknown>, keys: string[]): unknown {
   for (const key of keys) {
@@ -256,7 +235,19 @@ async function fetchUniiPage(token: string, page: number): Promise<unknown[]> {
   return orders;
 }
 
-async function fetchAllUniiOrders(token: string): Promise<ApiImportOrder[]> {
+/** Fetches every Unii order across as many pages as fit in the time budget
+ * below, mapped to ApiImportOrder. The only caller is server/lib.ts's
+ * handleSyncUniiOrders (the cron-triggered sync) — this always talks to
+ * Unii live, no caching of its own, since the caller is itself the thing
+ * responsible for freshness on a schedule; Postgres (unii_order_cache) is
+ * the one persisted cache every page read actually goes through. Throws on
+ * failure (missing token, network/timeout, an error status from Unii, or an
+ * unrecognized response shape) — the sync handler is what decides how a
+ * failure surfaces (see unii_sync_status), not this function. */
+export async function fetchAllUniiOrders(): Promise<ApiImportOrder[]> {
+  const token = process.env.UNII_API_TOKEN?.trim();
+  if (!token) throw new Error('UNII_API_TOKEN ไม่ได้ตั้งค่าไว้');
+
   const unmapped = new Set<string>();
   const mapped: ApiImportOrder[] = [];
   const deadline = Date.now() + 25_000; // overall pagination time budget
@@ -286,29 +277,3 @@ async function fetchAllUniiOrders(token: string): Promise<ApiImportOrder[]> {
   return mapped;
 }
 
-/** Main entry point — see UniiFetchResult's fields for the cache/staleness
- * contract. Never throws: a failure with no prior cache comes back as
- * `{ orders: null, error: '...' }` rather than a rejected promise, so a
- * caller can't accidentally let one bad Unii response take the whole
- * request handler down. */
-export async function fetchApiImportOrdersFromUnii(): Promise<UniiFetchResult> {
-  const token = process.env.UNII_API_TOKEN?.trim();
-  if (!token) {
-    return { orders: cache?.orders ?? null, stale: !!cache, freshlyFetched: false, error: 'UNII_API_TOKEN ไม่ได้ตั้งค่าไว้' };
-  }
-
-  if (cache && Date.now() - cache.fetchedAt < CACHE_TTL_MS) {
-    return { orders: cache.orders, stale: false, freshlyFetched: false, error: null };
-  }
-
-  try {
-    const orders = await fetchAllUniiOrders(token);
-    cache = { orders, fetchedAt: Date.now() };
-    return { orders, stale: false, freshlyFetched: true, error: null };
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'เชื่อมต่อ Unii API ไม่สำเร็จ';
-    console.error('[unii]', message);
-    if (cache) return { orders: cache.orders, stale: true, freshlyFetched: false, error: message };
-    return { orders: null, stale: false, freshlyFetched: false, error: message };
-  }
-}

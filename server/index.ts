@@ -31,6 +31,7 @@ import {
   handleLinkLineItemPromo,
   handleSavePickLot,
   handleSyncCustomerNames,
+  handleSyncUniiOrders,
   handleUpdateCsMasterLocation,
   handleUpdateRouteOrder,
   handleUpdateUser,
@@ -117,6 +118,11 @@ app.post('/api/route-orders/update', async (req, res) => {
 
 app.get('/api/route-orders/api-import', async (req, res) => {
   const { status, body } = await handleFetchApiImportOrders(bearerToken(req.headers.authorization));
+  res.status(status).json(body);
+});
+
+app.get('/api/route-orders/sync-unii', async (req, res) => {
+  const { status, body } = await handleSyncUniiOrders(bearerToken(req.headers.authorization));
   res.status(status).json(body);
 });
 

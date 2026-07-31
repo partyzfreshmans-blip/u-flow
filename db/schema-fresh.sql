@@ -1,18 +1,19 @@
 -- ============================================================================
 -- u-flow — full Postgres schema for a brand-new, completely empty database
 -- (e.g. a fresh Supabase project). Equivalent to running
--- db/migrations/0001_init.sql followed by db/migrations/0002_writeback_support.sql
--- in order, except every column each migration added is folded directly into
--- its table's CREATE TABLE below instead of a separate ALTER TABLE — there is
--- no existing data here to migrate, so there's nothing to preserve by keeping
--- the two migrations as separate steps.
+-- db/migrations/0001_init.sql, 0002_writeback_support.sql, and
+-- 0003_unii_order_cache.sql in order, except every column each migration
+-- added is folded directly into its table's CREATE TABLE below instead of a
+-- separate ALTER TABLE — there is no existing data here to migrate, so
+-- there's nothing to preserve by keeping the migrations as separate steps.
 --
 -- Run once, in full, against the empty database:
 --   psql "$DATABASE_URL" -f db/schema-fresh.sql
 -- (or paste the whole file into Supabase's SQL Editor and run it)
 --
--- Do NOT also run db/migrations/0001_init.sql / 0002_writeback_support.sql
--- afterwards — this file already creates everything both of those do.
+-- Do NOT also run db/migrations/0001_init.sql / 0002_writeback_support.sql /
+-- 0003_unii_order_cache.sql afterwards — this file already creates
+-- everything all three of those do.
 --
 -- No seed data is included on purpose: server/lib.ts's readUsersPg already
 -- auto-creates one throwaway account per role (admin/Admin#2026,
@@ -322,3 +323,50 @@ FROM batch_routes br
 LEFT JOIN orders o ON o.batch_route_id = br.id
 LEFT JOIN order_line_items oli ON oli.order_uid = o.order_uid
 GROUP BY br.id;
+
+-- ---------------------------------------------------------------------------
+-- unii_order_cache / unii_sync_status — persisted mirror of Unii API order
+-- data (server/unii.ts, server/lib.ts's handleSyncUniiOrders). A scheduled
+-- sync (Vercel Cron, see vercel.json) is the only thing that ever calls Unii
+-- live; every page read goes straight to this table, so a Unii outage never
+-- blocks or errors a page load — see db/migrations/0003_unii_order_cache.sql
+-- for the full rationale (upsert-only, never pruned; unii_sync_status.
+-- last_error surfaces a failed sync without ever becoming a page error).
+-- ---------------------------------------------------------------------------
+CREATE TABLE unii_order_cache (
+  order_uid           TEXT PRIMARY KEY,
+  no                  TEXT NOT NULL DEFAULT '',
+  status              TEXT NOT NULL DEFAULT '',
+  payment_type        TEXT NOT NULL DEFAULT '',
+  paid                TEXT NOT NULL DEFAULT '',
+  item_count          INTEGER NOT NULL DEFAULT 0,
+  total_amount        NUMERIC NOT NULL DEFAULT 0,
+  customer            TEXT NOT NULL DEFAULT '',
+  phone               TEXT NOT NULL DEFAULT '',
+  address             TEXT NOT NULL DEFAULT '',
+  district            TEXT NOT NULL DEFAULT '',
+  province            TEXT NOT NULL DEFAULT '',
+  ordered_at          TEXT NOT NULL DEFAULT '',
+  delivered_at        TEXT NOT NULL DEFAULT '',
+  completed_at        TEXT NOT NULL DEFAULT '',
+  wants_tax_invoice   TEXT NOT NULL DEFAULT '',
+  unii_updated_at     TEXT NOT NULL DEFAULT '',
+  lat                 NUMERIC,
+  lng                 NUMERIC,
+  distance_from_wh_km NUMERIC,
+  wh_lat              NUMERIC,
+  wh_lng              NUMERIC,
+  raw                 JSONB NOT NULL DEFAULT '{}'::jsonb,
+  synced_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_unii_order_cache_phone ON unii_order_cache (phone);
+CREATE INDEX idx_unii_order_cache_synced_at ON unii_order_cache (synced_at);
+
+CREATE TABLE unii_sync_status (
+  id              TEXT PRIMARY KEY DEFAULT 'singleton' CHECK (id = 'singleton'),
+  last_attempt_at TIMESTAMPTZ,
+  last_success_at TIMESTAMPTZ,
+  last_error      TEXT,
+  row_count       INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO unii_sync_status (id) VALUES ('singleton');

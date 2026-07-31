@@ -136,6 +136,8 @@ both (e.g. locally with `.env` filled in, or `vercel env pull` first).
 | `batch_picking`, `batch_picking_orders`, `batch_picking_picks` | `src/data/pickLots.ts` (currently browser localStorage only) |
 | `delivery_bookings` | Driver stop-booking (`server/lib.ts`, Sheets-backed) |
 | `attachments` | File metadata only — actual files stay on Google Drive (`src/data/sources/attachments.ts`) |
+| `unii_order_cache` | Persisted mirror of raw Unii order data (`ApiImportOrder`), kept fresh by a Vercel Cron-triggered sync — see "Unii order sync" below |
+| `unii_sync_status` | Single-row status of that sync job (last attempt/success/error) |
 
 Full column-by-column reasoning, including every place this schema
 deliberately diverges from a literal 1:1 field port, is documented as SQL
@@ -169,13 +171,40 @@ short version of each deviation:
   physically checked off, and whether an order's post-close status
   write-back is still pending) get their own tables.
 
-Not represented at all in this phase (flagged, not solved): raw Unii import
-data (`ApiImportOrder` — customer name/amount/item count/raw status/
-timestamps as Unii itself sends them) has no table here, because the user's
-own description of `orders` was staff-entered data specifically. A future
-migration phase needs a decision on where that raw import data lives once
-Postgres is live — a mirror table, or continuing to read it live from
-Sheets/Unii even after everything else moves over.
+Raw Unii import data (`ApiImportOrder` — customer name/amount/item count/raw
+status/timestamps as Unii itself sends them) is deliberately kept OUT of
+`orders` — that table stays staff-entered data only, per its own header
+comment in the migration. It now lives in its own mirror table instead
+(`unii_order_cache`, see below) rather than being read live from Unii on
+every page load.
+
+## Unii order sync (Vercel Cron)
+
+Every page that shows order data (Dashboard, Order Management, Planner,
+exports, ...) reads `unii_order_cache` — a plain, fast Postgres read that
+works even when Unii is completely down. The ONLY thing that ever calls the
+Unii API live is `GET /api/route-orders/sync-unii` (`server/lib.ts`'s
+`handleSyncUniiOrders`), triggered on a schedule by the `crons` entry in
+`vercel.json`. A failed sync updates `unii_sync_status.last_error` and
+leaves every existing row in `unii_order_cache` untouched — the next page
+read just serves the same data as before, marked `stale: true`, instead of
+erroring.
+
+**Vercel plan matters here.** Vercel's Hobby plan caps cron jobs at once per
+day — the `*/10 * * * *` (every 10 minutes) schedule in `vercel.json` needs
+a Pro plan (or higher) to actually run that often. On Hobby it will either
+fail to deploy or silently get capped to daily, depending on how Vercel is
+enforcing it at the time you read this — check your project's Cron Jobs tab
+after deploying. If staying on Hobby, trigger `GET
+/api/route-orders/sync-unii` from an external scheduler instead (a
+scheduled GitHub Actions workflow, or a free service like cron-job.org) —
+authenticate the same way Vercel's own cron does, with
+`Authorization: Bearer $CRON_SECRET`.
+
+`CRON_SECRET` is the only environment variable this feature needs beyond
+the existing `UNII_API_TOKEN`/`DATABASE_URL` — see `.env.example`. Once set
+as a Vercel project environment variable, Vercel automatically attaches it
+to its own cron requests; nothing else to wire up.
 
 ## Connecting from code
 
