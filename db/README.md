@@ -62,9 +62,26 @@ table again — it doesn't touch any of the real schema below.
 
 ## Applying the schema
 
+Against an existing database that's tracked migrations from the start:
+
 ```
 psql "$DATABASE_URL" -f db/migrations/0001_init.sql
+psql "$DATABASE_URL" -f db/migrations/0002_writeback_support.sql
 ```
+
+Against a brand-new, completely empty database (e.g. a fresh Supabase or
+Neon project with no tables yet) — one file, does everything both
+migrations above do combined, nothing else to run afterwards:
+
+```
+psql "$DATABASE_URL" -f db/schema-fresh.sql
+```
+
+(or paste db/schema-fresh.sql's contents into Supabase's SQL Editor and run
+it). No seed data needed — server/lib.ts auto-creates one throwaway login
+per role (admin/Admin#2026, etc.) the first time the `users` table is read
+empty; see that file's own header comment for the full list and a reminder
+to rotate those passwords.
 
 ## Migrating existing data from Google Sheets
 
