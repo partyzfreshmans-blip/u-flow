@@ -6,13 +6,16 @@ import type { ApiRequest, ApiResponse } from '../_types.js';
 // Was a single-file api/promotions/upsert.ts — converted to a [[...slug]]
 // catch-all (matching every other api/ route) to add a read endpoint
 // without adding a new Vercel Serverless Function (see
-// api/auth/[[...slug]].ts for why that matters on the Hobby plan). GET ''
-// replaces the old public "โปรโมชั่น" CSV export read, now that promotions
-// live in Postgres (which has no equivalent public read path).
+// api/auth/[[...slug]].ts for why that matters on the Hobby plan). GET
+// 'list' replaces the old public "โปรโมชั่น" CSV export read, now that
+// promotions live in Postgres (which has no equivalent public read path) —
+// 'list', not a bare '' slug, since see api/route-orders/[[...slug]].ts's
+// comment for why a zero-segment slug 404'd in production on that identical
+// pattern.
 export default async function handler(req: ApiRequest, res: ApiResponse) {
   const slug = routeSlug(req, '/api/promotions');
 
-  if (slug === '' && req.method === 'GET') {
+  if (slug === 'list' && req.method === 'GET') {
     const { status, body } = await handleListPromotions(bearerToken(req.headers.authorization));
     res.status(status).json(body);
     return;

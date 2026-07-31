@@ -172,7 +172,7 @@ function rowToPromo(row: Record<string, string>): Promo | null {
 export async function fetchPromotions(session: Session | null): Promise<Promo[]> {
   let res: Response;
   try {
-    res = await fetch('/api/promotions', { headers: authHeaders(session) });
+    res = await fetch('/api/promotions/list', { headers: authHeaders(session) });
   } catch {
     throw new Error('เชื่อมต่อ backend ไม่ได้ — ลองใหม่อีกครั้ง');
   }

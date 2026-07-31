@@ -22,7 +22,7 @@ export interface BookingRow {
 }
 
 export async function fetchBookings(session: Session): Promise<BookingRow[]> {
-  const res = await fetch('/api/bookings', { headers: authHeaders(session) });
+  const res = await fetch('/api/bookings/list', { headers: authHeaders(session) });
   const body = await readJson(res);
   if (!res.ok) throw new Error(errorMessage(body, `โหลดรายการจองคิวไม่สำเร็จ (HTTP ${res.status})`));
   return Array.isArray(body.bookings) ? (body.bookings as BookingRow[]) : [];

@@ -10,7 +10,7 @@ function errorMessage(body: Record<string, unknown>, fallback: string): string {
 }
 
 export async function fetchBatchRoutes(session: Session): Promise<BatchRoute[]> {
-  const res = await fetch('/api/batch-routes', { headers: authHeaders(session) });
+  const res = await fetch('/api/batch-routes/list', { headers: authHeaders(session) });
   const body = await readJson(res);
   if (!res.ok) throw new Error(errorMessage(body, `โหลด Batch Route ไม่สำเร็จ (HTTP ${res.status})`));
   return Array.isArray(body.batchRoutes) ? (body.batchRoutes as BatchRoute[]) : [];

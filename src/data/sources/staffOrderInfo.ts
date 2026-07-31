@@ -27,7 +27,7 @@ interface RouteOrderApiRow {
 export async function fetchStaffOrderInfo(session: Session | null): Promise<StaffOrderInfo[]> {
   let res: Response;
   try {
-    res = await fetch('/api/route-orders', { headers: authHeaders(session) });
+    res = await fetch('/api/route-orders/list', { headers: authHeaders(session) });
   } catch {
     throw new Error('เชื่อมต่อ backend ไม่ได้ — ลองใหม่อีกครั้ง');
   }
@@ -40,7 +40,7 @@ export async function fetchStaffOrderInfo(session: Session | null): Promise<Staf
     // on failure) — a 404 here is this app's own backend route/deployment,
     // unrelated to Unii or its token entirely.
     if (res.status === 404) {
-      throw new Error('ไม่พบ backend endpoint /api/route-orders — ตรวจสอบว่า deploy ล่าสุดสร้าง serverless function นี้จริง');
+      throw new Error('ไม่พบ backend endpoint /api/route-orders/list — ตรวจสอบว่า deploy ล่าสุดสร้าง serverless function นี้จริง');
     }
     throw new Error(`โหลดข้อมูลออเดอร์ไม่สำเร็จ (HTTP ${res.status})`);
   }

@@ -41,7 +41,7 @@ export interface UserListRow {
 export async function fetchUsers(session: Session): Promise<UserListRow[]> {
   let res: Response;
   try {
-    res = await fetch('/api/users', { headers: authHeaders(session) });
+    res = await fetch('/api/users/list', { headers: authHeaders(session) });
   } catch {
     throw new Error('เชื่อมต่อ backend ไม่ได้ — ลองใหม่อีกครั้ง');
   }

@@ -67,8 +67,8 @@ function sendResult(res: express.Response, result: ApiResult | FileResult): void
 
 const PORT = Number(process.env.SERVER_PORT ?? 8787);
 
-app.get('/health', (_req, res) => {
-  const { status, body } = handleHealth();
+app.get('/health', async (_req, res) => {
+  const { status, body } = await handleHealth();
   res.status(status).json(body);
 });
 
@@ -105,7 +105,7 @@ app.post('/api/cs-master/sync-names', async (req, res) => {
   res.status(status).json(body);
 });
 
-app.get('/api/route-orders', async (req, res) => {
+app.get('/api/route-orders/list', async (req, res) => {
   const { status, body } = await handleListRouteOrders(bearerToken(req.headers.authorization));
   res.status(status).json(body);
 });
@@ -124,7 +124,7 @@ app.get('/api/route-orders/export', async (req, res) => {
   sendResult(res, await handleExportRouteOrders(bearerToken(req.headers.authorization)));
 });
 
-app.get('/api/promotions', async (req, res) => {
+app.get('/api/promotions/list', async (req, res) => {
   const { status, body } = await handleListPromotions(bearerToken(req.headers.authorization));
   res.status(status).json(body);
 });
@@ -194,7 +194,7 @@ app.get('/api/auth/me', (req, res) => {
   res.status(status).json(body);
 });
 
-app.get('/api/users', async (req, res) => {
+app.get('/api/users/list', async (req, res) => {
   const { status, body } = await handleListUsers(bearerToken(req.headers.authorization));
   res.status(status).json(body);
 });
@@ -209,7 +209,7 @@ app.post('/api/users/update', async (req, res) => {
   res.status(status).json(body);
 });
 
-app.get('/api/bookings', async (req, res) => {
+app.get('/api/bookings/list', async (req, res) => {
   const { status, body } = await handleListBookings(bearerToken(req.headers.authorization));
   res.status(status).json(body);
 });
@@ -224,7 +224,7 @@ app.post('/api/bookings/decide', async (req, res) => {
   res.status(status).json(body);
 });
 
-app.get('/api/batch-routes', async (req, res) => {
+app.get('/api/batch-routes/list', async (req, res) => {
   const { status, body } = await handleListBatchRoutes(bearerToken(req.headers.authorization));
   res.status(status).json(body);
 });

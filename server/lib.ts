@@ -952,14 +952,36 @@ export async function handleUpsertBatchRoutes(token: string | null, body: unknow
   }
 }
 
-export function handleHealth(): ApiResult {
+/** `databaseConfigured` alone (env var present) was never enough to tell
+ * apart "DATABASE_URL isn't set" from "it's set but wrong/unreachable/
+ * migrations never ran against it" — exactly the ambiguity that made a batch
+ * of Postgres-backed endpoints (cs-master, ops/activity-log, ops/receiving,
+ * ...) all fail with a bare 500 with no way to see why short of Vercel's own
+ * function logs. `databaseConnected`/`databaseError` do a real `SELECT 1`
+ * (2s timeout — this must stay fast, /api/health is meant to be cheap) so
+ * hitting this one endpoint after a deploy tells the whole story: unset,
+ * set-but-unreachable (bad host/credential/network), or set-and-working. */
+export async function handleHealth(): Promise<ApiResult> {
   const configured = !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY?.trim();
+  const databaseConfigured = !!process.env.DATABASE_URL?.trim();
+  let databaseConnected = false;
+  let databaseError: string | null = null;
+  if (databaseConfigured) {
+    try {
+      await Promise.race([getDb()`SELECT 1`, new Promise((_, reject) => setTimeout(() => reject(new Error('timed out after 2s')), 2000))]);
+      databaseConnected = true;
+    } catch (err: unknown) {
+      databaseError = err instanceof Error ? err.message : 'เชื่อมต่อฐานข้อมูลไม่สำเร็จ (ไม่ทราบสาเหตุ)';
+    }
+  }
   return {
     status: 200,
     body: {
       ok: true,
       serviceAccountConfigured: configured,
-      databaseConfigured: !!process.env.DATABASE_URL?.trim(),
+      databaseConfigured,
+      databaseConnected,
+      databaseError,
       uniiApiConfigured: !!process.env.UNII_API_TOKEN?.trim(),
       driveFolderConfigured: !!process.env[DRIVE_ROOT_FOLDER_ENV]?.trim(),
       driveMockMode: !configured || !process.env[DRIVE_ROOT_FOLDER_ENV]?.trim(),
