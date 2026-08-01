@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useReducer, useRef } from 'react';
 import { fetchApiImportOrders } from '../data/sources/apiImportOrders';
 import { fetchCsMasterCustomers } from '../data/sources/csMaster';
-import { fetchCustomerLocationOverrides, syncCustomerNames, updateCsMasterLatLng, type CustomerLocationOverride } from '../data/sources/csMasterWrite';
+import { updateCsMasterLatLng } from '../data/sources/csMasterWrite';
 import { avgPricePerPiece, fetchPromotions, formatPackUnitsTerm, formatTiersTerm } from '../data/sources/promotionsSheet';
 import { upsertPromotion } from '../data/sources/promotionsWrite';
 import { fetchRouteOrders } from '../data/sources/routeOrders';
@@ -11,10 +11,7 @@ import { linkLineItemPromo as apiLinkLineItemPromo } from '../data/sources/skuDe
 import { fetchSkusFromSheet } from '../data/sources/skuSheet';
 import { attachmentKey, loadAttachments, saveAttachments, uploadToDrive, type AttachmentIndex } from '../data/sources/attachments';
 import {
-  createReceivingOnServer,
-  deleteReceivingOnServer,
   emptyLine,
-  fetchReceivingLog,
   loadReceivingLog,
   receivingFolderKey,
   saveReceivingLog,
@@ -31,7 +28,7 @@ import { loadRouteCodState, saveRouteCodState } from '../data/routeCod';
 import { addDays, dayKey, dayKeyToDate, isoToSheetDateText, sheetDateToDayKey, todayDayKey } from '../data/dateUtils';
 import { updateRouteOrder } from '../data/sources/routeOrdersWrite';
 import { loadDriverQueue, saveDriverQueue } from '../data/driverQueue';
-import { cancelPickLotOnServer, loadPickLots, savePickLots, syncPickLotToServer, type PickLot, type PickLotLine } from '../data/pickLots';
+import { loadPickLots, savePickLots, type PickLot, type PickLotLine } from '../data/pickLots';
 import { loadBatchRoutes, saveBatchRoutes, type BatchRoute } from '../data/batchRoutes';
 import { loadStuckDetachments, saveStuckDetachments, type StuckDetachmentIndex } from '../data/stuckDetachments';
 import { loadDeliveryFailures, saveDeliveryFailures, type DeliveryFailureIndex, type DeliveryFailureRecord } from '../data/deliveryFailures';
@@ -45,7 +42,7 @@ import type { ApiImportOrder, CsMasterCustomer, OrderLineItem, Promo, PromoPackU
 import { csvExportUrl, SHEET_TABS } from '../config/sheets';
 import { loadLastSyncAt, saveLastSyncAt } from '../data/syncMeta';
 import { appendNotificationEvents, loadNotificationEvents, loadNotificationReadIds, saveNotificationReadIds, type NotificationEvent } from '../data/notifications';
-import { appendActivityLog, fetchActivityLog, loadActivityLogCache, postActivityLog, type ActivityLogEntry } from '../data/activityLog';
+import { appendActivityLog, loadActivityLog, type ActivityLogEntry } from '../data/activityLog';
 import { loadSidebarCollapsed, saveSidebarCollapsed } from '../data/sidebarState';
 import { clearSession, loadSession, saveSession, type Session } from '../data/session';
 import { createUser as apiCreateUser, fetchUsers as apiFetchUsers, login as apiLogin, updateUser as apiUpdateUser, type UserListRow } from '../data/sources/authApi';
@@ -83,6 +80,11 @@ export interface AppState {
   apiOrders: ApiImportOrder[];
   apiOrdersLoading: boolean;
   apiOrdersError: string | null;
+  /** True when the backend's own live Sheets read just failed and it served
+   * its last-known-good cache instead (see apiImportOrders.ts) — apiOrders
+   * still has real data, just possibly a little old. Surfaced as a small
+   * warning banner (not apiOrdersError, which reads as "nothing to show"). */
+  apiOrdersStale: boolean;
   q: string;
   statusFilter: string;
   /** Sub-tab on the Dashboard page: the usual order list/stats view, or the
@@ -436,6 +438,7 @@ export const initialState: AppState = {
   apiOrders: [],
   apiOrdersLoading: true,
   apiOrdersError: null,
+  apiOrdersStale: false,
   q: '',
   statusFilter: 'all',
   dashboardTab: 'overview',
@@ -881,14 +884,7 @@ export function useAppStore() {
     const username = userOverride ?? loadSession()?.username ?? 'ไม่ทราบผู้ใช้';
     dispatch({
       type: 'patch',
-      patch: { activityLog: appendActivityLog(loadActivityLogCache(), { user: username, action, detail, orderNo }) },
-    });
-    // Best-effort background push to Postgres — never blocks the action that
-    // triggered this log entry (same "local-first" pattern as
-    // persistBatchRoutes). A failure here just means this one entry won't
-    // show up for other sessions; it's already visible in this one.
-    postActivityLog(loadSession(), { action, detail, orderNo }).catch(() => {
-      /* local state already has it; nothing actionable to surface here */
+      patch: { activityLog: appendActivityLog(loadActivityLog(), { user: username, action, detail, orderNo }) },
     });
   }
   const SYSTEM_USER_LABEL = 'ระบบ (ตรวจจับอัตโนมัติ)';
@@ -963,13 +959,15 @@ export function useAppStore() {
     };
   }, []);
 
-  // Order data now comes straight from the Unii API via this app's backend
-  // proxy (see src/data/sources/apiImportOrders.ts), which — unlike the old
-  // public CSV export — needs a session to read. Gated on state.session like
-  // the staff-order-overlay effect right below. Polls every 45s (matching
-  // the backend's own cache window — see server/unii.ts's CACHE_TTL_MS) so a
-  // bill edited in Unii (items/discount changed, status moved) shows up here
-  // without anyone having to hit the manual "Sync" button.
+  // Order data comes from the "API Import" sheet tab via this app's own
+  // backend (see src/data/sources/apiImportOrders.ts), which needs a
+  // session to read. Gated on state.session like the staff-order-overlay
+  // effect right below. Polls every 45s (a bit looser than the backend's
+  // own ~60s Sheets-read cache, so most polls just hit that cache) so an
+  // order edited directly in the sheet shows up here without anyone having
+  // to hit the manual "Sync" button. A `stale: true` result means the
+  // backend's live read failed and it served its last-known-good cache
+  // instead — not an error, just a small warning banner.
   useEffect(() => {
     if (!state.session) return;
     let cancelled = false;
@@ -977,11 +975,12 @@ export function useAppStore() {
       const session = loadSession();
       if (!session) return;
       fetchApiImportOrders(session)
-        .then((apiOrders) => {
+        .then(({ orders, stale, error }) => {
           if (!cancelled) {
-            dispatch({ type: 'patch', patch: { apiOrders, apiOrdersLoading: false, apiOrdersError: null } });
-            noteNewOrders(apiOrders);
-            recordSyncSuccess();
+            dispatch({ type: 'patch', patch: { apiOrders: orders, apiOrdersLoading: false, apiOrdersError: null, apiOrdersStale: stale } });
+            noteNewOrders(orders);
+            if (stale && error) recordSyncFailure('ออเดอร์ใหม่ (API Import)', error);
+            else recordSyncSuccess();
           }
         })
         .catch((err: unknown) => {
@@ -1001,11 +1000,11 @@ export function useAppStore() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.session?.username]);
 
-  // Route orders' staff-entered overlay now lives in Postgres (see
-  // src/data/sources/staffOrderInfo.ts), which — unlike the old public CSV
-  // export — needs a session to read. Gated on state.session like the
-  // Bookings/Batch Routes polling effects below, so it fires as soon as a
-  // session exists (mount if already logged in, or right after login).
+  // Route orders: the runtime join of API Import (read through this app's
+  // authenticated backend, see apiImportOrders.ts) + คำสั่งซื้อ VS (a public
+  // CSV export) — see src/data/sources/routeOrders.ts. Gated on
+  // state.session so it fires right after login, same as every other data
+  // source here.
   useEffect(() => {
     if (!state.session) return;
     let cancelled = false;
@@ -1029,12 +1028,12 @@ export function useAppStore() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.session?.username]);
 
-  // Promotions likewise now live in Postgres (see
+  // Promotions: also a public CSV export (see
   // src/data/sources/promotionsSheet.ts) — same session-gating reasoning.
   useEffect(() => {
     if (!state.session) return;
     let cancelled = false;
-    fetchPromotions(loadSession())
+    fetchPromotions()
       .then((promos) => {
         if (!cancelled) {
           dispatch({ type: 'patch', patch: { promos, promosLoading: false, promosError: null } });
@@ -1075,31 +1074,17 @@ export function useAppStore() {
     };
   }, []);
 
-  // Base customer list (name/address/etc.) still comes straight from the CS
-  // Master Google Sheet, unchanged this round — but any corrected lat/lng
-  // now lives in Postgres (see saveCustomerLatLng/saveOrderLocation below),
-  // so it has to be fetched separately and merged in by phone; the Sheet
-  // itself never gets that correction written back to it anymore.
+  // Customer list (name/address/lat/lng/etc.) comes straight from the CS
+  // Master Google Sheet — a corrected lat/lng is written back to that same
+  // sheet by updateCsMasterLatLng, so there's nothing separate to fetch or
+  // merge in here.
   useEffect(() => {
     let cancelled = false;
-    Promise.all([fetchCsMasterCustomers(), state.session ? fetchCustomerLocationOverrides(loadSession()).catch(() => [] as CustomerLocationOverride[]) : Promise.resolve([] as CustomerLocationOverride[])])
-      .then(([customers, overrides]) => {
-        if (cancelled) return;
-        const overrideByPhone = new Map(overrides.map((o) => [o.phone, o]));
-        const merged = customers.map((c) => {
-          const override = overrideByPhone.get(c.phone);
-          return override ? { ...c, lat: override.lat, lng: override.lng } : c;
-        });
-        dispatch({ type: 'patch', patch: { customers: merged, customersLoading: false, customersError: null } });
-        recordSyncSuccess();
-        // Best-effort: keep customers.name_from_unii current with whatever
-        // the sheet says right now, matched by phone — never blocks the UI,
-        // never overwrites lat/lng overrides (see handleSyncCustomerNames).
-        if (state.session) {
-          syncCustomerNames(
-            loadSession(),
-            customers.map((c) => ({ phone: c.phone, name: c.name })),
-          ).catch((err: unknown) => console.error('[cs-master/sync-names]', err));
+    fetchCsMasterCustomers()
+      .then((customers) => {
+        if (!cancelled) {
+          dispatch({ type: 'patch', patch: { customers, customersLoading: false, customersError: null } });
+          recordSyncSuccess();
         }
       })
       .catch((err: unknown) => {
@@ -1139,39 +1124,11 @@ export function useAppStore() {
         lastSyncAt: loadLastSyncAt(),
         notificationEvents: loadNotificationEvents(),
         notificationReadIds: loadNotificationReadIds(),
-        activityLog: loadActivityLogCache(),
+        activityLog: loadActivityLog(),
         sidebarCollapsed: loadSidebarCollapsed() ?? window.innerWidth < 900,
       },
     });
   }, []);
-
-  // Activity Log and Goods Receiving now live in Postgres — the local
-  // caches above give an instant first paint, then this replaces them with
-  // the real shared history as soon as a session exists (same gating as the
-  // route-orders/promotions/customers effects above).
-  useEffect(() => {
-    if (!state.session) return;
-    let cancelled = false;
-    const session = loadSession();
-    fetchActivityLog(session)
-      .then((entries) => {
-        if (!cancelled) dispatch({ type: 'patch', patch: { activityLog: entries } });
-      })
-      .catch(() => {
-        /* keep showing the local cache — activity log has no dedicated error banner */
-      });
-    fetchReceivingLog(session)
-      .then((records) => {
-        if (!cancelled) dispatch({ type: 'patch', patch: { receivingLog: records } });
-      })
-      .catch(() => {
-        /* keep showing the local cache — receiving log has no dedicated error banner */
-      });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.session?.username]);
 
   // The failed-delivery photo queue lives in IndexedDB (see
   // src/data/failedDeliveryQueue.ts), which is inherently async — can't join
@@ -1467,20 +1424,11 @@ export function useAppStore() {
           },
         });
         logActivity('บันทึกรับสินค้าเข้าคลัง', `${record.supplier} · บิล ${record.billNo || '—'} · ${record.receivedDate} · ${record.lines.length} รายการ`);
-        // Local-first, same pattern as batch routes/activity log — the record
-        // is already visible locally; a failed background push just means it
-        // won't show up for other sessions until the next successful sync.
-        createReceivingOnServer(loadSession(), record).catch((err: unknown) => {
-          console.error('[receiving/create]', err instanceof Error ? err.message : err);
-        });
       },
       deleteReceiving: (id: string, log: ReceivingRecord[]) => {
         const next = log.filter((r) => r.id !== id);
         saveReceivingLog(next);
         dispatch({ type: 'patch', patch: { receivingLog: next } });
-        deleteReceivingOnServer(loadSession(), id).catch((err: unknown) => {
-          console.error('[receiving/delete]', err instanceof Error ? err.message : err);
-        });
       },
       openEditSku: (sku: Sku) => dispatch({ type: 'openEditSku', sku }),
       saveSku: () => dispatch({ type: 'saveSku' }),
@@ -2013,9 +1961,6 @@ export function useAppStore() {
           const nextLots = [lot, ...lots];
           savePickLots(nextLots);
           dispatch({ type: 'patch', patch: { pickLots: nextLots, activePickLotId: lot.id, pickCreating: false, pickSelectedOrderNos: [] } });
-          syncPickLotToServer(loadSession(), lot).catch((err: unknown) => {
-            console.error('[batch-picking/save]', err instanceof Error ? err.message : err);
-          });
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : 'สร้างล็อตหยิบสินค้าไม่สำเร็จ';
           dispatch({ type: 'patch', patch: { pickCreating: false, pickCreateError: message } });
@@ -2026,12 +1971,6 @@ export function useAppStore() {
         const next = lots.map((l) => (l.id === lotId ? { ...l, picked: { ...l.picked, [sku]: !l.picked[sku] } } : l));
         savePickLots(next);
         dispatch({ type: 'patch', patch: { pickLots: next } });
-        const updated = next.find((l) => l.id === lotId);
-        if (updated) {
-          syncPickLotToServer(loadSession(), updated).catch((err: unknown) => {
-            console.error('[batch-picking/save]', err instanceof Error ? err.message : err);
-          });
-        }
       },
 
       /** Closing is immediate/optimistic (the physical picking is already
@@ -2047,12 +1986,6 @@ export function useAppStore() {
         dispatch({ type: 'patch', patch: { pickLots: next } });
         syncPickLotStatus(lot.orderNos);
         logActivity('ปิดล็อตหยิบสินค้า', `ล็อต ${lot.id} · ${lot.orderNos.length} ออเดอร์ (${lot.orderNos.join(', ')})`);
-        const updated = next.find((l) => l.id === lotId);
-        if (updated) {
-          syncPickLotToServer(loadSession(), updated).catch((err: unknown) => {
-            console.error('[batch-picking/save]', err instanceof Error ? err.message : err);
-          });
-        }
       },
       retryPickLotStatusSync: (orderNos: string[]) => syncPickLotStatus(orderNos),
 
@@ -2069,9 +2002,6 @@ export function useAppStore() {
         const next = lots.filter((l) => l.id !== lotId);
         savePickLots(next);
         dispatch({ type: 'patch', patch: { pickLots: next, activePickLotId: activePickLotId === lotId ? null : activePickLotId } });
-        cancelPickLotOnServer(loadSession(), lotId).catch((err: unknown) => {
-          console.error('[batch-picking/cancel]', err instanceof Error ? err.message : err);
-        });
         logActivity('ยกเลิกล็อตหยิบสินค้า', `ล็อต ${lot.id} · ${lot.orderNos.length} ออเดอร์ (${lot.orderNos.join(', ')})`);
       },
 
@@ -2091,18 +2021,27 @@ export function useAppStore() {
       syncNow: async (): Promise<{ ok: boolean; routeOrdersOk: boolean; failures: string[] }> => {
         dispatch({ type: 'patch', patch: { syncing: true } });
 
-        // routeOrders (Postgres) and promotions (Postgres) no longer go
-        // through fetchSheetRows' CSV cache — only these two still do.
-        [csvExportUrl(SHEET_TABS.skuDetail), csvExportUrl(SHEET_TABS.csMaster), csvExportUrl(SHEET_TABS.skuMaster)].forEach(invalidateSheetCache);
+        // Force a fresh read from every public-CSV source instead of waiting
+        // out fetchSheetRows' normal ~45s cache. API Import goes through
+        // this app's own backend (its own separate ~60s cache — see
+        // server/lib.ts) rather than this CSV cache, so it isn't included
+        // here; asking for it below still gets whatever that backend's
+        // cache currently holds.
+        [
+          csvExportUrl(SHEET_TABS.skuDetail),
+          csvExportUrl(SHEET_TABS.csMaster),
+          csvExportUrl(SHEET_TABS.skuMaster),
+          csvExportUrl(SHEET_TABS.routeOrders),
+          csvExportUrl(SHEET_TABS.promotions),
+        ].forEach(invalidateSheetCache);
 
         const session = loadSession();
-        const [apiOrdersR, routeOrdersR, lineItemsR, promosR, customersR, overridesR, skusR] = await Promise.allSettled([
+        const [apiOrdersR, routeOrdersR, lineItemsR, promosR, customersR, skusR] = await Promise.allSettled([
           fetchApiImportOrders(session),
           fetchRouteOrders(session),
           fetchAllOrderLineItems(),
-          fetchPromotions(session),
+          fetchPromotions(),
           fetchCsMasterCustomers(),
-          fetchCustomerLocationOverrides(session),
           fetchSkusFromSheet(),
         ]);
 
@@ -2111,10 +2050,12 @@ export function useAppStore() {
         let anySucceeded = false;
 
         if (apiOrdersR.status === 'fulfilled') {
-          patch.apiOrders = apiOrdersR.value;
+          patch.apiOrders = apiOrdersR.value.orders;
           patch.apiOrdersError = null;
-          noteNewOrders(apiOrdersR.value);
+          patch.apiOrdersStale = apiOrdersR.value.stale;
+          noteNewOrders(apiOrdersR.value.orders);
           anySucceeded = true;
+          if (apiOrdersR.value.stale && apiOrdersR.value.error) failures.push(`ออเดอร์ใหม่ (API Import): ${apiOrdersR.value.error}`);
         } else failures.push(`ออเดอร์ใหม่ (API Import): ${apiOrdersR.reason instanceof Error ? apiOrdersR.reason.message : 'ไม่สำเร็จ'}`);
 
         if (routeOrdersR.status === 'fulfilled') {
@@ -2136,17 +2077,9 @@ export function useAppStore() {
         } else failures.push(`โปรโมชั่น: ${promosR.reason instanceof Error ? promosR.reason.message : 'ไม่สำเร็จ'}`);
 
         if (customersR.status === 'fulfilled') {
-          const overrideByPhone = new Map((overridesR.status === 'fulfilled' ? overridesR.value : []).map((o) => [o.phone, o]));
-          patch.customers = customersR.value.map((c) => {
-            const override = overrideByPhone.get(c.phone);
-            return override ? { ...c, lat: override.lat, lng: override.lng } : c;
-          });
+          patch.customers = customersR.value;
           patch.customersError = null;
           anySucceeded = true;
-          syncCustomerNames(
-            session,
-            customersR.value.map((c) => ({ phone: c.phone, name: c.name })),
-          ).catch((err: unknown) => console.error('[cs-master/sync-names]', err));
         } else failures.push(`รายชื่อลูกค้า (CS Master): ${customersR.reason instanceof Error ? customersR.reason.message : 'ไม่สำเร็จ'}`);
 
         if (skusR.status === 'fulfilled') {

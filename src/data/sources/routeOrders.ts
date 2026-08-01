@@ -5,8 +5,9 @@
 // sync actually finish, and did it write every column" question, because
 // nothing is ever copied between the two tabs; this just reads both, fresh,
 // every time, and joins them in memory.
-import type { ApiImportOrder, RouteOrder, StaffOrderInfo } from '../types';
+import { isRouteOrdersTabConfigured, ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE } from '../../config/sheets';
 import type { Session } from '../session';
+import type { ApiImportOrder, RouteOrder, StaffOrderInfo } from '../types';
 import { fetchApiImportOrders } from './apiImportOrders';
 import { fetchStaffOrderInfo } from './staffOrderInfo';
 
@@ -63,11 +64,15 @@ export function joinRouteOrders(apiImportOrders: ApiImportOrder[], staffInfos: S
 /** Reads both sources live and joins them — the one function every page
  * should call for order data. Kept under this name (unchanged from the old
  * sync-based design) so every existing call site — the mount effect and
- * actions.syncNow in store.ts — needed no changes beyond passing a session.
- * ApiImportOrder now comes straight from the Unii API via this app's backend
- * proxy (server/unii.ts), and StaffOrderInfo comes from Postgres — both
- * authenticated backend calls now, hence the session parameter on both. */
+ * actions.syncNow in store.ts — needed no changes at all beyond passing a
+ * session through. API Import now goes through this app's own authenticated
+ * backend (see apiImportOrders.ts) rather than a public CSV export, so a
+ * session is required here too; a `stale` live read on the backend's side
+ * (served from its own ~60s cache after a failed refresh) is intentionally
+ * not surfaced here — the join still returns real, just possibly slightly
+ * old, data rather than failing the whole page. */
 export async function fetchRouteOrders(session: Session | null): Promise<RouteOrder[]> {
-  const [apiImportOrders, staffInfos] = await Promise.all([fetchApiImportOrders(session), fetchStaffOrderInfo(session)]);
-  return joinRouteOrders(apiImportOrders, staffInfos);
+  if (!isRouteOrdersTabConfigured()) throw new Error(ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE);
+  const [apiImportResult, staffInfos] = await Promise.all([fetchApiImportOrders(session), fetchStaffOrderInfo()]);
+  return joinRouteOrders(apiImportResult.orders, staffInfos);
 }

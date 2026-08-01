@@ -4,34 +4,21 @@ import express from 'express';
 import multer from 'multer';
 import { DRIVE_ROOT_FOLDER_ENV, MAX_UPLOAD_BYTES } from '../src/config/drive.js';
 import {
-  handleAppendActivityLog,
-  handleCancelPickLot,
   handleCreateBookings,
-  handleCreateReceiving,
   handleCreateUser,
   handleDecideBooking,
-  handleDeleteReceiving,
   handleDriveUpload,
   handleExportBatchRouteHistory,
   handleExportRouteOrders,
   handleFetchApiImportOrders,
   handleHealth,
-  handleListActivityLog,
   handleListBatchRoutes,
   handleListBookings,
-  handleListCustomerLocationOverrides,
-  handleListPickLots,
-  handleListPromotions,
-  handleListReceiving,
-  handleListRouteOrders,
   handleListUsers,
   handleLogin,
   handleMe,
   handleReverseGeocode,
   handleLinkLineItemPromo,
-  handleSavePickLot,
-  handleSyncCustomerNames,
-  handleSyncUniiOrders,
   handleUpdateCsMasterLocation,
   handleUpdateRouteOrder,
   handleUpdateUser,
@@ -39,8 +26,8 @@ import {
   handleUpsertPromotion,
   isFileResult,
 } from './lib.js';
-import { bearerToken } from './session.js';
 import type { ApiResult, FileResult } from './lib.js';
+import { bearerToken } from './session.js';
 
 // Local dev server: thin Express wrapper around server/lib.ts. The same
 // handlers are also called from api/*.ts as Vercel serverless functions in
@@ -68,8 +55,8 @@ function sendResult(res: express.Response, result: ApiResult | FileResult): void
 
 const PORT = Number(process.env.SERVER_PORT ?? 8787);
 
-app.get('/health', async (_req, res) => {
-  const { status, body } = await handleHealth();
+app.get('/health', (_req, res) => {
+  const { status, body } = handleHealth();
   res.status(status).json(body);
 });
 
@@ -91,28 +78,8 @@ app.post('/api/drive/upload', (req, res) => {
   });
 });
 
-app.get('/api/cs-master/location-overrides', async (req, res) => {
-  const { status, body } = await handleListCustomerLocationOverrides(bearerToken(req.headers.authorization));
-  res.status(status).json(body);
-});
-
 app.post('/api/cs-master/update-location', async (req, res) => {
   const { status, body } = await handleUpdateCsMasterLocation(bearerToken(req.headers.authorization), req.body);
-  res.status(status).json(body);
-});
-
-app.post('/api/cs-master/sync-names', async (req, res) => {
-  const { status, body } = await handleSyncCustomerNames(bearerToken(req.headers.authorization), req.body);
-  res.status(status).json(body);
-});
-
-app.get('/api/route-orders/list', async (req, res) => {
-  const { status, body } = await handleListRouteOrders(bearerToken(req.headers.authorization));
-  res.status(status).json(body);
-});
-
-app.post('/api/route-orders/update', async (req, res) => {
-  const { status, body } = await handleUpdateRouteOrder(bearerToken(req.headers.authorization), req.body);
   res.status(status).json(body);
 });
 
@@ -121,8 +88,8 @@ app.get('/api/route-orders/api-import', async (req, res) => {
   res.status(status).json(body);
 });
 
-app.get('/api/route-orders/sync-unii', async (req, res) => {
-  const { status, body } = await handleSyncUniiOrders(bearerToken(req.headers.authorization));
+app.post('/api/route-orders/update', async (req, res) => {
+  const { status, body } = await handleUpdateRouteOrder(bearerToken(req.headers.authorization), req.body);
   res.status(status).json(body);
 });
 
@@ -130,53 +97,8 @@ app.get('/api/route-orders/export', async (req, res) => {
   sendResult(res, await handleExportRouteOrders(bearerToken(req.headers.authorization)));
 });
 
-app.get('/api/promotions/list', async (req, res) => {
-  const { status, body } = await handleListPromotions(bearerToken(req.headers.authorization));
-  res.status(status).json(body);
-});
-
 app.post('/api/promotions/upsert', async (req, res) => {
   const { status, body } = await handleUpsertPromotion(bearerToken(req.headers.authorization), req.body);
-  res.status(status).json(body);
-});
-
-app.get('/api/ops/activity-log', async (req, res) => {
-  const { status, body } = await handleListActivityLog(bearerToken(req.headers.authorization));
-  res.status(status).json(body);
-});
-
-app.post('/api/ops/activity-log/append', async (req, res) => {
-  const { status, body } = await handleAppendActivityLog(bearerToken(req.headers.authorization), req.body);
-  res.status(status).json(body);
-});
-
-app.get('/api/ops/batch-picking', async (req, res) => {
-  const { status, body } = await handleListPickLots(bearerToken(req.headers.authorization));
-  res.status(status).json(body);
-});
-
-app.post('/api/ops/batch-picking/save', async (req, res) => {
-  const { status, body } = await handleSavePickLot(bearerToken(req.headers.authorization), req.body);
-  res.status(status).json(body);
-});
-
-app.post('/api/ops/batch-picking/cancel', async (req, res) => {
-  const { status, body } = await handleCancelPickLot(bearerToken(req.headers.authorization), req.body);
-  res.status(status).json(body);
-});
-
-app.get('/api/ops/receiving', async (req, res) => {
-  const { status, body } = await handleListReceiving(bearerToken(req.headers.authorization));
-  res.status(status).json(body);
-});
-
-app.post('/api/ops/receiving/create', async (req, res) => {
-  const { status, body } = await handleCreateReceiving(bearerToken(req.headers.authorization), req.body);
-  res.status(status).json(body);
-});
-
-app.post('/api/ops/receiving/delete', async (req, res) => {
-  const { status, body } = await handleDeleteReceiving(bearerToken(req.headers.authorization), req.body);
   res.status(status).json(body);
 });
 
@@ -246,14 +168,8 @@ app.get('/api/batch-routes/export', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Warehouse Ops API listening on http://localhost:${PORT}`);
-  if (!process.env.DATABASE_URL?.trim()) {
-    console.warn('⚠  DATABASE_URL is not set — every Postgres-backed feature (orders, customers, batch routes, users, bookings, promotions, activity log, batch picking, goods receiving) will fail');
-  }
-  if (!process.env.UNII_API_TOKEN?.trim()) {
-    console.warn('⚠  UNII_API_TOKEN is not set — order data (Dashboard, Order Management, Planner, etc.) will fail to load');
-  }
   if (!process.env.GOOGLE_SERVICE_ACCOUNT_KEY?.trim()) {
-    console.warn('⚠  GOOGLE_SERVICE_ACCOUNT_KEY is not set — SKU Detail promo-link write-back will fail; Drive uploads run in mock mode');
+    console.warn('⚠  GOOGLE_SERVICE_ACCOUNT_KEY is not set — sheet write-back will fail; Drive uploads run in mock mode');
   }
   if (!process.env[DRIVE_ROOT_FOLDER_ENV]?.trim()) {
     console.warn(`⚠  ${DRIVE_ROOT_FOLDER_ENV} is not set — Drive uploads run in mock mode`);

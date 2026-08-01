@@ -7,9 +7,8 @@ import type { ApiRequest, ApiResponse } from '../_types.js';
 // api/bookings/decide.ts into one Vercel Serverless Function — see
 // api/auth/[[...slug]].ts for why (Hobby plan's 12-function-per-deployment
 // cap) and why the sub-path comes from req.url via routeSlug rather than
-// req.query.slug. The list route is 'list', not a bare '' slug — see
-// api/route-orders/[[...slug]].ts's comment for why a zero-segment slug
-// 404'd in production on that identical pattern.
+// req.query.slug. Same external URLs (/api/bookings, /api/bookings/create,
+// /api/bookings/decide), zero frontend changes.
 export default async function handler(req: ApiRequest, res: ApiResponse) {
   const slug = routeSlug(req, '/api/bookings');
   const token = bearerToken(req.headers.authorization);

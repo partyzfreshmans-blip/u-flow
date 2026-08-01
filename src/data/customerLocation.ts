@@ -3,21 +3,20 @@ import type { CsMasterCustomer, RouteOrder } from './types';
 // Single source of truth for "which coordinate is actually correct for this
 // customer" — a manually-corrected pin (saved via the Customer Master page's
 // own "แก้พิกัด" editor, or the Planner's per-order "แก้ไขโลเคชั่น" dialog,
-// both of which write to the same customers.lat_override/lng_override
-// columns in Postgres, keyed by phone) always wins over the CS_Lat/CS_Long
-// the คำสั่งซื้อ sheet carries, which is raw, unverified data straight from
-// Unii and never gets corrected in place. Every page that plots a pin,
-// computes a distance, links out to Google Maps navigation, or feeds a
-// coordinate into reverse-geocoding should resolve through here instead of
-// reading RouteOrder.lat/lng directly, so a fix made once shows up
-// everywhere at once.
+// both of which write straight back to the CS Master sheet's own lat/lng
+// columns, keyed by phone — see csMasterWrite.ts) always wins over the
+// CS_Lat/CS_Long the คำสั่งซื้อ sheet carries, which is raw, unverified data
+// straight from the order source and never gets corrected in place. Every
+// page that plots a pin, computes a distance, links out to Google Maps
+// navigation, or feeds a coordinate into reverse-geocoding should resolve
+// through here instead of reading RouteOrder.lat/lng directly, so a fix made
+// once shows up everywhere at once.
 //
 // Matched by phone alone, not name+phone — a customer's shop name can be
-// renamed in Unii at any time (this actually happens), and phone is the
-// table's real, stable identity (customers.phone is the Postgres PRIMARY
-// KEY). Keying on name as well used to silently break this lookup whenever
-// a renamed customer's order carried the new name but the saved override was
-// still indexed under the old one.
+// renamed at any time (this actually happens), and phone is the sheet's
+// real, stable identity. Keying on name as well used to silently break this
+// lookup whenever a renamed customer's order carried the new name but the
+// saved override was still indexed under the old one.
 
 export type CustomerLocationSource = 'override' | 'unii';
 

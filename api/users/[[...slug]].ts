@@ -6,10 +6,8 @@ import type { ApiRequest, ApiResponse } from '../_types.js';
 // Consolidates api/users/index.ts + api/users/create.ts + api/users/update.ts
 // into one Vercel Serverless Function — see api/auth/[[...slug]].ts for why
 // (Hobby plan's 12-function-per-deployment cap) and why the sub-path comes
-// from req.url via routeSlug rather than req.query.slug. The list route is
-// 'list', not a bare '' slug — see api/route-orders/[[...slug]].ts's
-// comment for why a zero-segment slug 404'd in production on that identical
-// pattern.
+// from req.url via routeSlug rather than req.query.slug. Same external URLs
+// (/api/users, /api/users/create, /api/users/update), zero frontend changes.
 export default async function handler(req: ApiRequest, res: ApiResponse) {
   const slug = routeSlug(req, '/api/users');
   const token = bearerToken(req.headers.authorization);

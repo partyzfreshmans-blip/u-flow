@@ -1,5 +1,8 @@
+import { SHEET_TABS, csvExportUrl } from '../../config/sheets';
 import { PROMO_UNITS, type Promo, type PromoPackUnit, type PromoTier, type PromoUnit } from '../types';
-import { authHeaders, type Session } from '../session';
+import { fetchSheetRows } from './sheetCsv';
+
+const CSV_URL = csvExportUrl(SHEET_TABS.promotions);
 
 function toNumber(v: string | undefined): number {
   const cleaned = (v ?? '').replace(/,/g, '').trim();
@@ -161,29 +164,12 @@ function rowToPromo(row: Record<string, string>): Promo | null {
   };
 }
 
-/** Every promotion, any Status — filtering to a particular status (Active,
- * Inactive, ...) is a UI concern (see computePromo's status filter), not
- * something this fetch should decide unilaterally. Reads from Postgres via
- * the backend now (see server/lib.ts's handleListPromotions) instead of the
- * old public "โปรโมชั่น" CSV export — Postgres has no equivalent public read
- * path, so this needs a session. The response is shaped with the exact same
- * column-name keys the sheet had, so rowToPromo/parseTiers/parsePackUnits
- * below needed no changes at all. */
-export async function fetchPromotions(session: Session | null): Promise<Promo[]> {
-  let res: Response;
-  try {
-    res = await fetch('/api/promotions/list', { headers: authHeaders(session) });
-  } catch {
-    throw new Error('เชื่อมต่อ backend ไม่ได้ — ลองใหม่อีกครั้ง');
-  }
-  if (!res.ok) {
-    const body: unknown = await res.json().catch(() => null);
-    const message = body && typeof body === 'object' && 'error' in body ? String((body as { error: unknown }).error) : null;
-    throw new Error(message || `โหลดโปรโมชั่นไม่สำเร็จ (HTTP ${res.status})`);
-  }
-  const body = (await res.json()) as { promotions?: Record<string, string>[] };
-  const rows = Array.isArray(body.promotions) ? body.promotions : [];
+/** Every row in the tab, any Status — filtering to a particular status
+ * (Active, Inactive, ...) is a UI concern (see computePromo's status
+ * filter), not something this fetch should decide unilaterally. */
+export async function fetchPromotions(): Promise<Promo[]> {
+  const rows = await fetchSheetRows(CSV_URL);
   return rows.map(rowToPromo).filter((p): p is Promo => p !== null);
 }
 
-export { PROMO_UNITS };
+export { CSV_URL as PROMOTIONS_CSV_URL, PROMO_UNITS };

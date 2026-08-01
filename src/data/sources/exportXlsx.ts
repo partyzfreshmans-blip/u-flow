@@ -1,10 +1,11 @@
 // "Export เป็น Excel" buttons on Order Management and Batch Route History —
 // both hit a backend endpoint that returns a real .xlsx file body (not
-// JSON), built server-side from Postgres joined with live Unii order data
-// (see server/lib.ts's handleExportRouteOrders/handleExportBatchRouteHistory).
-// This just fetches the blob and triggers a normal browser download; there's
-// no state to keep afterward, so it isn't wired through the store/reducer
-// like every other data source here.
+// JSON), built server-side from the API Import + คำสั่งซื้อ VS + Batch
+// Routes sheets (see server/lib.ts's
+// handleExportRouteOrders/handleExportBatchRouteHistory). This just fetches
+// the blob and triggers a normal browser download; there's no state to keep
+// afterward, so it isn't wired through the store/reducer like every other
+// data source here.
 import { authHeaders, type Session } from '../session';
 
 async function downloadXlsx(url: string, session: Session | null, fallbackFilename: string): Promise<void> {

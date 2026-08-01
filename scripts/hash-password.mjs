@@ -1,17 +1,21 @@
 #!/usr/bin/env node
-// Generates a users.password_hash value in the exact format server/lib.ts's
+// Generates a password_hash value in the exact format server/lib.ts's
 // hashPassword()/verifyPassword() expect (scrypt "salt:hashHex", 16-byte
-// random salt, 64-byte derived key, both hex) — so a row inserted straight
-// into Postgres logs in exactly like one created through the app's own
-// "create user" flow. Nothing here talks to any database or network —
-// purely a local computation; run it, then paste the SQL it prints into
-// your own DB client (psql, Supabase's SQL Editor, ...).
+// random salt, 64-byte derived key, both hex), then prints a tab-separated
+// row you paste straight into the "Users" tab of the spreadsheet — that tab
+// is the only place user accounts live (see server/lib.ts's readUsers), so
+// there's no database or network call here, just a local computation.
 //
 // Pass the password via the ADMIN_PASSWORD env var, not a CLI argument —
 // env vars don't get written to shell history the way a plain argument
 // does:
 //
 //   ADMIN_PASSWORD='your-real-password' node scripts/hash-password.mjs admin administrator
+//
+// Optionally pass a driver_vehicle_id as a 3rd argument (only meaningful
+// for role=driver):
+//
+//   ADMIN_PASSWORD='...' node scripts/hash-password.mjs driver1 driver veh-a
 //
 // Never paste a real password into a chat/PR/issue/commit message — this
 // script exists so you never have to.
@@ -25,6 +29,7 @@ function hashPassword(password) {
 
 const username = (process.argv[2] ?? '').trim() || 'admin';
 const role = (process.argv[3] ?? '').trim() || 'administrator';
+const driverVehicleId = (process.argv[4] ?? '').trim();
 const password = process.env.ADMIN_PASSWORD ?? '';
 
 const validRoles = ['administrator', 'manager', 'admin_staff', 'checker', 'picker', 'driver'];
@@ -39,11 +44,10 @@ if (!password) {
 }
 
 const hash = hashPassword(password);
+// Matches USERS_HEADER in server/lib.ts exactly, left to right.
+const row = [username, hash, role, 'TRUE', driverVehicleId, new Date().toISOString()];
 
 console.log('--- password_hash (do not share this either — it is enough to attempt offline cracking) ---');
 console.log(hash);
-console.log('\n--- SQL: run this against your database ---');
-console.log(`INSERT INTO users (username, password_hash, role, active, driver_vehicle_id)
-VALUES ('${username.replace(/'/g, "''")}', '${hash}', '${role}', true, '')
-ON CONFLICT (username) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = EXCLUDED.role, active = true;
-`);
+console.log('\n--- Paste this row into the "Users" tab (select the first empty row, column A, then paste) ---');
+console.log(row.join('\t'));

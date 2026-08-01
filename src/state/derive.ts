@@ -389,6 +389,7 @@ export function computeDashboard(state: AppState, actions: AppActions) {
   return {
     apiOrdersLoading: state.apiOrdersLoading,
     apiOrdersError: state.apiOrdersError,
+    apiOrdersStale: state.apiOrdersStale,
     dashboardTab: state.dashboardTab,
     setDashboardTab: (tab: 'overview' | 'calendar') => actions.patch({ dashboardTab: tab }),
     q: state.q,
@@ -2675,9 +2676,9 @@ export function computePromoUsage(state: AppState, actions: AppActions) {
   const orders = Array.from(byOrder.values()).sort((a, b) => (a.orderedAt < b.orderedAt ? 1 : -1));
 
   // Grouped by phone, not customer name — a shop can rename between orders,
-  // and phone is the stable identity (customers.phone is the Postgres
-  // primary key). Falls back to the name itself only for the rare order with
-  // no phone on file, so it doesn't silently disappear from the count.
+  // and phone is the stable identity. Falls back to the name itself only for
+  // the rare order with no phone on file, so it doesn't silently disappear
+  // from the count.
   const phoneByOrderNo = new Map(state.routeOrders.map((r) => [r.orderNo, r.phone.trim()]));
   const byCustomer = new Map<string, { name: string; count: number }>();
   for (const o of orders) {

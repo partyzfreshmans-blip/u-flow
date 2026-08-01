@@ -131,6 +131,11 @@ export function DashboardPage({ state, actions }: { state: AppState; actions: Ap
           <i className="ph ph-warning-fill" style={{ flex: 'none' }} />โหลดออเดอร์ใหม่ไม่สำเร็จ: {v.apiOrdersError}
         </div>
       )}
+      {!v.apiOrdersError && v.apiOrdersStale && (
+        <div style={{ display: 'flex', gap: 9, padding: 13, marginBottom: 16, borderRadius: 10, background: 'var(--st-warn-bg, #fff7e0)', color: 'var(--st-warn-fg, #92700c)', fontSize: 13 }}>
+          <i className="ph ph-warning" style={{ flex: 'none' }} />อ่านข้อมูลล่าสุดจาก Google Sheet ไม่สำเร็จ — กำลังแสดงข้อมูลที่แคชไว้ล่าสุดแทน (อาจไม่ใช่ข้อมูลปัจจุบันที่สุด)
+        </div>
+      )}
 
       <div className="seg" style={{ marginBottom: 16, width: 'fit-content' }}>
         <label className="seg-opt">
