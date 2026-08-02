@@ -1,8 +1,6 @@
-import { SHEET_TABS, csvExportUrl } from '../../config/sheets';
+import type { Session } from '../session';
 import type { Sku } from '../types';
-import { fetchSheetRows } from './sheetCsv';
-
-const CSV_URL = csvExportUrl(SHEET_TABS.skuMaster);
+import { fetchSheetRowsFromBackend } from './sheetRowsApi';
 
 function cleanBarcode(...candidates: (string | undefined)[]): string {
   for (const c of candidates) {
@@ -61,9 +59,7 @@ function rowToSku(row: Record<string, string>, index: number): Sku | null {
   };
 }
 
-export async function fetchSkusFromSheet(): Promise<Sku[]> {
-  const rows = await fetchSheetRows(CSV_URL);
+export async function fetchSkusFromSheet(session: Session | null): Promise<Sku[]> {
+  const { rows } = await fetchSheetRowsFromBackend(session, '/api/sku-master/list');
   return rows.map(rowToSku).filter((s): s is Sku => s !== null);
 }
-
-export { CSV_URL as SKU_SHEET_CSV_URL };

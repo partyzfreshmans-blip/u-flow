@@ -2,11 +2,9 @@
 // config/sheets.ts's STAFF_ORDER_INFO_HEADERS for the exact header text/order
 // this expects, and joinRouteOrders (routeOrders.ts) for how this gets
 // combined with ApiImportOrder to build the RouteOrder every page reads.
-import { SHEET_TABS, csvExportUrl } from '../../config/sheets';
+import type { Session } from '../session';
 import type { StaffOrderInfo } from '../types';
-import { fetchSheetRows } from './sheetCsv';
-
-const CSV_URL = csvExportUrl(SHEET_TABS.routeOrders);
+import { fetchSheetRowsFromBackend } from './sheetRowsApi';
 
 function parseTriStateBool(v: string | undefined): boolean | null {
   const s = (v ?? '').trim();
@@ -30,7 +28,7 @@ function rowToStaffOrderInfo(row: Record<string, string>): StaffOrderInfo | null
   };
 }
 
-export async function fetchStaffOrderInfo(): Promise<StaffOrderInfo[]> {
-  const rows = await fetchSheetRows(CSV_URL);
+export async function fetchStaffOrderInfo(session: Session | null): Promise<StaffOrderInfo[]> {
+  const { rows } = await fetchSheetRowsFromBackend(session, '/api/route-orders/staff-info');
   return rows.map(rowToStaffOrderInfo).filter((o): o is StaffOrderInfo => o !== null);
 }

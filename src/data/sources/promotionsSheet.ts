@@ -1,8 +1,6 @@
-import { SHEET_TABS, csvExportUrl } from '../../config/sheets';
+import type { Session } from '../session';
 import { PROMO_UNITS, type Promo, type PromoPackUnit, type PromoTier, type PromoUnit } from '../types';
-import { fetchSheetRows } from './sheetCsv';
-
-const CSV_URL = csvExportUrl(SHEET_TABS.promotions);
+import { fetchSheetRowsFromBackend } from './sheetRowsApi';
 
 function toNumber(v: string | undefined): number {
   const cleaned = (v ?? '').replace(/,/g, '').trim();
@@ -167,9 +165,9 @@ function rowToPromo(row: Record<string, string>): Promo | null {
 /** Every row in the tab, any Status — filtering to a particular status
  * (Active, Inactive, ...) is a UI concern (see computePromo's status
  * filter), not something this fetch should decide unilaterally. */
-export async function fetchPromotions(): Promise<Promo[]> {
-  const rows = await fetchSheetRows(CSV_URL);
+export async function fetchPromotions(session: Session | null): Promise<Promo[]> {
+  const { rows } = await fetchSheetRowsFromBackend(session, '/api/promotions/list');
   return rows.map(rowToPromo).filter((p): p is Promo => p !== null);
 }
 
-export { CSV_URL as PROMOTIONS_CSV_URL, PROMO_UNITS };
+export { PROMO_UNITS };

@@ -11,6 +11,11 @@ import {
   handleExportBatchRouteHistory,
   handleExportRouteOrders,
   handleFetchApiImportOrders,
+  handleFetchCsMasterList,
+  handleFetchPromotionsList,
+  handleFetchSkuDetailList,
+  handleFetchSkuMasterList,
+  handleFetchStaffOrderInfoList,
   handleHealth,
   handleListBatchRoutes,
   handleListBookings,
@@ -78,6 +83,11 @@ app.post('/api/drive/upload', (req, res) => {
   });
 });
 
+app.get('/api/cs-master/list', async (req, res) => {
+  const { status, body } = await handleFetchCsMasterList(bearerToken(req.headers.authorization));
+  res.status(status).json(body);
+});
+
 app.post('/api/cs-master/update-location', async (req, res) => {
   const { status, body } = await handleUpdateCsMasterLocation(bearerToken(req.headers.authorization), req.body);
   res.status(status).json(body);
@@ -85,6 +95,11 @@ app.post('/api/cs-master/update-location', async (req, res) => {
 
 app.get('/api/route-orders/api-import', async (req, res) => {
   const { status, body } = await handleFetchApiImportOrders(bearerToken(req.headers.authorization));
+  res.status(status).json(body);
+});
+
+app.get('/api/route-orders/staff-info', async (req, res) => {
+  const { status, body } = await handleFetchStaffOrderInfoList(bearerToken(req.headers.authorization));
   res.status(status).json(body);
 });
 
@@ -97,13 +112,28 @@ app.get('/api/route-orders/export', async (req, res) => {
   sendResult(res, await handleExportRouteOrders(bearerToken(req.headers.authorization)));
 });
 
+app.get('/api/promotions/list', async (req, res) => {
+  const { status, body } = await handleFetchPromotionsList(bearerToken(req.headers.authorization));
+  res.status(status).json(body);
+});
+
 app.post('/api/promotions/upsert', async (req, res) => {
   const { status, body } = await handleUpsertPromotion(bearerToken(req.headers.authorization), req.body);
   res.status(status).json(body);
 });
 
+app.get('/api/sku-detail/list', async (req, res) => {
+  const { status, body } = await handleFetchSkuDetailList(bearerToken(req.headers.authorization));
+  res.status(status).json(body);
+});
+
 app.post('/api/sku-detail/link-promo', async (req, res) => {
   const { status, body } = await handleLinkLineItemPromo(bearerToken(req.headers.authorization), req.body);
+  res.status(status).json(body);
+});
+
+app.get('/api/sku-master/list', async (req, res) => {
+  const { status, body } = await handleFetchSkuMasterList(bearerToken(req.headers.authorization));
   res.status(status).json(body);
 });
 

@@ -1,8 +1,6 @@
-import { SHEET_TABS, csvExportUrl } from '../../config/sheets';
+import type { Session } from '../session';
 import type { CsMasterCustomer } from '../types';
-import { fetchSheetRows } from './sheetCsv';
-
-const CSV_URL = csvExportUrl(SHEET_TABS.csMaster);
+import { fetchSheetRowsFromBackend } from './sheetRowsApi';
 
 function toFloatOrNull(v: string | undefined): number | null {
   const s = (v ?? '').trim();
@@ -28,9 +26,7 @@ function rowToCustomer(row: Record<string, string>, index: number): CsMasterCust
   };
 }
 
-export async function fetchCsMasterCustomers(): Promise<CsMasterCustomer[]> {
-  const rows = await fetchSheetRows(CSV_URL);
+export async function fetchCsMasterCustomers(session: Session | null): Promise<CsMasterCustomer[]> {
+  const { rows } = await fetchSheetRowsFromBackend(session, '/api/cs-master/list');
   return rows.map(rowToCustomer).filter((c): c is CsMasterCustomer => c !== null);
 }
-
-export { CSV_URL as CS_MASTER_CSV_URL };

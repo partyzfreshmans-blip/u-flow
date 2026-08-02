@@ -65,14 +65,15 @@ export function joinRouteOrders(apiImportOrders: ApiImportOrder[], staffInfos: S
  * should call for order data. Kept under this name (unchanged from the old
  * sync-based design) so every existing call site — the mount effect and
  * actions.syncNow in store.ts — needed no changes at all beyond passing a
- * session through. API Import now goes through this app's own authenticated
- * backend (see apiImportOrders.ts) rather than a public CSV export, so a
- * session is required here too; a `stale` live read on the backend's side
- * (served from its own ~60s cache after a failed refresh) is intentionally
- * not surfaced here — the join still returns real, just possibly slightly
- * old, data rather than failing the whole page. */
+ * session through. Both sources now go through this app's own authenticated
+ * backend (see apiImportOrders.ts / staffOrderInfo.ts) rather than a public
+ * CSV export, so a session is required for both; a `stale` live read on
+ * either backend endpoint's side (served from its own ~60s cache after a
+ * failed refresh) is intentionally not surfaced here — the join still
+ * returns real, just possibly slightly old, data rather than failing the
+ * whole page. */
 export async function fetchRouteOrders(session: Session | null): Promise<RouteOrder[]> {
   if (!isRouteOrdersTabConfigured()) throw new Error(ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE);
-  const [apiImportResult, staffInfos] = await Promise.all([fetchApiImportOrders(session), fetchStaffOrderInfo()]);
+  const [apiImportResult, staffInfos] = await Promise.all([fetchApiImportOrders(session), fetchStaffOrderInfo(session)]);
   return joinRouteOrders(apiImportResult.orders, staffInfos);
 }

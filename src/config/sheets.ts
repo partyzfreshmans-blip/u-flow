@@ -11,10 +11,12 @@ export const SKU_SHEET_ID = '1gfbuVcH88ugwXgar393voAfcdOsS_qoi9galIFbWNXM';
 const GID_NOT_CONFIGURED = 'NOT_CONFIGURED';
 
 export const SHEET_TABS = {
-  // The one raw source of truth for order data, straight from Unii — read
-  // live every time (src/data/sources/apiImportOrders.ts), never synced
-  // anywhere else. Every column this tab has gets captured (named fields for
-  // known ones, a `raw` passthrough for everything else).
+  // The one raw source of truth for order data — read live every time
+  // through this app's own authenticated backend (see
+  // src/data/sources/apiImportOrders.ts and server/lib.ts's
+  // handleFetchApiImportOrders), never synced anywhere else. Every column
+  // this tab has gets captured (named fields for known ones, a `raw`
+  // passthrough for everything else).
   apiImport: { sheetId: MAIN_SHEET_ID, gid: '665542805' },
   // "คำสั่งซื้อ" (gid 0) used a row-position-based VLOOKUP/IMPORTRANGE formula
   // to pull in API Import data, which broke (staff-entered fields landing on
@@ -59,14 +61,11 @@ export const STAFF_ORDER_INFO_HEADERS = [
 
 export type SheetTabKey = keyof typeof SHEET_TABS;
 
-export function csvExportUrl(tab: { sheetId: string; gid: string }): string {
-  return `https://docs.google.com/spreadsheets/d/${tab.sheetId}/export?format=csv&gid=${tab.gid}`;
-}
-
 /** True until SHEET_TABS.routeOrders.gid is updated with the real gid of the
- * "คำสั่งซื้อ VS" tab. Checked by both the frontend CSV read and every
- * backend handler that touches this tab, so an un-updated config fails
- * loudly and specifically instead of a confusing generic error. */
+ * "คำสั่งซื้อ VS" tab. Checked by both the frontend's authenticated read
+ * (src/data/sources/staffOrderInfo.ts) and every backend handler that
+ * touches this tab, so an un-updated config fails loudly and specifically
+ * instead of a confusing generic error. */
 export function isRouteOrdersTabConfigured(): boolean {
   return (SHEET_TABS.routeOrders.gid as string) !== GID_NOT_CONFIGURED;
 }

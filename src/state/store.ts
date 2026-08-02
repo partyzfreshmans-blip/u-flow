@@ -5,7 +5,6 @@ import { updateCsMasterLatLng } from '../data/sources/csMasterWrite';
 import { avgPricePerPiece, fetchPromotions, formatPackUnitsTerm, formatTiersTerm } from '../data/sources/promotionsSheet';
 import { upsertPromotion } from '../data/sources/promotionsWrite';
 import { fetchRouteOrders } from '../data/sources/routeOrders';
-import { invalidateSheetCache } from '../data/sources/sheetCsv';
 import { fetchAllOrderLineItems, fetchOrderLineItems, fetchOrderLineItemsForOrders } from '../data/sources/skuDetail';
 import { linkLineItemPromo as apiLinkLineItemPromo } from '../data/sources/skuDetailWrite';
 import { fetchSkusFromSheet } from '../data/sources/skuSheet';
@@ -39,7 +38,6 @@ import { DELIVERED_STATUSES, DELIVERY_FAILED_STATUS, PICK_CLOSED_STATUS } from '
 import { effectiveDeliveryDayKey, ordersNeedingStuckBatchDetach } from './derive';
 import type { AttachmentScope } from '../config/drive';
 import type { ApiImportOrder, CsMasterCustomer, OrderLineItem, Promo, PromoPackUnit, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
-import { csvExportUrl, SHEET_TABS } from '../config/sheets';
 import { loadLastSyncAt, saveLastSyncAt } from '../data/syncMeta';
 import { appendNotificationEvents, loadNotificationEvents, loadNotificationReadIds, saveNotificationReadIds, type NotificationEvent } from '../data/notifications';
 import { appendActivityLog, loadActivityLog, type ActivityLogEntry } from '../data/activityLog';
@@ -938,9 +936,13 @@ export function useAppStore() {
     });
   }
 
+  // SKU Master lives on a separate spreadsheet, read through this app's own
+  // authenticated backend (see src/data/sources/skuSheet.ts) — needs a
+  // session, so gated the same way as every other Sheets-backed effect here.
   useEffect(() => {
+    if (!state.session) return;
     let cancelled = false;
-    fetchSkusFromSheet()
+    fetchSkusFromSheet(loadSession())
       .then((skus) => {
         if (!cancelled) {
           dispatch({ type: 'patch', patch: { skus, skusLoading: false, skusError: null } });
@@ -957,7 +959,8 @@ export function useAppStore() {
     return () => {
       cancelled = true;
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.session?.username]);
 
   // Order data comes from the "API Import" sheet tab via this app's own
   // backend (see src/data/sources/apiImportOrders.ts), which needs a
@@ -1028,12 +1031,12 @@ export function useAppStore() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.session?.username]);
 
-  // Promotions: also a public CSV export (see
+  // Promotions: read through this app's own authenticated backend (see
   // src/data/sources/promotionsSheet.ts) — same session-gating reasoning.
   useEffect(() => {
     if (!state.session) return;
     let cancelled = false;
-    fetchPromotions()
+    fetchPromotions(loadSession())
       .then((promos) => {
         if (!cancelled) {
           dispatch({ type: 'patch', patch: { promos, promosLoading: false, promosError: null } });
@@ -1053,9 +1056,13 @@ export function useAppStore() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.session?.username]);
 
+  // SKU Detail (order line items): read through this app's own
+  // authenticated backend (see src/data/sources/skuDetail.ts) — needs a
+  // session, same gating as every other Sheets-backed effect here.
   useEffect(() => {
+    if (!state.session) return;
     let cancelled = false;
-    fetchAllOrderLineItems()
+    fetchAllOrderLineItems(loadSession())
       .then((orderLineItems) => {
         if (!cancelled) {
           dispatch({ type: 'patch', patch: { orderLineItems, orderLineItemsLoading: false, orderLineItemsError: null } });
@@ -1072,15 +1079,17 @@ export function useAppStore() {
     return () => {
       cancelled = true;
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.session?.username]);
 
-  // Customer list (name/address/lat/lng/etc.) comes straight from the CS
-  // Master Google Sheet — a corrected lat/lng is written back to that same
-  // sheet by updateCsMasterLatLng, so there's nothing separate to fetch or
-  // merge in here.
+  // Customer list (name/address/lat/lng/etc.) comes through this app's own
+  // authenticated backend (see src/data/sources/csMaster.ts) — a corrected
+  // lat/lng is written back to that same sheet by updateCsMasterLatLng, so
+  // there's nothing separate to fetch or merge in here.
   useEffect(() => {
+    if (!state.session) return;
     let cancelled = false;
-    fetchCsMasterCustomers()
+    fetchCsMasterCustomers(loadSession())
       .then((customers) => {
         if (!cancelled) {
           dispatch({ type: 'patch', patch: { customers, customersLoading: false, customersError: null } });
@@ -1545,7 +1554,7 @@ export function useAppStore() {
               : { plannedDeliveryDate: '', note: '', wantsTaxInvoice: false },
           },
         });
-        fetchOrderLineItems(orderNo)
+        fetchOrderLineItems(orderNo, loadSession())
           .then((lines) => {
             dispatch({
               type: 'patch',
@@ -1916,7 +1925,7 @@ export function useAppStore() {
         if (orderNos.length === 0) return;
         dispatch({ type: 'patch', patch: { pickCreating: true, pickCreateError: null } });
         try {
-          const lineItems = await fetchOrderLineItemsForOrders(orderNos);
+          const lineItems = await fetchOrderLineItemsForOrders(orderNos, loadSession());
           const byOrderNo = new Map(routeOrders.map((o) => [o.orderNo, o]));
           const locationBySku = new Map(skus.map((s) => [s.displayId, s.location]));
 
@@ -2010,39 +2019,30 @@ export function useAppStore() {
 
       logActivity,
 
-      /** Manual "Sync" button — force-refreshes every Google Sheet source at
-       * once (bypassing fetchSheetRows' normal ~45s cache) instead of waiting
-       * for the next page load. Uses allSettled so one failing source never
-       * discards the others' fresh data; only the sources that actually
-       * failed keep showing their last-known-good values. */
+      /** Manual "Sync" button — re-requests every Google Sheet source at once
+       * instead of waiting for the next page load. Uses allSettled so one
+       * failing source never discards the others' fresh data; only the
+       * sources that actually failed keep showing their last-known-good
+       * values. */
       // Returns a definite result (not just void) so a caller like the
       // Planner's "Assign" flow can react to THIS sync's outcome directly,
       // without reading back potentially-stale state right after the await.
       syncNow: async (): Promise<{ ok: boolean; routeOrdersOk: boolean; failures: string[] }> => {
         dispatch({ type: 'patch', patch: { syncing: true } });
 
-        // Force a fresh read from every public-CSV source instead of waiting
-        // out fetchSheetRows' normal ~45s cache. API Import goes through
-        // this app's own backend (its own separate ~60s cache — see
-        // server/lib.ts) rather than this CSV cache, so it isn't included
-        // here; asking for it below still gets whatever that backend's
-        // cache currently holds.
-        [
-          csvExportUrl(SHEET_TABS.skuDetail),
-          csvExportUrl(SHEET_TABS.csMaster),
-          csvExportUrl(SHEET_TABS.skuMaster),
-          csvExportUrl(SHEET_TABS.routeOrders),
-          csvExportUrl(SHEET_TABS.promotions),
-        ].forEach(invalidateSheetCache);
-
+        // Every source below now reads through this app's own authenticated
+        // backend, each with its own ~60s server-side cache (see
+        // server/lib.ts's makeSheetCache) — there's no longer a client-side
+        // CSV cache to force-bypass here, so this just re-requests each one;
+        // most calls within a ~60s window just hit that backend cache.
         const session = loadSession();
         const [apiOrdersR, routeOrdersR, lineItemsR, promosR, customersR, skusR] = await Promise.allSettled([
           fetchApiImportOrders(session),
           fetchRouteOrders(session),
-          fetchAllOrderLineItems(),
-          fetchPromotions(),
-          fetchCsMasterCustomers(),
-          fetchSkusFromSheet(),
+          fetchAllOrderLineItems(session),
+          fetchPromotions(session),
+          fetchCsMasterCustomers(session),
+          fetchSkusFromSheet(session),
         ]);
 
         const patch: Partial<AppState> = {};

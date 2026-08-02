@@ -3,7 +3,7 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { DRIVE_ROOT_FOLDER_ENV, driveFolderPath, isAllowedFile, type AttachmentScope } from '../src/config/drive.js';
 import { GEOCODE_MIN_INTERVAL_MS, NOMINATIM_REVERSE_URL, NOMINATIM_USER_AGENT } from '../src/config/geocoding.js';
-import { isRouteOrdersTabConfigured, MAIN_SHEET_ID, ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE, SHEET_TABS, STAFF_ORDER_INFO_HEADERS } from '../src/config/sheets.js';
+import { isRouteOrdersTabConfigured, MAIN_SHEET_ID, ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE, SHEET_TABS, SKU_SHEET_ID, STAFF_ORDER_INFO_HEADERS } from '../src/config/sheets.js';
 import type { RouteOrder } from '../src/data/types.js';
 import { DELIVERY_DONE_STATUSES } from '../src/state/helpers.js';
 import { createSessionToken, verifySessionToken } from './session.js';
@@ -23,6 +23,7 @@ export const ROUTE_ORDERS_GID = Number(SHEET_TABS.routeOrders.gid);
 export const PROMOTIONS_GID = Number(SHEET_TABS.promotions.gid);
 export const SKU_DETAIL_GID = Number(SHEET_TABS.skuDetail.gid);
 export const API_IMPORT_GID = Number(SHEET_TABS.apiImport.gid);
+export const SKU_MASTER_GID = Number(SHEET_TABS.skuMaster.gid);
 
 // Columns in the CS Master tab: A=ชื่อ B=เบอร์ C=ที่อยู่ D=ละ(lat) E=ลอง(lng)
 const LAT_COLUMN = 'D';
@@ -270,9 +271,12 @@ async function ensureFolderPath(drive: DriveClient, parentId: string, segments: 
   return current;
 }
 
-/** gid identifies a tab stably; the Sheets values API needs its title. */
-async function resolveSheetTitle(sheets: ReturnType<typeof google.sheets>, gid: number): Promise<string> {
-  const meta = await sheets.spreadsheets.get({ spreadsheetId: MAIN_SHEET_ID });
+/** gid identifies a tab stably; the Sheets values API needs its title.
+ * Defaults to the main spreadsheet — SKU Master is the one tab that lives on
+ * a different spreadsheet entirely (SKU_SHEET_ID), so it's the only caller
+ * that ever passes spreadsheetId explicitly. */
+async function resolveSheetTitle(sheets: ReturnType<typeof google.sheets>, gid: number, spreadsheetId: string = MAIN_SHEET_ID): Promise<string> {
+  const meta = await sheets.spreadsheets.get({ spreadsheetId });
   const match = meta.data.sheets?.find((s) => s.properties?.sheetId === gid);
   const title = match?.properties?.title;
   if (!title) throw new Error(`ไม่พบแท็บที่มี gid=${gid} ในสเปรดชีต`);
@@ -1417,6 +1421,137 @@ function joinRouteOrdersForExport(apiOrders: ApiImportOrderShape[], staffInfos: 
       courierStamp: staff?.courierStamp ?? '',
     };
   });
+}
+
+// ---------- Sheet-tab list reads (CS Master, Promotions, SKU Detail,
+// Staff Order Info "คำสั่งซื้อ VS", SKU Master) ----------
+// These five tabs used to be read straight from the browser via Sheets'
+// public CSV export URL (no auth needed) — cheap and simple, but it only
+// works while every tab stays link-shared "Anyone with the link can view".
+// Once the spreadsheet is set to Restricted, that URL redirects to a Google
+// login page instead of CSV, which the browser then can't read cross-origin
+// (a CORS failure, surfacing as a plain "Failed to fetch" with no useful
+// detail). Reading them through this authenticated Service Account path —
+// same one every write-back handler already uses — works regardless of the
+// spreadsheet's sharing settings.
+//
+// Each handler returns rows in exactly the shape Papaparse's
+// `{ header: true }` mode used to produce (an array of header-keyed
+// objects, every value a string) so the frontend's existing per-tab
+// row-mapping functions (rowToCustomer, rowToPromo, rowToLineItem, ...)
+// needed zero changes — only their data source swapped.
+function sheetRowsToRecords(rows: unknown[][]): Record<string, string>[] {
+  if (rows.length === 0) return [];
+  const header = (rows[0] ?? []).map((h) => String(h ?? '').trim());
+  const out: Record<string, string>[] = [];
+  for (let i = 1; i < rows.length; i++) {
+    const record: Record<string, string> = {};
+    header.forEach((h, idx) => {
+      if (h) record[h] = String(rows[i]?.[idx] ?? '');
+    });
+    out.push(record);
+  }
+  return out;
+}
+
+const csMasterRowsCache = makeSheetCache<Record<string, string>[]>();
+const promotionsRowsCache = makeSheetCache<Record<string, string>[]>();
+const skuDetailRowsCache = makeSheetCache<Record<string, string>[]>();
+const staffOrderInfoRowsCache = makeSheetCache<Record<string, string>[]>();
+const skuMasterRowsCache = makeSheetCache<Record<string, string>[]>();
+
+/** Shared by every handler below — verifies the session, runs `read`
+ * through its cache, and shapes the {rows, stale, error} response. Every
+ * one of these tabs is readable by any authenticated user, same as
+ * Bookings/Batch Routes: nothing here is more sensitive than what the page
+ * that reads it already shows everyone who can reach it. */
+async function handleSheetRowsList(
+  token: string | null,
+  cache: ReturnType<typeof makeSheetCache<Record<string, string>[]>>,
+  read: () => Promise<Record<string, string>[]>,
+  failureMessage: string,
+): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  try {
+    const { data, stale, error } = await cache.read(read);
+    return { status: 200, body: { rows: data, stale, error } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : failureMessage;
+    console.error('[sheets/list]', message);
+    return { status: 500, body: { error: message } };
+  }
+}
+
+export async function handleFetchCsMasterList(token: string | null): Promise<ApiResult> {
+  return handleSheetRowsList(
+    token,
+    csMasterRowsCache,
+    async () => {
+      const sheets = await getSheetsClient();
+      const title = await resolveSheetTitle(sheets, CS_MASTER_GID);
+      const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${title}!A:Z` });
+      return sheetRowsToRecords(res.data.values ?? []);
+    },
+    'โหลดรายชื่อลูกค้า (CS Master) ไม่สำเร็จ',
+  );
+}
+
+export async function handleFetchPromotionsList(token: string | null): Promise<ApiResult> {
+  return handleSheetRowsList(
+    token,
+    promotionsRowsCache,
+    async () => {
+      const sheets = await getSheetsClient();
+      const title = await resolveSheetTitle(sheets, PROMOTIONS_GID);
+      const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${title}!A:Z` });
+      return sheetRowsToRecords(res.data.values ?? []);
+    },
+    'โหลดโปรโมชั่นไม่สำเร็จ',
+  );
+}
+
+export async function handleFetchSkuDetailList(token: string | null): Promise<ApiResult> {
+  return handleSheetRowsList(
+    token,
+    skuDetailRowsCache,
+    async () => {
+      const sheets = await getSheetsClient();
+      const title = await resolveSheetTitle(sheets, SKU_DETAIL_GID);
+      const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${title}!A:Z` });
+      return sheetRowsToRecords(res.data.values ?? []);
+    },
+    'โหลดรายการสินค้าต่อออเดอร์ (SKU Detail) ไม่สำเร็จ',
+  );
+}
+
+export async function handleFetchStaffOrderInfoList(token: string | null): Promise<ApiResult> {
+  if (!isRouteOrdersTabConfigured()) return { status: 500, body: { error: ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE } };
+  return handleSheetRowsList(
+    token,
+    staffOrderInfoRowsCache,
+    async () => {
+      const sheets = await getSheetsClient();
+      const title = await resolveSheetTitle(sheets, ROUTE_ORDERS_GID);
+      const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${title}!A:Z` });
+      return sheetRowsToRecords(res.data.values ?? []);
+    },
+    'โหลดข้อมูลออเดอร์ (คำสั่งซื้อ VS) ไม่สำเร็จ',
+  );
+}
+
+export async function handleFetchSkuMasterList(token: string | null): Promise<ApiResult> {
+  return handleSheetRowsList(
+    token,
+    skuMasterRowsCache,
+    async () => {
+      const sheets = await getSheetsClient();
+      const title = await resolveSheetTitle(sheets, SKU_MASTER_GID, SKU_SHEET_ID);
+      const res = await sheets.spreadsheets.values.get({ spreadsheetId: SKU_SHEET_ID, range: `${title}!A:Z` });
+      return sheetRowsToRecords(res.data.values ?? []);
+    },
+    'โหลดฐานข้อมูลสินค้า (SKU Master) ไม่สำเร็จ',
+  );
 }
 
 // ---------- Audit Log ----------

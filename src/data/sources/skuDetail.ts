@@ -1,8 +1,6 @@
-import { SHEET_TABS, csvExportUrl } from '../../config/sheets';
+import type { Session } from '../session';
 import type { OrderLineItem } from '../types';
-import { fetchSheetRows } from './sheetCsv';
-
-const CSV_URL = csvExportUrl(SHEET_TABS.skuDetail);
+import { fetchSheetRowsFromBackend } from './sheetRowsApi';
 
 function toNumber(v: string | undefined): number {
   const cleaned = (v ?? '').replace(/,/g, '').trim();
@@ -33,11 +31,12 @@ function rowToLineItem(row: Record<string, string>): OrderLineItem | null {
   };
 }
 
-/** Line items for one order. Fetches (and caches, via fetchSheetRows) the
- * whole tab once, then filters client-side — Sheets CSV export can't filter
- * server-side by column value. */
-export async function fetchOrderLineItems(orderUid: string): Promise<OrderLineItem[]> {
-  const rows = await fetchSheetRows(CSV_URL);
+/** Line items for one order. Fetches (and the backend caches, ~60s) the
+ * whole tab once, then filters client-side — the Sheets API read here can't
+ * filter server-side by column value any more than the old CSV export
+ * could. */
+export async function fetchOrderLineItems(orderUid: string, session: Session | null): Promise<OrderLineItem[]> {
+  const { rows } = await fetchSheetRowsFromBackend(session, '/api/sku-detail/list');
   return rows
     .map(rowToLineItem)
     .filter((l): l is OrderLineItem => l !== null)
@@ -46,9 +45,9 @@ export async function fetchOrderLineItems(orderUid: string): Promise<OrderLineIt
 
 /** Same as fetchOrderLineItems but for a whole batch-picking selection at
  * once — one fetch (already cached) instead of one round trip per order. */
-export async function fetchOrderLineItemsForOrders(orderNos: string[]): Promise<OrderLineItem[]> {
+export async function fetchOrderLineItemsForOrders(orderNos: string[], session: Session | null): Promise<OrderLineItem[]> {
   const wanted = new Set(orderNos);
-  const rows = await fetchSheetRows(CSV_URL);
+  const { rows } = await fetchSheetRowsFromBackend(session, '/api/sku-detail/list');
   return rows
     .map(rowToLineItem)
     .filter((l): l is OrderLineItem => l !== null)
@@ -58,7 +57,7 @@ export async function fetchOrderLineItemsForOrders(orderNos: string[]): Promise<
 /** All line items across every order — one fetch (already cached), no
  * filter. Used to cross-reference orders against active promotions on the
  * Order Management page without a round trip per order. */
-export async function fetchAllOrderLineItems(): Promise<OrderLineItem[]> {
-  const rows = await fetchSheetRows(CSV_URL);
+export async function fetchAllOrderLineItems(session: Session | null): Promise<OrderLineItem[]> {
+  const { rows } = await fetchSheetRowsFromBackend(session, '/api/sku-detail/list');
   return rows.map(rowToLineItem).filter((l): l is OrderLineItem => l !== null);
 }
