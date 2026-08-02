@@ -57,6 +57,7 @@ export function joinRouteOrders(apiImportOrders: ApiImportOrder[], staffInfos: S
       whLat: o.whLat,
       whLng: o.whLng,
       courierStamp: staff?.courierStamp ?? '',
+      promotionFlag: staff?.promotionFlag ?? false,
     };
   });
 }

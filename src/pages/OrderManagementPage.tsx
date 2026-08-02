@@ -1,13 +1,34 @@
 import { useState } from 'react';
 import { OrderDetailModal } from '../components/OrderDetailModal';
 import { canEditOrder } from '../config/permissions';
+import { addDays, dayKey } from '../data/dateUtils';
 import { exportRouteOrdersXlsx } from '../data/sources/exportXlsx';
+import type { Vehicle } from '../data/vehicles';
 import { computeRoute } from '../state/derive';
+import { DELIVERY_FAILED_STATUS, PICK_CLOSED_STATUS } from '../state/helpers';
 import type { AppActions, AppState } from '../state/store';
 
 type OrderRow = ReturnType<typeof computeRoute>['rowsWithDate'][number];
 
 const PAGE_SIZE = 30;
+/** Same allowlist as server/lib.ts's KNOWN_OPERATIONAL_STATUS_VALUES — the
+ * bulk "เปลี่ยนสถานะ" dialog can only ever pick one of these three. */
+const BULK_STATUS_OPTIONS = [PICK_CLOSED_STATUS, 'ส่งสำเร็จ', DELIVERY_FAILED_STATUS];
+/** Above this many selected orders, every bulk-actions dialog requires an
+ * extra explicit checkbox before its confirm button enables. */
+const BULK_DOUBLE_CONFIRM_THRESHOLD = 200;
+
+/** Shared second-confirmation gate for every bulk-actions dialog once the
+ * selection is large — returns null (no gate needed) at/under the threshold. */
+function BulkCountGate({ count, confirmed, onChange }: { count: number; confirmed: boolean; onChange: (v: boolean) => void }) {
+  if (count <= BULK_DOUBLE_CONFIRM_THRESHOLD) return null;
+  return (
+    <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 10, padding: '9px 11px', borderRadius: 8, background: 'var(--st-warn-bg)', color: 'var(--st-warn-fg)', fontSize: 12.5, cursor: 'pointer' }}>
+      <input type="checkbox" checked={confirmed} onChange={(e) => onChange(e.target.checked)} style={{ marginTop: 2, flex: 'none' }} />
+      <span>รายการนี้มีถึง {count.toLocaleString('en-US')} รายการ — ติ๊กเพื่อยืนยันว่าต้องการดำเนินการกับทุกรายการจริง</span>
+    </label>
+  );
+}
 
 /** Native date-picker onChange isn't reliable enough to save-on-change (some
  * browsers fire it mid-entry, before all three segments are filled) — so
@@ -85,11 +106,14 @@ function OrderTable({
   const [shown, setShown] = useState(PAGE_SIZE);
   const [collapsed, setCollapsed] = useState(false);
   const visible = rows.slice(0, shown);
-  const allOrderNos = rows.map((r) => r.orderNo);
-  const allSelected = allOrderNos.length > 0 && allOrderNos.every((no) => selectedOrderNos.includes(no));
+  // Header checkbox selects only the currently-shown (paginated) page — bulk
+  // selection beyond that is the separate "เลือกทั้งหมด N รายการที่ตรงตัวกรอง"
+  // link above the table, never implied by this checkbox.
+  const visibleOrderNos = visible.map((r) => r.orderNo);
+  const allSelected = visibleOrderNos.length > 0 && visibleOrderNos.every((no) => selectedOrderNos.includes(no));
   const toggleSelectAll = () => {
-    if (allSelected) setSelection(selectedOrderNos.filter((no) => !allOrderNos.includes(no)));
-    else setSelection(Array.from(new Set([...selectedOrderNos, ...allOrderNos])));
+    if (allSelected) setSelection(selectedOrderNos.filter((no) => !visibleOrderNos.includes(no)));
+    else setSelection(Array.from(new Set([...selectedOrderNos, ...visibleOrderNos])));
   };
   return (
     <div className="card elev-sm" style={{ padding: '4px 14px 8px', marginBottom: 18 }}>
@@ -243,13 +267,58 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
   const [stuckCollapsed, setStuckCollapsed] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
-  const doExport = () => {
+  const doExport = (selectedOnly: boolean) => {
     setExporting(true);
     setExportError(null);
-    exportRouteOrdersXlsx(state.session)
+    exportRouteOrdersXlsx(state.session, selectedOnly ? state.routeSelectedOrderNos : undefined)
       .catch((err: unknown) => setExportError(err instanceof Error ? err.message : 'Export ไม่สำเร็จ'))
       .finally(() => setExporting(false));
   };
+
+  // ---- bulk-actions toolbar dialogs — each dialog's own form fields are
+  // local, ephemeral UI state (see the bulkDialog field's comment in
+  // store.ts); only open/submitting/error/result is global. ----
+  const [archiveDoubleConfirm, setArchiveDoubleConfirm] = useState(false);
+  const [deliveryDateMode, setDeliveryDateMode] = useState<'suggested' | 'fixed'>('suggested');
+  const [deliveryDateFixed, setDeliveryDateFixed] = useState('');
+  const [deliveryDateDoubleConfirm, setDeliveryDateDoubleConfirm] = useState(false);
+  const [assignVehicleId, setAssignVehicleId] = useState('');
+  const [assignBatchId, setAssignBatchId] = useState('');
+  const [assignDoubleConfirm, setAssignDoubleConfirm] = useState(false);
+  const [statusValue, setStatusValue] = useState(BULK_STATUS_OPTIONS[0]);
+  const [statusDoubleConfirm, setStatusDoubleConfirm] = useState(false);
+  const [noteText, setNoteText] = useState('');
+  const [noteMode, setNoteMode] = useState<'append' | 'overwrite'>('append');
+  const [noteDoubleConfirm, setNoteDoubleConfirm] = useState(false);
+  const [taxInvoiceValue, setTaxInvoiceValue] = useState(true);
+  const [taxInvoiceDoubleConfirm, setTaxInvoiceDoubleConfirm] = useState(false);
+  const [promotionValue, setPromotionValue] = useState(true);
+  const [promotionDoubleConfirm, setPromotionDoubleConfirm] = useState(false);
+
+  const openBulk = (kind: NonNullable<AppState['bulkDialog']>) => {
+    // Reset every dialog's own gate/defaults on open, not just the one being
+    // opened — cheap, and guarantees a stale double-confirm tick from a
+    // previous run can never silently carry into the next dialog.
+    setArchiveDoubleConfirm(false);
+    setDeliveryDateMode('suggested');
+    setDeliveryDateFixed('');
+    setDeliveryDateDoubleConfirm(false);
+    setAssignVehicleId('');
+    setAssignBatchId('');
+    setAssignDoubleConfirm(false);
+    setStatusValue(BULK_STATUS_OPTIONS[0]);
+    setStatusDoubleConfirm(false);
+    setNoteText('');
+    setNoteMode('append');
+    setNoteDoubleConfirm(false);
+    setTaxInvoiceValue(true);
+    setTaxInvoiceDoubleConfirm(false);
+    setPromotionValue(true);
+    setPromotionDoubleConfirm(false);
+    v.openBulkDialog(kind);
+  };
+  const needsDoubleConfirm = v.selectedCount > BULK_DOUBLE_CONFIRM_THRESHOLD;
+  const selectedVehicle = state.vehicles.find((veh: Vehicle) => veh.id === assignVehicleId) ?? null;
   /** "Batch ทั้งหมดที่รอ" doesn't invent a new batch-creation path — it just
    * preselects every pending order into the Planner's existing multi-select
    * (plannerSelectedOrderNos) and drops the user there, where "จัดลงรถ" +
@@ -390,7 +459,12 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
           </label>
         )}
         <div style={{ fontSize: 12, color: 'var(--color-neutral-500)', marginLeft: v.canArchive ? 0 : 'auto' }}>{v.resultCount} รายการ</div>
-        <button className="btn btn-ghost" style={{ fontSize: 12 }} disabled={exporting} onClick={doExport}>
+        {canEdit && v.allFilteredCount > v.selectedCount && (
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => v.setSelection(v.allFilteredOrderNos)}>
+            <i className="ph ph-checks" />เลือกทั้งหมด {v.allFilteredCount.toLocaleString('en-US')} รายการที่ตรงตัวกรอง
+          </button>
+        )}
+        <button className="btn btn-ghost" style={{ fontSize: 12 }} disabled={exporting} onClick={() => doExport(false)}>
           <i className={exporting ? 'ph ph-circle-notch' : 'ph ph-file-xls'} style={exporting ? { animation: 'spin .8s linear infinite' } : undefined} />
           {exporting ? 'กำลัง Export...' : 'Export เป็น Excel'}
         </button>
@@ -446,7 +520,8 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
             zIndex: 5,
             display: 'flex',
             alignItems: 'center',
-            gap: 10,
+            gap: 8,
+            flexWrap: 'wrap',
             padding: '10px 14px',
             marginBottom: 14,
             borderRadius: 10,
@@ -455,14 +530,56 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
             fontSize: 13,
           }}
         >
-          <span style={{ fontWeight: 600, color: 'var(--color-accent-200)' }}>เลือกแล้ว {v.selectedCount} รายการ</span>
-          <button className="btn btn-primary" style={{ fontSize: 12.5 }} onClick={v.openArchiveDialog}>
+          <span style={{ fontWeight: 600, color: 'var(--color-accent-200)', marginRight: 2 }}>เลือกแล้ว {v.selectedCount} รายการ</span>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => openBulk('deliveryDate')}>
+            <i className="ph ph-calendar-check" />ตั้งวันที่จัดส่ง
+          </button>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => openBulk('assign')}>
+            <i className="ph ph-truck" />Assign ยกชุด
+          </button>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => openBulk('status')}>
+            <i className="ph ph-flag" />เปลี่ยนสถานะ
+          </button>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => openBulk('note')}>
+            <i className="ph ph-note-pencil" />ใส่หมายเหตุ
+          </button>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => openBulk('taxInvoice')}>
+            <i className="ph ph-receipt" />ใบกำกับภาษี
+          </button>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => openBulk('promotion')}>
+            <i className="ph ph-tag" />โปรโมชั่น
+          </button>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} disabled={exporting} onClick={() => doExport(true)}>
+            <i className={exporting ? 'ph ph-circle-notch' : 'ph ph-file-xls'} style={exporting ? { animation: 'spin .8s linear infinite' } : undefined} />
+            Export เฉพาะที่เลือก
+          </button>
+          <button className="btn btn-primary" style={{ fontSize: 12.5 }} onClick={() => { setArchiveDoubleConfirm(false); v.openArchiveDialog(); }}>
             <i className={v.archivedFilter ? 'ph ph-arrow-counter-clockwise' : 'ph ph-archive'} />
             {v.archivedFilter ? 'นำกลับมาใช้งาน' : 'จัดเก็บ (Archive)'}
           </button>
           <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={v.clearSelection}>
             <i className="ph ph-x" />ล้างที่เลือก
           </button>
+        </div>
+      )}
+
+      {v.bulkResult && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 13, marginBottom: 14, borderRadius: 10, background: v.bulkResult.failed.length > 0 ? 'var(--st-bad-bg)' : 'var(--st-ok-bg)', color: v.bulkResult.failed.length > 0 ? 'var(--st-bad-fg)' : 'var(--st-ok-fg)', fontSize: 12.5 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+            <i className={v.bulkResult.failed.length > 0 ? 'ph ph-warning-fill' : 'ph ph-check-circle-fill'} />
+            <span style={{ flex: 1 }}>
+              {v.bulkResult.label}: สำเร็จ {v.bulkResult.succeeded.toLocaleString('en-US')}/{(v.bulkResult.succeeded + v.bulkResult.failed.length).toLocaleString('en-US')} รายการ
+              {v.bulkResult.failed.length > 0 && ` — ล้มเหลว ${v.bulkResult.failed.length} รายการ`}
+            </span>
+            <button className="btn btn-ghost" style={{ fontSize: 11.5 }} onClick={v.dismissBulkResult}>
+              <i className="ph ph-x" />ปิด
+            </button>
+          </div>
+          {v.bulkResult.failed.length > 0 && (
+            <div style={{ fontSize: 11.5, opacity: 0.9 }}>
+              {v.bulkResult.failed.map((f) => `${f.orderNo} (${f.reason})`).join(' · ')}
+            </div>
+          )}
         </div>
       )}
 
@@ -551,9 +668,10 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
                 : `นำ ${v.selectedCount} ออเดอร์กลับมาใช้งานปกติ — ออเดอร์เหล่านี้จะกลับไปแสดงในตารางหลักและหน้าอื่นๆ อีกครั้ง`}
             </div>
             {v.archiveError && <div style={{ color: 'var(--st-bad-fg)', fontSize: 12.5 }}>{v.archiveError}</div>}
+            <BulkCountGate count={v.selectedCount} confirmed={archiveDoubleConfirm} onChange={setArchiveDoubleConfirm} />
             <div className="dialog-actions">
               <button className="btn btn-secondary" onClick={v.closeArchiveDialog} disabled={v.archiveSubmitting}>ยกเลิก</button>
-              <button className="btn btn-primary" onClick={v.confirmArchive} disabled={v.archiveSubmitting}>
+              <button className="btn btn-primary" onClick={v.confirmArchive} disabled={v.archiveSubmitting || (needsDoubleConfirm && !archiveDoubleConfirm)}>
                 {v.archiveSubmitting ? (
                   <>
                     <i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังบันทึก...
@@ -563,6 +681,216 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
                 ) : (
                   'ยืนยันนำกลับมาใช้งาน'
                 )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {v.bulkDialog === 'deliveryDate' && (() => {
+        const tomorrow = dayKey(addDays(new Date(), 1));
+        const plusTwo = dayKey(addDays(new Date(), 2));
+        const suggestedCoverage = state.routeSelectedOrderNos.filter((no) => v.suggestedDateByOrderNo[no]).length;
+        const dates: Record<string, string> = {};
+        for (const no of state.routeSelectedOrderNos) {
+          if (deliveryDateMode === 'suggested') {
+            if (v.suggestedDateByOrderNo[no]) dates[no] = v.suggestedDateByOrderNo[no];
+          } else if (deliveryDateFixed) {
+            dates[no] = deliveryDateFixed;
+          }
+        }
+        const canConfirm = deliveryDateMode === 'suggested' ? suggestedCoverage > 0 : !!deliveryDateFixed;
+        return (
+          <div className="dialog-backdrop" onClick={v.closeBulkDialog}>
+            <div className="dialog" onClick={(e) => e.stopPropagation()}>
+              <div className="dialog-title">ตั้งวันที่จัดส่ง — {v.selectedCount} รายการ</div>
+              <div className="dialog-body" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13 }}>
+                  <input type="radio" checked={deliveryDateMode === 'suggested'} onChange={() => setDeliveryDateMode('suggested')} />
+                  ใช้วันที่แนะนำของแต่ละแถว (ตามเวลาที่สั่ง — อาจได้วันต่างกัน)
+                </label>
+                {deliveryDateMode === 'suggested' && (
+                  <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginLeft: 22 }}>
+                    มีวันที่แนะนำให้ {suggestedCoverage}/{v.selectedCount} รายการ
+                    {suggestedCoverage < v.selectedCount && ' (ส่วนที่เหลือไม่มีเวลาที่สั่งให้คำนวณ จะถูกข้าม)'}
+                  </div>
+                )}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13 }}>
+                  <input type="radio" checked={deliveryDateMode === 'fixed'} onChange={() => setDeliveryDateMode('fixed')} />
+                  เลือกวันเดียวกันทั้งหมด
+                </label>
+                {deliveryDateMode === 'fixed' && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginLeft: 22, flexWrap: 'wrap' }}>
+                    <input type="date" className="input" style={{ minHeight: 32, width: 160 }} value={deliveryDateFixed} onChange={(e) => setDeliveryDateFixed(e.target.value)} />
+                    <button className="btn btn-ghost" style={{ fontSize: 11.5 }} onClick={() => setDeliveryDateFixed(tomorrow)}>พรุ่งนี้</button>
+                    <button className="btn btn-ghost" style={{ fontSize: 11.5 }} onClick={() => setDeliveryDateFixed(plusTwo)}>+2 วัน</button>
+                  </div>
+                )}
+                {v.bulkError && <div style={{ color: 'var(--st-bad-fg)', fontSize: 12.5 }}>{v.bulkError}</div>}
+                <BulkCountGate count={v.selectedCount} confirmed={deliveryDateDoubleConfirm} onChange={setDeliveryDateDoubleConfirm} />
+              </div>
+              <div className="dialog-actions">
+                <button className="btn btn-secondary" onClick={v.closeBulkDialog} disabled={v.bulkSubmitting}>ยกเลิก</button>
+                <button
+                  className="btn btn-primary"
+                  disabled={v.bulkSubmitting || !canConfirm || (needsDoubleConfirm && !deliveryDateDoubleConfirm)}
+                  onClick={() => v.runBulkSetDeliveryDate(state.routeSelectedOrderNos, dates)}
+                >
+                  {v.bulkSubmitting ? (<><i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังบันทึก...</>) : 'ยืนยันตั้งวันที่'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {v.bulkDialog === 'assign' && (
+        <div className="dialog-backdrop" onClick={v.closeBulkDialog}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-title">Assign ยกชุด — {v.selectedCount} รายการ</div>
+            <div className="dialog-body" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <label style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>
+                Route (รถ)
+                <select className="input" style={{ minHeight: 32, marginTop: 4 }} value={assignVehicleId} onChange={(e) => setAssignVehicleId(e.target.value)}>
+                  <option value="">— เลือกรถ —</option>
+                  {state.vehicles.map((veh: Vehicle) => (
+                    <option key={veh.id} value={veh.id}>{veh.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>
+                BATCH ROUTE
+                <input className="input" style={{ minHeight: 32, marginTop: 4 }} value={assignBatchId} onChange={(e) => setAssignBatchId(e.target.value)} placeholder="เช่น BATCH-01" />
+              </label>
+              <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)' }}>คนส่งจะถูกกำหนดอัตโนมัติจากคนขับที่ผูกกับรถคันนี้ และ "วันที่ Assign" จะบันทึกเป็นเวลาปัจจุบัน</div>
+              {v.bulkError && <div style={{ color: 'var(--st-bad-fg)', fontSize: 12.5 }}>{v.bulkError}</div>}
+              <BulkCountGate count={v.selectedCount} confirmed={assignDoubleConfirm} onChange={setAssignDoubleConfirm} />
+            </div>
+            <div className="dialog-actions">
+              <button className="btn btn-secondary" onClick={v.closeBulkDialog} disabled={v.bulkSubmitting}>ยกเลิก</button>
+              <button
+                className="btn btn-primary"
+                disabled={v.bulkSubmitting || !selectedVehicle || !assignBatchId.trim() || (needsDoubleConfirm && !assignDoubleConfirm)}
+                onClick={() => selectedVehicle && v.runBulkAssign(state.routeSelectedOrderNos, selectedVehicle.id, selectedVehicle.name, assignBatchId.trim())}
+              >
+                {v.bulkSubmitting ? (<><i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังบันทึก...</>) : 'ยืนยัน Assign'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {v.bulkDialog === 'status' && (
+        <div className="dialog-backdrop" onClick={v.closeBulkDialog}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-title">เปลี่ยนสถานะ — {v.selectedCount} รายการ</div>
+            <div className="dialog-body" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <select className="input" style={{ minHeight: 32 }} value={statusValue} onChange={(e) => setStatusValue(e.target.value)}>
+                {BULK_STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+              <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)' }}>บันทึกลงคอลัมน์ "ปัญหาการส่ง" ของทุกออเดอร์ที่เลือก</div>
+              {v.bulkError && <div style={{ color: 'var(--st-bad-fg)', fontSize: 12.5 }}>{v.bulkError}</div>}
+              <BulkCountGate count={v.selectedCount} confirmed={statusDoubleConfirm} onChange={setStatusDoubleConfirm} />
+            </div>
+            <div className="dialog-actions">
+              <button className="btn btn-secondary" onClick={v.closeBulkDialog} disabled={v.bulkSubmitting}>ยกเลิก</button>
+              <button
+                className="btn btn-primary"
+                disabled={v.bulkSubmitting || (needsDoubleConfirm && !statusDoubleConfirm)}
+                onClick={() => v.runBulkSetStatus(state.routeSelectedOrderNos, statusValue)}
+              >
+                {v.bulkSubmitting ? (<><i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังบันทึก...</>) : 'ยืนยันเปลี่ยนสถานะ'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {v.bulkDialog === 'note' && (
+        <div className="dialog-backdrop" onClick={v.closeBulkDialog}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-title">ใส่หมายเหตุ — {v.selectedCount} รายการ</div>
+            <div className="dialog-body" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <textarea className="input" style={{ minHeight: 72, resize: 'vertical' }} value={noteText} onChange={(e) => setNoteText(e.target.value)} placeholder="ข้อความหมายเหตุ" />
+              <div style={{ display: 'flex', gap: 14 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5 }}>
+                  <input type="radio" checked={noteMode === 'append'} onChange={() => setNoteMode('append')} />ต่อท้ายของเดิม
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5 }}>
+                  <input type="radio" checked={noteMode === 'overwrite'} onChange={() => setNoteMode('overwrite')} />เขียนทับ
+                </label>
+              </div>
+              {v.bulkError && <div style={{ color: 'var(--st-bad-fg)', fontSize: 12.5 }}>{v.bulkError}</div>}
+              <BulkCountGate count={v.selectedCount} confirmed={noteDoubleConfirm} onChange={setNoteDoubleConfirm} />
+            </div>
+            <div className="dialog-actions">
+              <button className="btn btn-secondary" onClick={v.closeBulkDialog} disabled={v.bulkSubmitting}>ยกเลิก</button>
+              <button
+                className="btn btn-primary"
+                disabled={v.bulkSubmitting || (noteMode === 'append' && !noteText.trim()) || (needsDoubleConfirm && !noteDoubleConfirm)}
+                onClick={() => v.runBulkSetNote(state.routeSelectedOrderNos, noteText, noteMode)}
+              >
+                {v.bulkSubmitting ? (<><i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังบันทึก...</>) : 'ยืนยันบันทึกหมายเหตุ'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {v.bulkDialog === 'taxInvoice' && (
+        <div className="dialog-backdrop" onClick={v.closeBulkDialog}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-title">ใบกำกับภาษี — {v.selectedCount} รายการ</div>
+            <div className="dialog-body" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ display: 'flex', gap: 14 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5 }}>
+                  <input type="radio" checked={taxInvoiceValue} onChange={() => setTaxInvoiceValue(true)} />ต้องการ
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5 }}>
+                  <input type="radio" checked={!taxInvoiceValue} onChange={() => setTaxInvoiceValue(false)} />ไม่ต้องการ
+                </label>
+              </div>
+              {v.bulkError && <div style={{ color: 'var(--st-bad-fg)', fontSize: 12.5 }}>{v.bulkError}</div>}
+              <BulkCountGate count={v.selectedCount} confirmed={taxInvoiceDoubleConfirm} onChange={setTaxInvoiceDoubleConfirm} />
+            </div>
+            <div className="dialog-actions">
+              <button className="btn btn-secondary" onClick={v.closeBulkDialog} disabled={v.bulkSubmitting}>ยกเลิก</button>
+              <button
+                className="btn btn-primary"
+                disabled={v.bulkSubmitting || (needsDoubleConfirm && !taxInvoiceDoubleConfirm)}
+                onClick={() => v.runBulkSetTaxInvoice(state.routeSelectedOrderNos, taxInvoiceValue)}
+              >
+                {v.bulkSubmitting ? (<><i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังบันทึก...</>) : 'ยืนยัน'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {v.bulkDialog === 'promotion' && (
+        <div className="dialog-backdrop" onClick={v.closeBulkDialog}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-title">โปรโมชั่น — {v.selectedCount} รายการ</div>
+            <div className="dialog-body" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ display: 'flex', gap: 14 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5 }}>
+                  <input type="radio" checked={promotionValue} onChange={() => setPromotionValue(true)} />ใช่
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5 }}>
+                  <input type="radio" checked={!promotionValue} onChange={() => setPromotionValue(false)} />ไม่ใช่
+                </label>
+              </div>
+              {v.bulkError && <div style={{ color: 'var(--st-bad-fg)', fontSize: 12.5 }}>{v.bulkError}</div>}
+              <BulkCountGate count={v.selectedCount} confirmed={promotionDoubleConfirm} onChange={setPromotionDoubleConfirm} />
+            </div>
+            <div className="dialog-actions">
+              <button className="btn btn-secondary" onClick={v.closeBulkDialog} disabled={v.bulkSubmitting}>ยกเลิก</button>
+              <button
+                className="btn btn-primary"
+                disabled={v.bulkSubmitting || (needsDoubleConfirm && !promotionDoubleConfirm)}
+                onClick={() => v.runBulkSetPromotion(state.routeSelectedOrderNos, promotionValue)}
+              >
+                {v.bulkSubmitting ? (<><i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังบันทึก...</>) : 'ยืนยัน'}
               </button>
             </div>
           </div>

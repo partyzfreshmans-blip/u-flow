@@ -26,6 +26,7 @@ import { GEOCODE_MIN_INTERVAL_MS } from '../config/geocoding';
 import { loadRouteCodState, saveRouteCodState } from '../data/routeCod';
 import { addDays, dayKey, dayKeyToDate, isoToSheetDateText, sheetDateToDayKey, todayDayKey } from '../data/dateUtils';
 import { updateRouteOrder } from '../data/sources/routeOrdersWrite';
+import { bulkArchive, bulkAssign, bulkSetDeliveryDate, bulkSetNote, bulkSetPromotion, bulkSetStatus, bulkSetTaxInvoice, type BulkUpdateFailure } from '../data/sources/routeOrdersBulkWrite';
 import { loadDriverQueue, saveDriverQueue } from '../data/driverQueue';
 import { loadPickLots, savePickLots, type PickLot, type PickLotLine } from '../data/pickLots';
 import { loadBatchRoutes, saveBatchRoutes, type BatchRoute } from '../data/batchRoutes';
@@ -134,6 +135,18 @@ export interface AppState {
   archiveDialogMode: 'archive' | 'unarchive';
   archiveSubmitting: boolean;
   archiveError: string | null;
+  /** Which bulk-actions toolbar dialog (other than archive, which keeps its
+   * own archiveDialog* fields above) is open; null = none. Each dialog's own
+   * form fields (date, note text, vehicle pick, etc.) live as local component
+   * state in OrderManagementPage.tsx — only the open/submitting/error/result
+   * lifecycle needs to be global, since nothing else reads it. */
+  bulkDialog: 'deliveryDate' | 'assign' | 'status' | 'note' | 'taxInvoice' | 'promotion' | null;
+  bulkSubmitting: boolean;
+  bulkError: string | null;
+  /** Set after a bulk run completes (success or partial failure) — cleared by
+   * dismissBulkResult or replaced by the next run. failed carries every order
+   * number that didn't make it, with a reason, per the bulk-actions spec. */
+  bulkResult: { label: string; succeeded: number; failed: BulkUpdateFailure[] } | null;
 
   // route planner (zones + vehicles are user-editable and persisted locally)
   zoneRules: ZoneRule[];
@@ -469,6 +482,10 @@ export const initialState: AppState = {
   archiveDialogMode: 'archive',
   archiveSubmitting: false,
   archiveError: null,
+  bulkDialog: null,
+  bulkSubmitting: false,
+  bulkError: null,
+  bulkResult: null,
 
   zoneRules: DEFAULT_ZONE_RULES,
   geocodeCache: {},
@@ -617,7 +634,13 @@ export type Action =
   | { type: 'applyOrderEdit'; orderNo: string; plannedDeliveryDateSheetText: string | null; note: string | null; wantsTaxInvoice: boolean | null }
   | { type: 'applyDeliveryMark'; orderNo: string; statusText: string; completedDateText: string }
   | { type: 'applyPickLotStatus'; orderNo: string; statusText: string }
-  | { type: 'applyArchiveMark'; orderNos: string[]; archived: boolean };
+  | { type: 'applyArchiveMark'; orderNos: string[]; archived: boolean }
+  | { type: 'applyBulkDeliveryDate'; succeeded: string[]; dates: Record<string, string> }
+  | { type: 'applyBulkAssign'; succeeded: string[]; vehicleName: string; batchId: string; courierUsername: string }
+  | { type: 'applyBulkStatus'; succeeded: string[]; status: string }
+  | { type: 'applyBulkNote'; succeeded: string[]; note: string; mode: 'append' | 'overwrite' }
+  | { type: 'applyBulkTaxInvoice'; succeeded: string[]; value: boolean }
+  | { type: 'applyBulkPromotion'; succeeded: string[]; value: boolean };
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -749,6 +772,61 @@ function reducer(state: AppState, action: Action): AppState {
       // this is what makes archived orders disappear from all of them at once.
       const set = new Set(action.orderNos);
       const routeOrders = state.routeOrders.map((o) => (set.has(o.orderNo) ? { ...o, archived: action.archived } : o));
+      return { ...state, routeOrders };
+    }
+
+    // ---- Order Management bulk-actions toolbar — same "patch local state
+    // only after the backend confirms" rule as every single-order write
+    // above, applied to just the subset of orderNos the backend actually
+    // reported as succeeded (action.succeeded), never the full requested set. ----
+
+    case 'applyBulkDeliveryDate': {
+      const set = new Set(action.succeeded);
+      const routeOrders = state.routeOrders.map((o) =>
+        set.has(o.orderNo) && action.dates[o.orderNo] ? { ...o, plannedDeliveryDate: isoToSheetDateText(action.dates[o.orderNo]) } : o,
+      );
+      return { ...state, routeOrders };
+    }
+
+    case 'applyBulkAssign': {
+      const set = new Set(action.succeeded);
+      const courierStamp = [action.vehicleName, action.batchId, action.courierUsername].filter(Boolean).join('/');
+      const routeOrders = state.routeOrders.map((o) => (set.has(o.orderNo) ? { ...o, courierStamp } : o));
+      return { ...state, routeOrders };
+    }
+
+    case 'applyBulkStatus': {
+      const set = new Set(action.succeeded);
+      const routeOrders = state.routeOrders.map((o) => (set.has(o.orderNo) ? { ...o, status: action.status } : o));
+      const apiOrders = state.apiOrders.map((o) => (set.has(o.orderUid) ? { ...o, status: action.status } : o));
+      return { ...state, routeOrders, apiOrders };
+    }
+
+    case 'applyBulkNote': {
+      // Mirrors handleBulkUpdateRouteOrders' own append/overwrite combine
+      // exactly, off each order's own current note — assumes state.routeOrders
+      // already reflects the sheet's current note text for every selected
+      // order (true here, same assumption every other local-patch action
+      // already makes).
+      const set = new Set(action.succeeded);
+      const routeOrders = state.routeOrders.map((o) => {
+        if (!set.has(o.orderNo)) return o;
+        const newNote = action.mode === 'append' && o.note ? `${o.note}\n${action.note}` : action.note;
+        return { ...o, note: newNote };
+      });
+      return { ...state, routeOrders };
+    }
+
+    case 'applyBulkTaxInvoice': {
+      const set = new Set(action.succeeded);
+      const routeOrders = state.routeOrders.map((o) => (set.has(o.orderNo) ? { ...o, wantsTaxInvoice: action.value } : o));
+      const apiOrders = state.apiOrders.map((o) => (set.has(o.orderUid) ? { ...o, wantsTaxInvoice: action.value ? 'ใช่' : '' } : o));
+      return { ...state, routeOrders, apiOrders };
+    }
+
+    case 'applyBulkPromotion': {
+      const set = new Set(action.succeeded);
+      const routeOrders = state.routeOrders.map((o) => (set.has(o.orderNo) ? { ...o, promotionFlag: action.value } : o));
       return { ...state, routeOrders };
     }
 
@@ -1642,21 +1720,117 @@ export function useAppStore() {
       openArchiveDialog: (mode: 'archive' | 'unarchive') =>
         dispatch({ type: 'patch', patch: { archiveDialogOpen: true, archiveDialogMode: mode, archiveError: null } }),
       closeArchiveDialog: () => dispatch({ type: 'patch', patch: { archiveDialogOpen: false, archiveError: null } }),
-      /** Bulk archive/unarchive over the single-order update endpoint — same
-       * fire-per-item pattern as syncPickLotStatus above, via Promise.all so
-       * the confirm dialog can await the whole batch before closing. One
+      /** Bulk archive/unarchive — one values.batchUpdate call server-side
+       * (see handleBulkUpdateRouteOrders) regardless of how many orders are
+       * selected, replacing the old per-order Promise.all loop. One
        * logActivity call for the whole batch, not per order. */
       confirmArchiveSelected: (orderNos: string[], archived: boolean) => {
         dispatch({ type: 'patch', patch: { archiveSubmitting: true, archiveError: null } });
-        Promise.all(orderNos.map((orderNo) => updateRouteOrder({ orderNo, archived })))
-          .then(() => {
-            dispatch({ type: 'applyArchiveMark', orderNos, archived });
+        bulkArchive(orderNos, archived)
+          .then(({ succeeded, failed }) => {
+            if (succeeded.length > 0) dispatch({ type: 'applyArchiveMark', orderNos: succeeded, archived });
             dispatch({ type: 'patch', patch: { archiveSubmitting: false, archiveDialogOpen: false, routeSelectedOrderNos: [] } });
-            logActivity(archived ? 'จัดเก็บออเดอร์' : 'นำออเดอร์กลับมาใช้งาน', `${orderNos.length} ออเดอร์ (${orderNos.join(', ')})`);
+            const failNote = failed.length > 0 ? ` — ล้มเหลว ${failed.length} รายการ (${failed.map((f) => f.orderNo).join(', ')})` : '';
+            logActivity(archived ? 'จัดเก็บออเดอร์' : 'นำออเดอร์กลับมาใช้งาน', `${succeeded.length}/${orderNos.length} ออเดอร์${failNote}`);
           })
           .catch((err: unknown) => {
             const message = err instanceof Error ? err.message : 'บันทึกไม่สำเร็จ';
             dispatch({ type: 'patch', patch: { archiveSubmitting: false, archiveError: message } });
+          });
+      },
+
+      // ---- Order Management bulk-actions toolbar (setDeliveryDate/assign/
+      // setStatus/setNote/setTaxInvoice/setPromotion) — each hits the one
+      // handleBulkUpdateRouteOrders endpoint (one values.batchUpdate call
+      // total, regardless of selection size), then patches state.routeOrders
+      // for exactly the orders the backend reported as succeeded. Dialog
+      // open/close is openBulkDialog/closeBulkDialog below; dismissBulkResult
+      // clears the succeeded/failed summary banner. ----
+      openBulkDialog: (kind: NonNullable<AppState['bulkDialog']>) => dispatch({ type: 'patch', patch: { bulkDialog: kind, bulkError: null } }),
+      closeBulkDialog: () => dispatch({ type: 'patch', patch: { bulkDialog: null, bulkError: null } }),
+      dismissBulkResult: () => dispatch({ type: 'patch', patch: { bulkResult: null } }),
+
+      runBulkSetDeliveryDate: (orderNos: string[], dates: Record<string, string>) => {
+        dispatch({ type: 'patch', patch: { bulkSubmitting: true, bulkError: null } });
+        bulkSetDeliveryDate(dates)
+          .then(({ succeeded, failed }) => {
+            if (succeeded.length > 0) dispatch({ type: 'applyBulkDeliveryDate', succeeded, dates });
+            dispatch({ type: 'patch', patch: { bulkSubmitting: false, bulkDialog: null, routeSelectedOrderNos: [], bulkResult: { label: 'ตั้งวันที่จัดส่ง', succeeded: succeeded.length, failed } } });
+            logActivity('ตั้งวันที่จัดส่ง (ยกชุด)', `${succeeded.length}/${orderNos.length} รายการสำเร็จ`);
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'บันทึกไม่สำเร็จ';
+            dispatch({ type: 'patch', patch: { bulkSubmitting: false, bulkError: message } });
+          });
+      },
+
+      runBulkAssign: (orderNos: string[], courierVehicleId: string, courierVehicleName: string, courierBatchId: string) => {
+        dispatch({ type: 'patch', patch: { bulkSubmitting: true, bulkError: null } });
+        bulkAssign(orderNos, courierVehicleId, courierVehicleName, courierBatchId)
+          .then(({ succeeded, failed, courierUsername }) => {
+            if (succeeded.length > 0) dispatch({ type: 'applyBulkAssign', succeeded, vehicleName: courierVehicleName, batchId: courierBatchId, courierUsername: courierUsername ?? '' });
+            dispatch({ type: 'patch', patch: { bulkSubmitting: false, bulkDialog: null, routeSelectedOrderNos: [], bulkResult: { label: 'Assign ยกชุด', succeeded: succeeded.length, failed } } });
+            logActivity('Assign ยกชุด', `${succeeded.length}/${orderNos.length} รายการ → ${courierVehicleName}/${courierBatchId}`);
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'บันทึกไม่สำเร็จ';
+            dispatch({ type: 'patch', patch: { bulkSubmitting: false, bulkError: message } });
+          });
+      },
+
+      runBulkSetStatus: (orderNos: string[], status: string) => {
+        dispatch({ type: 'patch', patch: { bulkSubmitting: true, bulkError: null } });
+        bulkSetStatus(orderNos, status)
+          .then(({ succeeded, failed }) => {
+            if (succeeded.length > 0) dispatch({ type: 'applyBulkStatus', succeeded, status });
+            dispatch({ type: 'patch', patch: { bulkSubmitting: false, bulkDialog: null, routeSelectedOrderNos: [], bulkResult: { label: 'เปลี่ยนสถานะ', succeeded: succeeded.length, failed } } });
+            logActivity('เปลี่ยนสถานะ (ยกชุด)', `${succeeded.length}/${orderNos.length} รายการ → ${status}`);
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'บันทึกไม่สำเร็จ';
+            dispatch({ type: 'patch', patch: { bulkSubmitting: false, bulkError: message } });
+          });
+      },
+
+      runBulkSetNote: (orderNos: string[], note: string, mode: 'append' | 'overwrite') => {
+        dispatch({ type: 'patch', patch: { bulkSubmitting: true, bulkError: null } });
+        bulkSetNote(orderNos, note, mode)
+          .then(({ succeeded, failed }) => {
+            if (succeeded.length > 0) dispatch({ type: 'applyBulkNote', succeeded, note, mode });
+            dispatch({ type: 'patch', patch: { bulkSubmitting: false, bulkDialog: null, routeSelectedOrderNos: [], bulkResult: { label: 'ใส่หมายเหตุ', succeeded: succeeded.length, failed } } });
+            logActivity('ใส่หมายเหตุ (ยกชุด)', `${succeeded.length}/${orderNos.length} รายการ (${mode === 'append' ? 'ต่อท้าย' : 'เขียนทับ'})`);
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'บันทึกไม่สำเร็จ';
+            dispatch({ type: 'patch', patch: { bulkSubmitting: false, bulkError: message } });
+          });
+      },
+
+      runBulkSetTaxInvoice: (orderNos: string[], value: boolean) => {
+        dispatch({ type: 'patch', patch: { bulkSubmitting: true, bulkError: null } });
+        bulkSetTaxInvoice(orderNos, value)
+          .then(({ succeeded, failed }) => {
+            if (succeeded.length > 0) dispatch({ type: 'applyBulkTaxInvoice', succeeded, value });
+            dispatch({ type: 'patch', patch: { bulkSubmitting: false, bulkDialog: null, routeSelectedOrderNos: [], bulkResult: { label: 'ใบกำกับภาษี', succeeded: succeeded.length, failed } } });
+            logActivity('ติ๊กใบกำกับภาษี (ยกชุด)', `${succeeded.length}/${orderNos.length} รายการ → ${value ? 'ต้องการ' : 'ไม่ต้องการ'}`);
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'บันทึกไม่สำเร็จ';
+            dispatch({ type: 'patch', patch: { bulkSubmitting: false, bulkError: message } });
+          });
+      },
+
+      runBulkSetPromotion: (orderNos: string[], value: boolean) => {
+        dispatch({ type: 'patch', patch: { bulkSubmitting: true, bulkError: null } });
+        bulkSetPromotion(orderNos, value)
+          .then(({ succeeded, failed }) => {
+            if (succeeded.length > 0) dispatch({ type: 'applyBulkPromotion', succeeded, value });
+            dispatch({ type: 'patch', patch: { bulkSubmitting: false, bulkDialog: null, routeSelectedOrderNos: [], bulkResult: { label: 'โปรโมชั่น', succeeded: succeeded.length, failed } } });
+            logActivity('ติ๊กโปรโมชั่น (ยกชุด)', `${succeeded.length}/${orderNos.length} รายการ → ${value ? 'ใช่' : 'ไม่ใช่'}`);
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'บันทึกไม่สำเร็จ';
+            dispatch({ type: 'patch', patch: { bulkSubmitting: false, bulkError: message } });
           });
       },
 

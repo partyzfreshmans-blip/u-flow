@@ -188,6 +188,11 @@ export interface StaffOrderInfo {
    * Route/BATCH ROUTE/คนส่ง columns, stamped by a Batch Route Assign/edit,
    * '' once the order leaves every batch. */
   courierStamp: string;
+  /** Manual "โปรโมชั่น" checkbox staff set directly on this tab — separate
+   * from (and never derived from) whether the order actually contains a
+   * promoted SKU per the SKU Detail tab's promo links; see the Order
+   * Management bulk-actions "ติ๊กโปรโมชั่น" action. */
+  promotionFlag: boolean;
   archived: boolean;
   /** Free-text "new customer" annotation — an ARRAYFORMULA-driven column
    * this app has never had (and must never have) write access to; read-only
@@ -233,6 +238,8 @@ export interface RouteOrder {
    * currently read by any page (batch/vehicle assignment is read live off
    * state.batchRoutes instead), kept for parity with what's written. */
   courierStamp: string;
+  /** See StaffOrderInfo.promotionFlag. */
+  promotionFlag: boolean;
 }
 
 // ---------- Order line items: "SKU Detail" tab ----------

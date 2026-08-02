@@ -25,6 +25,7 @@ function rowToStaffOrderInfo(row: Record<string, string>): StaffOrderInfo | null
     taxInvoiceOverride: parseTriStateBool(row['ใบกำกับภาษี']),
     operationalStatus: (row['ปัญหาการส่ง'] ?? '').trim(),
     courierStamp: [route, batchRoute, courier].filter(Boolean).join('/'),
+    promotionFlag: /^(ใช่|yes|true|y)$/i.test((row['โปรโมชั่น'] ?? '').trim()),
     archived: /^(ใช่|yes|true|y)$/i.test((row['Archived'] ?? '').trim()),
     newCustomer: (row['new customer'] ?? '').trim(),
   };

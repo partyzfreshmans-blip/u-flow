@@ -8,10 +8,13 @@
 // data source here.
 import { authHeaders, type Session } from '../session';
 
-async function downloadXlsx(url: string, session: Session | null, fallbackFilename: string): Promise<void> {
+async function downloadXlsx(url: string, session: Session | null, fallbackFilename: string, orderNos?: string[]): Promise<void> {
   let res: Response;
   try {
-    res = await fetch(url, { headers: authHeaders(session) });
+    res =
+      orderNos && orderNos.length > 0
+        ? await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders(session) }, body: JSON.stringify({ orderNos }) })
+        : await fetch(url, { headers: authHeaders(session) });
   } catch {
     throw new Error('เชื่อมต่อ backend ไม่ได้ — ลองใหม่อีกครั้ง');
   }
@@ -36,8 +39,11 @@ async function downloadXlsx(url: string, session: Session | null, fallbackFilena
   URL.revokeObjectURL(objectUrl);
 }
 
-export function exportRouteOrdersXlsx(session: Session | null): Promise<void> {
-  return downloadXlsx('/api/route-orders/export', session, 'orders.xlsx');
+/** orderNos, when given, hits the same endpoint as POST so the export is
+ * scoped to exactly the bulk-actions toolbar's "Export เป็น Excel เฉพาะที่เลือก" —
+ * omit it (or pass an empty array) for the normal full-table GET export. */
+export function exportRouteOrdersXlsx(session: Session | null, orderNos?: string[]): Promise<void> {
+  return downloadXlsx('/api/route-orders/export', session, 'orders.xlsx', orderNos);
 }
 
 export function exportBatchRouteHistoryXlsx(session: Session | null): Promise<void> {

@@ -47,7 +47,7 @@ const [
   STAFF_DELIVERY_DATE_HEADER,
   STAFF_NOTE_HEADER,
   STAFF_TAX_INVOICE_HEADER,
-  ,
+  STAFF_PROMOTION_HEADER,
   STAFF_OPERATIONAL_STATUS_HEADER,
   STAFF_COURIER_HEADER,
   STAFF_ASSIGN_DATE_HEADER,
@@ -1334,6 +1334,7 @@ interface StaffOrderInfoShape {
   taxInvoiceOverride: boolean | null;
   operationalStatus: string;
   courierStamp: string;
+  promotionFlag: boolean;
   archived: boolean;
   newCustomer: string;
 }
@@ -1370,6 +1371,7 @@ async function readStaffOrderInfoSheet(sheets: SheetsClient): Promise<StaffOrder
   const taxCol = at(STAFF_TAX_INVOICE_HEADER);
   const statusCol = at(STAFF_OPERATIONAL_STATUS_HEADER);
   const courierCol = at(STAFF_COURIER_HEADER);
+  const promotionCol = at(STAFF_PROMOTION_HEADER);
   const archivedCol = at(STAFF_ARCHIVED_HEADER);
   const newCustomerCol = at('new customer');
   const out: StaffOrderInfoShape[] = [];
@@ -1387,6 +1389,7 @@ async function readStaffOrderInfoSheet(sheets: SheetsClient): Promise<StaffOrder
       taxInvoiceOverride: parseTriStateBool(String(r[taxCol] ?? '')),
       operationalStatus: String(r[statusCol] ?? '').trim(),
       courierStamp: [route, batchRoute, courier].filter(Boolean).join('/'),
+      promotionFlag: parseYesNo(String(r[promotionCol] ?? '')),
       archived: parseYesNo(String(r[archivedCol] ?? '')),
       newCustomer: String(r[newCustomerCol] ?? '').trim(),
     });
@@ -1433,6 +1436,7 @@ function joinRouteOrdersForExport(apiOrders: ApiImportOrderShape[], staffInfos: 
       whLat: o.whLat,
       whLng: o.whLng,
       courierStamp: staff?.courierStamp ?? '',
+      promotionFlag: staff?.promotionFlag ?? false,
     };
   });
 }
@@ -1950,6 +1954,325 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
   }
 }
 
+const BULK_ACTIONS = ['setDeliveryDate', 'assign', 'setStatus', 'setNote', 'setTaxInvoice', 'setPromotion', 'archive'] as const;
+type BulkAction = (typeof BULK_ACTIONS)[number];
+
+export interface BulkUpdateFailure {
+  orderNo: string;
+  reason: string;
+}
+
+/**
+ * The Order Management bulk-actions toolbar's one write endpoint, covering
+ * all 7 actions (setDeliveryDate/assign/setStatus/setNote/setTaxInvoice/
+ * setPromotion/archive — archive replaces the old per-order Promise.all
+ * archive loop). Unlike handleUpdateRouteOrder (one order, several small
+ * sequential .update calls), this always issues at most ONE
+ * values.append (only when some selected orders have no คำสั่งซื้อ VS row
+ * yet) and ONE values.batchUpdate for every cell across every order in the
+ * whole request — the Sheets API's per-minute write quota is per request,
+ * not per cell, so N sequential calls for N selected orders is what this
+ * exists to avoid. Every order is still resolved and validated
+ * independently, so one bad order (duplicate row, bad date) fails only that
+ * order — see `failed` in the response — never the whole batch.
+ */
+export async function handleBulkUpdateRouteOrders(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (!['administrator', 'manager', 'admin_staff'].includes(payload.role)) {
+    return { status: 403, body: { error: 'ไม่มีสิทธิ์แก้ไขออเดอร์' } };
+  }
+  if (!isRouteOrdersTabConfigured()) return { status: 500, body: { error: ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE } };
+
+  const b = (body ?? {}) as Record<string, unknown>;
+  const { orderNos, action } = b;
+  if (!Array.isArray(orderNos) || orderNos.length === 0 || !orderNos.every((o) => typeof o === 'string' && o.trim() !== '')) {
+    return { status: 400, body: { error: 'ต้องระบุ orderNos เป็นรายการเลขคำสั่งซื้อที่ไม่ว่างอย่างน้อย 1 รายการ' } };
+  }
+  const wanted = Array.from(new Set((orderNos as string[]).map((o) => o.trim())));
+  if (typeof action !== 'string' || !(BULK_ACTIONS as readonly string[]).includes(action)) {
+    return { status: 400, body: { error: `action ต้องเป็นค่าที่รู้จัก (${BULK_ACTIONS.join(', ')})` } };
+  }
+  const bulkAction = action as BulkAction;
+
+  // Validate every action-specific field up front, before touching Sheets at
+  // all — a malformed request fails the whole call here rather than midway
+  // through writing.
+  let dates: Record<string, unknown> | null = null;
+  let fixedNote = '';
+  let noteMode: 'append' | 'overwrite' = 'append';
+  let statusValue = '';
+  let wantsTaxInvoice = false;
+  let promotionFlagValue = false;
+  let archivedValue = false;
+  let courierVehicleId = '';
+  let courierVehicleName = '';
+  let courierBatchId = '';
+
+  if (bulkAction === 'setDeliveryDate') {
+    if (!b.dates || typeof b.dates !== 'object' || Array.isArray(b.dates)) {
+      return { status: 400, body: { error: 'ต้องระบุ dates เป็น object {เลขคำสั่งซื้อ: YYYY-MM-DD}' } };
+    }
+    dates = b.dates as Record<string, unknown>;
+  } else if (bulkAction === 'assign') {
+    const { courierVehicleId: vId, courierVehicleName: vName, courierBatchId: bId } = b;
+    if (typeof vId !== 'string' || !vId.trim() || typeof vName !== 'string' || !vName.trim() || typeof bId !== 'string' || !bId.trim()) {
+      return { status: 400, body: { error: 'ต้องระบุ courierVehicleId/courierVehicleName/courierBatchId เป็นข้อความที่ไม่ว่างครบทั้งสามค่า' } };
+    }
+    courierVehicleId = vId.trim();
+    courierVehicleName = vName.trim();
+    courierBatchId = bId.trim();
+  } else if (bulkAction === 'setStatus') {
+    if (typeof b.status !== 'string' || !KNOWN_OPERATIONAL_STATUS_VALUES.includes(b.status)) {
+      return { status: 400, body: { error: `status ต้องเป็นค่าที่รู้จัก (${KNOWN_OPERATIONAL_STATUS_VALUES.join(', ')})` } };
+    }
+    statusValue = b.status;
+  } else if (bulkAction === 'setNote') {
+    if (typeof b.note !== 'string') return { status: 400, body: { error: 'ต้องระบุ note เป็นข้อความ' } };
+    fixedNote = b.note;
+    if (b.mode !== undefined) {
+      if (b.mode !== 'append' && b.mode !== 'overwrite') return { status: 400, body: { error: 'mode ต้องเป็น append หรือ overwrite' } };
+      noteMode = b.mode;
+    }
+  } else if (bulkAction === 'setTaxInvoice') {
+    if (typeof b.wantsTaxInvoice !== 'boolean') return { status: 400, body: { error: 'wantsTaxInvoice ต้องเป็น true/false' } };
+    wantsTaxInvoice = b.wantsTaxInvoice;
+  } else if (bulkAction === 'setPromotion') {
+    if (typeof b.promotionFlag !== 'boolean') return { status: 400, body: { error: 'promotionFlag ต้องเป็น true/false' } };
+    promotionFlagValue = b.promotionFlag;
+  } else if (bulkAction === 'archive') {
+    if (typeof b.archived !== 'boolean') return { status: 400, body: { error: 'archived ต้องเป็น true/false' } };
+    archivedValue = b.archived;
+  }
+
+  try {
+    const sheets = await getSheetsClient();
+    const title = await resolveSheetTitle(sheets, ROUTE_ORDERS_GID);
+    const current = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${title}!A:Z` });
+    const rows = current.data.values ?? [];
+    const header = rows[0] ?? [];
+    const headerAt = (name: string) => header.findIndex((h) => String(h ?? '').trim() === name);
+
+    const readOnlyCols = new Set<number>();
+    header.forEach((h, i) => {
+      if (STAFF_READONLY_HEADERS.has(String(h ?? '').trim())) readOnlyCols.add(i);
+    });
+    function assertWritableColumn(col: number, headerName: string): void {
+      if (readOnlyCols.has(col)) {
+        throw new Error(`ป้องกันการเขียนทับคอลัมน์ "${headerName}" ซึ่งเป็นสูตร array formula — ยกเลิกการบันทึก`);
+      }
+    }
+    function resolveCol(headerName: string): number {
+      const col = headerAt(headerName);
+      if (col === -1) throw new Error(`ไม่พบคอลัมน์ "${headerName}" ในชีท`);
+      assertWritableColumn(col, headerName);
+      return col;
+    }
+
+    const uidCol = headerAt(STAFF_ORDER_UID_HEADER);
+    if (uidCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_ORDER_UID_HEADER}" ในชีท` } };
+    assertWritableColumn(uidCol, STAFF_ORDER_UID_HEADER);
+
+    // Resolve only the column(s) this one action needs. USER_ENTERED is
+    // needed only for the delivery-date column (so Sheets parses the M/D/YYYY
+    // text as a date, same as handleUpdateRouteOrder) — every other action
+    // writes RAW so free text (a note starting with "=", say) is never read
+    // as a formula.
+    let deliveryDateCol = -1;
+    let noteCol = -1;
+    let taxInvoiceCol = -1;
+    let statusCol = -1;
+    let promotionCol = -1;
+    let archivedCol = -1;
+    let routeCol = -1;
+    let batchRouteCol = -1;
+    let courierCol = -1;
+    let assignDateCol = -1;
+    let valueInputOption: 'RAW' | 'USER_ENTERED' = 'RAW';
+    let courierUsername = '';
+
+    if (bulkAction === 'setDeliveryDate') {
+      deliveryDateCol = resolveCol(STAFF_DELIVERY_DATE_HEADER);
+      valueInputOption = 'USER_ENTERED';
+    } else if (bulkAction === 'setNote') {
+      noteCol = resolveCol(STAFF_NOTE_HEADER);
+    } else if (bulkAction === 'setTaxInvoice') {
+      taxInvoiceCol = resolveCol(STAFF_TAX_INVOICE_HEADER);
+    } else if (bulkAction === 'setStatus') {
+      statusCol = resolveCol(STAFF_OPERATIONAL_STATUS_HEADER);
+    } else if (bulkAction === 'setPromotion') {
+      promotionCol = resolveCol(STAFF_PROMOTION_HEADER);
+    } else if (bulkAction === 'archive') {
+      archivedCol = resolveCol(STAFF_ARCHIVED_HEADER);
+    } else if (bulkAction === 'assign') {
+      routeCol = resolveCol(STAFF_ROUTE_HEADER);
+      batchRouteCol = resolveCol(STAFF_BATCH_ROUTE_HEADER);
+      courierCol = resolveCol(STAFF_COURIER_HEADER);
+      assignDateCol = resolveCol(STAFF_ASSIGN_DATE_HEADER);
+      // Resolved here, not sent from the frontend — listing Users is
+      // admin/manager-only, and admin_staff (who can also run this bulk
+      // action) has no access to /api/users.
+      const users = await readUsers(sheets);
+      const driver = users.find((u) => u.active && u.role === 'driver' && u.driverVehicleId === courierVehicleId);
+      courierUsername = driver?.username ?? '';
+    }
+
+    // Every order maps to at most one existing row, keyed by "เลขคำสั่งซื้อ" —
+    // a duplicate is reported as a per-order failure, not a whole-batch abort.
+    const rowsByUid = new Map<string, number[]>();
+    for (let i = 1; i < rows.length; i++) {
+      const uid = String(rows[i]?.[uidCol] ?? '').trim();
+      if (!uid) continue;
+      const list = rowsByUid.get(uid) ?? [];
+      list.push(i + 1); // sheet rows are 1-based
+      rowsByUid.set(uid, list);
+    }
+
+    const succeeded: string[] = [];
+    const failed: BulkUpdateFailure[] = [];
+    const cellWrites: { range: string; values: string[][] }[] = [];
+    const newRows: { orderNo: string; values: unknown[]; deferred: Map<number, string> }[] = [];
+    // Shared across every row this run touches, so an "assign ยกชุด" call
+    // stamps every selected order with the exact same Assign timestamp.
+    const assignStamp = nowSheetDateTime();
+
+    for (const orderNo of wanted) {
+      try {
+        const matches = rowsByUid.get(orderNo) ?? [];
+        if (matches.length > 1) {
+          failed.push({ orderNo, reason: `พบ "${STAFF_ORDER_UID_HEADER}" ซ้ำกัน ${matches.length} แถว — โปรดแก้ไขในชีทโดยตรง` });
+          continue;
+        }
+        const targetRow: number | null = matches[0] ?? null;
+
+        const writes = new Map<number, string>();
+        if (bulkAction === 'setDeliveryDate') {
+          const iso = dates?.[orderNo];
+          if (typeof iso !== 'string' || !iso) {
+            failed.push({ orderNo, reason: 'ไม่พบวันที่สำหรับออเดอร์นี้ในคำขอ' });
+            continue;
+          }
+          let sheetDate: string;
+          try {
+            sheetDate = isoToSheetDate(iso);
+          } catch (err: unknown) {
+            failed.push({ orderNo, reason: err instanceof Error ? err.message : 'วันที่ไม่ถูกต้อง' });
+            continue;
+          }
+          writes.set(deliveryDateCol, sheetDate);
+        } else if (bulkAction === 'setNote') {
+          const oldNote = targetRow != null ? String(rows[targetRow - 1]?.[noteCol] ?? '').trim() : '';
+          writes.set(noteCol, noteMode === 'append' && oldNote ? `${oldNote}\n${fixedNote}` : fixedNote);
+        } else if (bulkAction === 'setTaxInvoice') {
+          writes.set(taxInvoiceCol, wantsTaxInvoice ? 'ใช่' : 'ไม่ใช่');
+        } else if (bulkAction === 'setStatus') {
+          writes.set(statusCol, statusValue);
+        } else if (bulkAction === 'setPromotion') {
+          writes.set(promotionCol, promotionFlagValue ? 'ใช่' : '');
+        } else if (bulkAction === 'archive') {
+          writes.set(archivedCol, archivedValue ? 'ใช่' : '');
+        } else if (bulkAction === 'assign') {
+          writes.set(routeCol, courierVehicleName);
+          writes.set(batchRouteCol, courierBatchId);
+          writes.set(courierCol, courierUsername);
+          writes.set(assignDateCol, assignStamp);
+        }
+
+        if (targetRow != null) {
+          for (const [col, value] of writes) cellWrites.push({ range: `${title}!${columnLetter(col)}${targetRow}`, values: [[value]] });
+        } else {
+          // Brand new order — no คำสั่งซื้อ VS row yet. Collected here and
+          // appended together, in one call, after this loop — never one
+          // append per order. Capped the same way handleUpdateRouteOrder caps
+          // a single new row: never spanning into the first read-only column.
+          const firstReadOnlyCol = readOnlyCols.size > 0 ? Math.min(...readOnlyCols) : header.length;
+          const appendWidth = Math.max(uidCol + 1, firstReadOnlyCol);
+          const rowValues: unknown[] = new Array(appendWidth).fill('');
+          for (const c of readOnlyCols) if (c < rowValues.length) rowValues[c] = undefined;
+          rowValues[uidCol] = orderNo;
+          const deferred = new Map<number, string>();
+          for (const [col, value] of writes) {
+            if (col < appendWidth) rowValues[col] = value;
+            else deferred.set(col, value);
+          }
+          newRows.push({ orderNo, values: rowValues, deferred });
+        }
+        succeeded.push(orderNo);
+      } catch (err: unknown) {
+        failed.push({ orderNo, reason: err instanceof Error ? err.message : 'เกิดข้อผิดพลาด' });
+      }
+    }
+
+    // One values.append for every brand-new row in this batch, then fold
+    // each new row's past-appendWidth deferred writes into the one
+    // values.batchUpdate call below, targeted at the row numbers Sheets
+    // reports back for the block it just inserted — never guessed.
+    if (newRows.length > 0) {
+      const maxWidth = Math.max(...newRows.map((r) => r.values.length));
+      const appendRes = await sheets.spreadsheets.values.append({
+        spreadsheetId: MAIN_SHEET_ID,
+        range: `${title}!A:${columnLetter(maxWidth - 1)}`,
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: newRows.map((r) => r.values) },
+      });
+      const updatedRange = appendRes.data.updates?.updatedRange ?? '';
+      const rowMatch = updatedRange.match(/![A-Z]+(\d+)/);
+      const startRow = rowMatch ? Number(rowMatch[1]) : null;
+      if (startRow == null) {
+        for (const r of newRows) {
+          const idx = succeeded.indexOf(r.orderNo);
+          if (idx !== -1) succeeded.splice(idx, 1);
+          failed.push({ orderNo: r.orderNo, reason: 'เพิ่มแถวใหม่สำเร็จ แต่ระบุตำแหน่งแถวที่เพิ่งเพิ่มไม่ได้ — บันทึกบางฟิลด์ไม่สำเร็จ' });
+        }
+      } else {
+        newRows.forEach((r, i) => {
+          const rowNum = startRow + i;
+          for (const [col, value] of r.deferred) cellWrites.push({ range: `${title}!${columnLetter(col)}${rowNum}`, values: [[value]] });
+        });
+      }
+    }
+
+    if (cellWrites.length > 0) {
+      await sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId: MAIN_SHEET_ID,
+        requestBody: { valueInputOption, data: cellWrites },
+      });
+    }
+
+    if (succeeded.length > 0) {
+      const first = succeeded[0];
+      const last = succeeded[succeeded.length - 1];
+      let description: string;
+      if (bulkAction === 'setDeliveryDate') {
+        const uniqueDates = Array.from(new Set(succeeded.map((o) => dates?.[o]).filter((v): v is string => typeof v === 'string')));
+        description = uniqueDates.length === 1 ? `วันที่จะจัดส่ง = ${uniqueDates[0]}` : `วันที่จะจัดส่ง (ตามวันที่แนะนำต่อรายการ, ${uniqueDates.length} ค่าที่ต่างกัน)`;
+      } else if (bulkAction === 'assign') {
+        description = `Route/BATCH ROUTE/คนส่ง = ${courierVehicleName}/${courierBatchId}/${courierUsername || '(ไม่พบผู้ขับที่ผูกกับรถนี้)'}`;
+      } else if (bulkAction === 'setStatus') {
+        description = `ปัญหาการส่ง = ${statusValue}`;
+      } else if (bulkAction === 'setNote') {
+        description = `${noteMode === 'append' ? 'ต่อท้ายหมายเหตุ' : 'เขียนทับหมายเหตุ'}: "${fixedNote}"`;
+      } else if (bulkAction === 'setTaxInvoice') {
+        description = `ใบกำกับภาษี = ${wantsTaxInvoice ? 'ใช่' : 'ไม่ใช่'}`;
+      } else if (bulkAction === 'setPromotion') {
+        description = `โปรโมชั่น = ${promotionFlagValue ? 'ใช่' : 'ไม่ใช่'}`;
+      } else {
+        description = `Archived = ${archivedValue ? 'ใช่' : 'ไม่ใช่'}`;
+      }
+      await appendAuditLog(sheets, { username: payload.username, role: payload.role }, [
+        { orderId: `${first} – ${last} (${succeeded.length} รายการ)`, field: `bulk:${bulkAction}`, oldValue: '', newValue: description },
+      ]);
+    }
+
+    return { status: 200, body: { ok: true, succeeded, failed } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+    console.error('[route-orders/bulk-update]', message);
+    return { status: 500, body: { error: message } };
+  }
+}
+
 /** "Export เป็น Excel" on Order Management — same API Import + คำสั่งซื้อ VS
  * join every page reads (joinRouteOrdersForExport, above), written out as a
  * .xlsx instead of rendered as a table. A couple of on-screen columns are
@@ -1960,7 +2283,7 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
  * queue). exceljs is dynamically imported — this project's other ~10
  * serverless functions never touch it, so a static top-level import would
  * pay its cold-start cost on every one of them for nothing. */
-export async function handleExportRouteOrders(token: string | null): Promise<ApiResult | FileResult> {
+export async function handleExportRouteOrders(token: string | null, orderNos?: string[]): Promise<ApiResult | FileResult> {
   const payload = verifySessionToken(token);
   if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
   if (!isRouteOrdersTabConfigured()) return { status: 500, body: { error: ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE } };
@@ -1968,7 +2291,14 @@ export async function handleExportRouteOrders(token: string | null): Promise<Api
   try {
     const sheets = await getSheetsClient();
     const [{ data: apiOrders }, staffInfos] = await Promise.all([apiImportOrdersCache.read(loadApiImportOrders), readStaffOrderInfoSheet(sheets)]);
-    const rows = joinRouteOrdersForExport(apiOrders, staffInfos);
+    let rows = joinRouteOrdersForExport(apiOrders, staffInfos);
+    // "Export เป็น Excel เฉพาะที่เลือก" on the bulk-actions toolbar — same join,
+    // filtered down to just the selected order numbers, so it's exactly one
+    // extra Set membership check rather than a second code path.
+    if (orderNos && orderNos.length > 0) {
+      const wanted = new Set(orderNos);
+      rows = rows.filter((r) => wanted.has(r.orderNo));
+    }
 
     const { default: ExcelJS } = await import('exceljs');
     const workbook = new ExcelJS.Workbook();

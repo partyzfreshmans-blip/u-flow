@@ -4,6 +4,7 @@ import express from 'express';
 import multer from 'multer';
 import { DRIVE_ROOT_FOLDER_ENV, MAX_UPLOAD_BYTES } from '../src/config/drive.js';
 import {
+  handleBulkUpdateRouteOrders,
   handleCreateBookings,
   handleCreateUser,
   handleDecideBooking,
@@ -108,8 +109,18 @@ app.post('/api/route-orders/update', async (req, res) => {
   res.status(status).json(body);
 });
 
+app.post('/api/route-orders/bulk-update', async (req, res) => {
+  const { status, body } = await handleBulkUpdateRouteOrders(bearerToken(req.headers.authorization), req.body);
+  res.status(status).json(body);
+});
+
 app.get('/api/route-orders/export', async (req, res) => {
   sendResult(res, await handleExportRouteOrders(bearerToken(req.headers.authorization)));
+});
+
+app.post('/api/route-orders/export', async (req, res) => {
+  const orderNos = Array.isArray((req.body as { orderNos?: unknown } | undefined)?.orderNos) ? ((req.body as { orderNos: string[] }).orderNos) : undefined;
+  sendResult(res, await handleExportRouteOrders(bearerToken(req.headers.authorization), orderNos));
 });
 
 app.get('/api/promotions/list', async (req, res) => {

@@ -826,6 +826,19 @@ export function computeRoute(state: AppState, actions: AppActions) {
   const rowsNoDate = rows.filter((r) => r.plannedDeliveryDate === '—');
   const rowsWithDate = rows.filter((r) => r.plannedDeliveryDate !== '—');
 
+  // "ตั้งวันที่จัดส่ง" bulk action's "ใช้วันที่แนะนำ" mode — every order's own
+  // suggested date (per the same ordered-before/after-16:00 cutoff rule the
+  // per-row suggestion above uses), computed unconditionally so it's ready
+  // for ANY selected order regardless of whether one already has a delivery
+  // date set. Keyed off routeOrders (not just the currently filtered/paginated
+  // rows) since the stuck-orders table below draws its own selectable rows
+  // straight from state.routeOrders, bypassing this table's filters.
+  const suggestedDateByOrderNo: Record<string, string> = {};
+  for (const o of routeOrders) {
+    const iso = suggestedDeliveryDayKey(o.orderedAtText);
+    if (iso) suggestedDateByOrderNo[o.orderNo] = iso;
+  }
+
   // ---- stuck orders: delivery date already passed, but never reached a done status ----
   const today = todayDayKey();
   const stuckOrders = stuckRouteOrders(state, today)
@@ -875,7 +888,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
     pendingBatchReadyOrderNos,
     pendingBatchNoDateCount,
 
-    // ---- archive feature ----
+    // ---- archive + bulk-actions toolbar (shared selection pool) ----
     archivedFilter: state.routeArchivedFilter,
     toggleArchivedFilter: () => actions.patch({ routeArchivedFilter: !state.routeArchivedFilter, routeSelectedOrderNos: [] }),
     archivedCount,
@@ -884,6 +897,13 @@ export function computeRoute(state: AppState, actions: AppActions) {
     selectedCount: state.routeSelectedOrderNos.length,
     setSelection: actions.setRouteSelection,
     clearSelection: actions.clearRouteSelection,
+    // Every order number matching the table's current filters, regardless of
+    // pagination — backs "เลือกทั้งหมด N รายการที่ตรงตัวกรอง", kept separate
+    // from the header checkbox (which only ever selects the visible/paginated
+    // page, handled locally in OrderTable).
+    allFilteredOrderNos: filtered.map((o) => o.orderNo),
+    allFilteredCount: filtered.length,
+    suggestedDateByOrderNo,
     archiveDialogOpen: state.archiveDialogOpen,
     archiveDialogMode: state.archiveDialogMode,
     archiveSubmitting: state.archiveSubmitting,
@@ -891,6 +911,20 @@ export function computeRoute(state: AppState, actions: AppActions) {
     openArchiveDialog: () => actions.openArchiveDialog(state.routeArchivedFilter ? 'unarchive' : 'archive'),
     closeArchiveDialog: actions.closeArchiveDialog,
     confirmArchive: () => actions.confirmArchiveSelected(state.routeSelectedOrderNos, !state.routeArchivedFilter),
+
+    bulkDialog: state.bulkDialog,
+    bulkSubmitting: state.bulkSubmitting,
+    bulkError: state.bulkError,
+    bulkResult: state.bulkResult,
+    openBulkDialog: actions.openBulkDialog,
+    closeBulkDialog: actions.closeBulkDialog,
+    dismissBulkResult: actions.dismissBulkResult,
+    runBulkSetDeliveryDate: actions.runBulkSetDeliveryDate,
+    runBulkAssign: actions.runBulkAssign,
+    runBulkSetStatus: actions.runBulkSetStatus,
+    runBulkSetNote: actions.runBulkSetNote,
+    runBulkSetTaxInvoice: actions.runBulkSetTaxInvoice,
+    runBulkSetPromotion: actions.runBulkSetPromotion,
   };
 }
 
