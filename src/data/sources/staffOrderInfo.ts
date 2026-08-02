@@ -13,16 +13,18 @@ function parseTriStateBool(v: string | undefined): boolean | null {
 }
 
 function rowToStaffOrderInfo(row: Record<string, string>): StaffOrderInfo | null {
-  const orderUid = (row['Order UID'] ?? '').trim();
+  const orderUid = (row['เลขคำสั่งซื้อ'] ?? '').trim();
   if (!orderUid) return null;
+  const route = (row['Route'] ?? '').trim();
+  const batchRoute = (row['BATCH ROUTE'] ?? '').trim();
+  const courier = (row['คนส่ง'] ?? '').trim();
   return {
     orderUid,
     plannedDeliveryDate: (row['วันที่จะจัดส่ง'] ?? '').trim(),
     note: (row['หมายเหตุ'] ?? '').trim(),
-    taxInvoiceOverride: parseTriStateBool(row['ขอใบกำกับภาษี']),
-    operationalStatus: (row['สถานะการดำเนินงาน'] ?? '').trim(),
-    operationalStatusAt: (row['เวลาที่บันทึกสถานะ'] ?? '').trim(),
-    courierStamp: (row['คนส่ง'] ?? '').trim(),
+    taxInvoiceOverride: parseTriStateBool(row['ใบกำกับภาษี']),
+    operationalStatus: (row['ปัญหาการส่ง'] ?? '').trim(),
+    courierStamp: [route, batchRoute, courier].filter(Boolean).join('/'),
     archived: /^(ใช่|yes|true|y)$/i.test((row['Archived'] ?? '').trim()),
     newCustomer: (row['new customer'] ?? '').trim(),
   };

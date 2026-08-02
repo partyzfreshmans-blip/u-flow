@@ -162,9 +162,13 @@ export interface ApiImportOrder {
 }
 
 // ---------- "คำสั่งซื้อ VS" tab: ONLY what staff enter through this app's own
-// UI — never a copy of anything already in API Import. Order UID is the sole
-// key; a row may not exist yet for a brand new order, which just means none
-// of these fields have been set (see joinRouteOrders). ----------
+// UI — never a copy of anything already in API Import. "เลขคำสั่งซื้อ" (the
+// order number) is the sole key; a row may not exist yet for a brand new
+// order, which just means none of these fields have been set (see
+// joinRouteOrders). Column layout confirmed against the live sheet — see
+// config/sheets.ts's STAFF_ORDER_INFO_HEADERS for the exact real header
+// text/order and STAFF_READONLY_HEADERS for the two ARRAYFORMULA columns
+// this app must never write. ----------
 export interface StaffOrderInfo {
   orderUid: string;
   /** ISO YYYY-MM-DD once set via the "วันที่จะจัดส่ง" field, '' until then. */
@@ -174,21 +178,20 @@ export interface StaffOrderInfo {
    * ApiImportOrder.wantsTaxInvoice. Set explicitly once edited here. */
   taxInvoiceOverride: boolean | null;
   /** App-driven delivery outcome ("กำลังจัดส่ง" on pick-lot close, "ส่งสำเร็จ" on
-   * mark-delivered, "ส่งไม่สำเร็จ" on a driver's failed-delivery report) — kept
-   * apart from ApiImportOrder.status (Unii's own field, this app never writes
-   * to it) precisely so this rewrite doesn't have to give up any of those
-   * three existing write-back actions. '' until any of them has fired once. */
+   * mark-delivered, "ส่งไม่สำเร็จ" on a driver's failed-delivery report) —
+   * written to the sheet's "ปัญหาการส่ง" column (the closest real column;
+   * there's no column dedicated purely to this app's status vocabulary) —
+   * kept apart from ApiImportOrder.status (Unii's own field, this app never
+   * writes to it). '' until any of the three actions above has fired once. */
   operationalStatus: string;
-  /** Sheet datetime text for whenever operationalStatus was last set — pairs
-   * with it (e.g. "delivered at" in driver/history views), '' until then. */
-  operationalStatusAt: string;
-  /** "{driver}/{vehicle}/{batchId}" stamped by a Batch Route Assign/edit, '' once
-   * the order leaves every batch. */
+  /** "{route}/{batchRoute}/{driver}" assembled from the sheet's separate
+   * Route/BATCH ROUTE/คนส่ง columns, stamped by a Batch Route Assign/edit,
+   * '' once the order leaves every batch. */
   courierStamp: string;
   archived: boolean;
-  /** Free-text "new customer" annotation some staff keep maintaining directly
-   * in the sheet — the app has never had an edit control for this, so it's
-   * read-only here, but the column stays so that existing habit isn't broken. */
+  /** Free-text "new customer" annotation — an ARRAYFORMULA-driven column
+   * this app has never had (and must never have) write access to; read-only
+   * here purely for display. */
   newCustomer: string;
 }
 

@@ -3,7 +3,7 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { DRIVE_ROOT_FOLDER_ENV, driveFolderPath, isAllowedFile, type AttachmentScope } from '../src/config/drive.js';
 import { GEOCODE_MIN_INTERVAL_MS, NOMINATIM_REVERSE_URL, NOMINATIM_USER_AGENT } from '../src/config/geocoding.js';
-import { isRouteOrdersTabConfigured, MAIN_SHEET_ID, ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE, SHEET_TABS, SKU_SHEET_ID, STAFF_ORDER_INFO_HEADERS } from '../src/config/sheets.js';
+import { isRouteOrdersTabConfigured, MAIN_SHEET_ID, ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE, SHEET_TABS, SKU_SHEET_ID, STAFF_ORDER_INFO_HEADERS, STAFF_READONLY_HEADERS } from '../src/config/sheets.js';
 import type { RouteOrder } from '../src/data/types.js';
 import { DELIVERY_DONE_STATUSES } from '../src/state/helpers.js';
 import { createSessionToken, verifySessionToken } from './session.js';
@@ -31,19 +31,28 @@ const LNG_COLUMN = 'E';
 const NAME_COLUMN_INDEX = 0;
 const PHONE_COLUMN_INDEX = 1;
 
-// Columns in "คำสั่งซื้อ VS" under its new, staff-data-only layout — see
-// config/sheets.ts's STAFF_ORDER_INFO_HEADERS for the single source of truth
-// on exact header text/order (the user sets these up by hand in the real
-// sheet). Looked up by header text each request, never by position, so a
-// future column reorder in the sheet doesn't silently write to the wrong cell.
+// Columns in "คำสั่งซื้อ VS" — see config/sheets.ts's STAFF_ORDER_INFO_HEADERS
+// for the single source of truth on exact header text/order (the user sets
+// these up by hand in the real sheet, which also has its own Apps
+// Script/formulas keyed to these exact strings — never guess a header name
+// here). Looked up by header text each request, never by position, so a
+// future column reorder in the sheet doesn't silently write to the wrong
+// cell. STAFF_READONLY_HEADERS (new customer, Phone) are ARRAYFORMULA-driven
+// and must never appear as a write target — see assertWritableColumn below,
+// which every write in this file is required to pass through.
 const [
   STAFF_ORDER_UID_HEADER,
+  STAFF_ROUTE_HEADER,
+  STAFF_BATCH_ROUTE_HEADER,
   STAFF_DELIVERY_DATE_HEADER,
   STAFF_NOTE_HEADER,
   STAFF_TAX_INVOICE_HEADER,
+  ,
   STAFF_OPERATIONAL_STATUS_HEADER,
-  STAFF_OPERATIONAL_STATUS_AT_HEADER,
   STAFF_COURIER_HEADER,
+  STAFF_ASSIGN_DATE_HEADER,
+  ,
+  ,
   STAFF_ARCHIVED_HEADER,
 ] = STAFF_ORDER_INFO_HEADERS;
 const DELIVERED_STATUS_VALUE = 'ส่งสำเร็จ';
@@ -1324,7 +1333,6 @@ interface StaffOrderInfoShape {
   note: string;
   taxInvoiceOverride: boolean | null;
   operationalStatus: string;
-  operationalStatusAt: string;
   courierStamp: string;
   archived: boolean;
   newCustomer: string;
@@ -1341,9 +1349,11 @@ function parseYesNo(v: string): boolean {
 }
 
 /** Same header-text mapping src/data/sources/staffOrderInfo.ts uses for its
- * (client-side, CSV-based) read of "คำสั่งซื้อ VS" — re-implemented here,
- * fed from Sheets API rows instead, purely for the .xlsx export handlers
- * below (every other read of this tab happens client-side, never here). */
+ * (client-side) read of "คำสั่งซื้อ VS" — re-implemented here, fed from
+ * Sheets API rows instead, purely for the .xlsx export handlers below
+ * (every other read of this tab happens client-side, never here). Read-only
+ * — never writes — so it doesn't need the read-only-column guard the write
+ * path (handleUpdateRouteOrder) has. */
 async function readStaffOrderInfoSheet(sheets: SheetsClient): Promise<StaffOrderInfoShape[]> {
   if (!isRouteOrdersTabConfigured()) return [];
   const title = await resolveSheetTitle(sheets, ROUTE_ORDERS_GID);
@@ -1353,26 +1363,30 @@ async function readStaffOrderInfoSheet(sheets: SheetsClient): Promise<StaffOrder
   const header = (rows[0] ?? []).map((h) => String(h ?? '').trim());
   const at = (name: string) => header.indexOf(name);
   const uidCol = at(STAFF_ORDER_UID_HEADER);
+  const routeCol = at(STAFF_ROUTE_HEADER);
+  const batchRouteCol = at(STAFF_BATCH_ROUTE_HEADER);
   const dateCol = at(STAFF_DELIVERY_DATE_HEADER);
   const noteCol = at(STAFF_NOTE_HEADER);
   const taxCol = at(STAFF_TAX_INVOICE_HEADER);
   const statusCol = at(STAFF_OPERATIONAL_STATUS_HEADER);
   const courierCol = at(STAFF_COURIER_HEADER);
   const archivedCol = at(STAFF_ARCHIVED_HEADER);
-  const newCustomerCol = at(STAFF_ORDER_INFO_HEADERS[8]);
+  const newCustomerCol = at('new customer');
   const out: StaffOrderInfoShape[] = [];
   for (let i = 1; i < rows.length; i++) {
     const r = rows[i] ?? [];
     const orderUid = String(r[uidCol] ?? '').trim();
     if (!orderUid) continue;
+    const route = String(r[routeCol] ?? '').trim();
+    const batchRoute = String(r[batchRouteCol] ?? '').trim();
+    const courier = String(r[courierCol] ?? '').trim();
     out.push({
       orderUid,
       plannedDeliveryDate: String(r[dateCol] ?? '').trim(),
       note: String(r[noteCol] ?? '').trim(),
       taxInvoiceOverride: parseTriStateBool(String(r[taxCol] ?? '')),
       operationalStatus: String(r[statusCol] ?? '').trim(),
-      operationalStatusAt: '',
-      courierStamp: String(r[courierCol] ?? '').trim(),
+      courierStamp: [route, batchRoute, courier].filter(Boolean).join('/'),
       archived: parseYesNo(String(r[archivedCol] ?? '')),
       newCustomer: String(r[newCustomerCol] ?? '').trim(),
     });
@@ -1715,8 +1729,26 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
     const header = rows[0] ?? [];
     const headerAt = (name: string) => header.findIndex((h) => String(h ?? '').trim() === name);
 
+    // Columns this app must never write to (ARRAYFORMULA-driven — see
+    // STAFF_READONLY_HEADERS), resolved from the real header row so a
+    // future column reorder still catches them by name, not position.
+    // assertWritableColumn is the second line of defense, past simply never
+    // looking these two headers up as a write target below.
+    const readOnlyCols = new Set<number>();
+    header.forEach((h, i) => {
+      if (STAFF_READONLY_HEADERS.has(String(h ?? '').trim())) readOnlyCols.add(i);
+    });
+    function assertWritableColumn(col: number, headerName: string): void {
+      if (readOnlyCols.has(col)) {
+        throw new Error(`ป้องกันการเขียนทับคอลัมน์ "${headerName}" ซึ่งเป็นสูตร array formula — ยกเลิกการบันทึก`);
+      }
+    }
+
     const uidCol = headerAt(STAFF_ORDER_UID_HEADER);
     if (uidCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_ORDER_UID_HEADER}" ในชีท` } };
+    // Written into rowValues[uidCol] on the append-new-row path below, so it
+    // goes through the same guard as every other write target.
+    assertWritableColumn(uidCol, STAFF_ORDER_UID_HEADER);
 
     const wanted = orderNo.trim();
     const matches: number[] = [];
@@ -1724,7 +1756,7 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
       if (String(rows[i]?.[uidCol] ?? '').trim() === wanted) matches.push(i + 1); // sheet rows are 1-based
     }
     if (matches.length > 1) {
-      return { status: 409, body: { error: `พบ Order UID "${wanted}" ซ้ำกัน ${matches.length} แถว (แถว ${matches.join(', ')}) — โปรดแก้ไขในชีทโดยตรง` } };
+      return { status: 409, body: { error: `พบ "${STAFF_ORDER_UID_HEADER}" "${wanted}" ซ้ำกัน ${matches.length} แถว (แถว ${matches.join(', ')}) — โปรดแก้ไขในชีทโดยตรง` } };
     }
     const targetRow: number | null = matches[0] ?? null;
 
@@ -1737,35 +1769,56 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
     if (sheetDate !== null) {
       deliveryDateCol = headerAt(STAFF_DELIVERY_DATE_HEADER);
       if (deliveryDateCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_DELIVERY_DATE_HEADER}" ในชีท` } };
+      assertWritableColumn(deliveryDateCol, STAFF_DELIVERY_DATE_HEADER);
     }
     let noteCol = -1;
     if (typeof note === 'string') {
       noteCol = headerAt(STAFF_NOTE_HEADER);
       if (noteCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_NOTE_HEADER}" ในชีท` } };
+      assertWritableColumn(noteCol, STAFF_NOTE_HEADER);
     }
     let taxInvoiceCol = -1;
     if (typeof wantsTaxInvoice === 'boolean') {
       taxInvoiceCol = headerAt(STAFF_TAX_INVOICE_HEADER);
       if (taxInvoiceCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_TAX_INVOICE_HEADER}" ในชีท` } };
+      assertWritableColumn(taxInvoiceCol, STAFF_TAX_INVOICE_HEADER);
     }
+    // No column is dedicated purely to this app's operational-status
+    // vocabulary — every status (mark-delivered / delivery-failed /
+    // pick-lot-close) writes to "ปัญหาการส่ง", the closest real column.
     let statusCol = -1;
-    let statusAtCol = -1;
     if (markDelivered === true || typeof status === 'string') {
       statusCol = headerAt(STAFF_OPERATIONAL_STATUS_HEADER);
       if (statusCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_OPERATIONAL_STATUS_HEADER}" ในชีท` } };
-      statusAtCol = headerAt(STAFF_OPERATIONAL_STATUS_AT_HEADER);
-      if (statusAtCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_OPERATIONAL_STATUS_AT_HEADER}" ในชีท` } };
+      assertWritableColumn(statusCol, STAFF_OPERATIONAL_STATUS_HEADER);
     }
     let archivedCol = -1;
     if (typeof archived === 'boolean') {
       archivedCol = headerAt(STAFF_ARCHIVED_HEADER);
       if (archivedCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_ARCHIVED_HEADER}" ในชีท` } };
+      assertWritableColumn(archivedCol, STAFF_ARCHIVED_HEADER);
     }
+    // Batch-Assign info used to write one combined string into a single
+    // column; the real sheet has four separate columns purpose-built for
+    // this (Route/BATCH ROUTE/คนส่ง/วันที่ Assign), so each gets its own cell.
+    let routeCol = -1;
+    let batchRouteCol = -1;
     let courierCol = -1;
-    let courierStampText = '';
+    let assignDateCol = -1;
+    let courierUsername = '';
     if (wantsCourierStamp || clearCourierStamp === true) {
+      routeCol = headerAt(STAFF_ROUTE_HEADER);
+      if (routeCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_ROUTE_HEADER}" ในชีท` } };
+      assertWritableColumn(routeCol, STAFF_ROUTE_HEADER);
+      batchRouteCol = headerAt(STAFF_BATCH_ROUTE_HEADER);
+      if (batchRouteCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_BATCH_ROUTE_HEADER}" ในชีท` } };
+      assertWritableColumn(batchRouteCol, STAFF_BATCH_ROUTE_HEADER);
       courierCol = headerAt(STAFF_COURIER_HEADER);
       if (courierCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_COURIER_HEADER}" ในชีท` } };
+      assertWritableColumn(courierCol, STAFF_COURIER_HEADER);
+      assignDateCol = headerAt(STAFF_ASSIGN_DATE_HEADER);
+      if (assignDateCol === -1) return { status: 500, body: { error: `ไม่พบคอลัมน์ "${STAFF_ASSIGN_DATE_HEADER}" ในชีท` } };
+      assertWritableColumn(assignDateCol, STAFF_ASSIGN_DATE_HEADER);
     }
     if (wantsCourierStamp) {
       // The driver's display name is just their username, resolved here
@@ -1774,7 +1827,7 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
       // write — has no access to /api/users.
       const users = await readUsers(sheets);
       const driver = users.find((u) => u.active && u.role === 'driver' && u.driverVehicleId === courierVehicleId);
-      courierStampText = `${driver?.username ?? ''} / ${courierVehicleName as string} / ${courierBatchId as string}`;
+      courierUsername = driver?.username ?? '';
     }
 
     // Collect every cell this request needs to write, keyed by column —
@@ -1784,16 +1837,20 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
     if (typeof note === 'string') writes.set(noteCol, note);
     if (typeof wantsTaxInvoice === 'boolean') writes.set(taxInvoiceCol, wantsTaxInvoice ? 'ใช่' : 'ไม่ใช่');
     if (typeof archived === 'boolean') writes.set(archivedCol, archived ? 'ใช่' : '');
-    if (wantsCourierStamp) writes.set(courierCol, courierStampText);
-    if (clearCourierStamp === true) writes.set(courierCol, '');
-    if (typeof status === 'string') {
-      writes.set(statusCol, status);
-      writes.set(statusAtCol, nowSheetDateTime());
+    if (wantsCourierStamp) {
+      writes.set(routeCol, courierVehicleName as string);
+      writes.set(batchRouteCol, courierBatchId as string);
+      writes.set(courierCol, courierUsername);
+      writes.set(assignDateCol, nowSheetDateTime());
     }
-    if (markDelivered === true) {
-      writes.set(statusCol, DELIVERED_STATUS_VALUE);
-      writes.set(statusAtCol, nowSheetDateTime());
+    if (clearCourierStamp === true) {
+      writes.set(routeCol, '');
+      writes.set(batchRouteCol, '');
+      writes.set(courierCol, '');
+      writes.set(assignDateCol, '');
     }
+    if (typeof status === 'string') writes.set(statusCol, status);
+    if (markDelivered === true) writes.set(statusCol, DELIVERED_STATUS_VALUE);
 
     // Snapshot the pre-write values of the four auditable fields (delivery
     // date / note / tax invoice / status) before anything below mutates the
@@ -1826,6 +1883,7 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
       const rawWrites = new Map(writes);
       rawWrites.delete(deliveryDateCol);
       for (const [col, value] of rawWrites) {
+        assertWritableColumn(col, header[col] != null ? String(header[col]) : `column ${col}`);
         await sheets.spreadsheets.values.update({
           spreadsheetId: MAIN_SHEET_ID,
           range: `${title}!${columnLetter(col)}${targetRow}`,
@@ -1834,21 +1892,52 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
         });
       }
     } else {
-      // Brand new order — this tab has no row for it yet. Append one with
-      // just the UID and whatever was actually passed; every other column
-      // starts blank, same as if the row already existed with nothing set.
-      // RAW throughout (including the date) so nothing in a single-shot
-      // append can ever be misread as a formula.
-      const rowValues: unknown[] = new Array(header.length).fill('');
+      // Brand new order — this tab has no row for it yet. Append one, but
+      // ONLY spanning columns up to (never including) the first read-only
+      // ARRAYFORMULA column — appending a wider row would plant a literal
+      // '' into "new customer"/"Phone" for this row and block their
+      // formula's spill. Any write that lands at or past that boundary
+      // (e.g. "Archived", which sits after them) can't go in this same
+      // call — it's applied afterward, targeted at the exact row number
+      // Sheets reports back for the row it just inserted, never guessed.
+      const firstReadOnlyCol = readOnlyCols.size > 0 ? Math.min(...readOnlyCols) : header.length;
+      const appendWidth = Math.max(uidCol + 1, firstReadOnlyCol);
+      const rowValues: unknown[] = new Array(appendWidth).fill('');
+      // Belt-and-suspenders: even though appendWidth is sized to stop right
+      // before the first read-only column today, explicitly blank out any
+      // read-only index that a future header reorder might still leave
+      // inside this array, rather than trusting the width math alone.
+      for (const c of readOnlyCols) if (c < rowValues.length) rowValues[c] = undefined;
       rowValues[uidCol] = wanted;
-      for (const [col, value] of writes) rowValues[col] = value;
-      await sheets.spreadsheets.values.append({
+      const deferredWrites = new Map<number, string>();
+      for (const [col, value] of writes) {
+        assertWritableColumn(col, header[col] != null ? String(header[col]) : `column ${col}`);
+        if (col < appendWidth) rowValues[col] = value;
+        else deferredWrites.set(col, value);
+      }
+      const appendRes = await sheets.spreadsheets.values.append({
         spreadsheetId: MAIN_SHEET_ID,
-        range: `${title}!A:Z`,
+        range: `${title}!A:${columnLetter(appendWidth - 1)}`,
         valueInputOption: 'RAW',
         insertDataOption: 'INSERT_ROWS',
         requestBody: { values: [rowValues] },
       });
+      if (deferredWrites.size > 0) {
+        const updatedRange = appendRes.data.updates?.updatedRange ?? '';
+        const rowMatch = updatedRange.match(/![A-Z]+(\d+)/);
+        const newRow = rowMatch ? Number(rowMatch[1]) : null;
+        if (newRow == null) {
+          throw new Error('เพิ่มแถวใหม่สำเร็จ แต่ระบุตำแหน่งแถวที่เพิ่งเพิ่มไม่ได้ — บันทึกบางฟิลด์ไม่สำเร็จ โปรดลองแก้ไขออเดอร์นี้อีกครั้ง');
+        }
+        for (const [col, value] of deferredWrites) {
+          await sheets.spreadsheets.values.update({
+            spreadsheetId: MAIN_SHEET_ID,
+            range: `${title}!${columnLetter(col)}${newRow}`,
+            valueInputOption: 'RAW',
+            requestBody: { values: [[value]] },
+          });
+        }
+      }
     }
 
     await appendAuditLog(sheets, { username: payload.username, role: payload.role }, auditEntries);

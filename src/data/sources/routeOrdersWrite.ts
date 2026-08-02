@@ -1,15 +1,17 @@
 import { authHeaders, loadSession } from '../session';
 
 export interface RouteOrderUpdatePayload {
-  /** Order UID — the only key the backend matches by, never row position. */
+  /** "เลขคำสั่งซื้อ" (order number) — the only key the backend matches by,
+   * never row position. */
   orderNo: string;
   /** ISO YYYY-MM-DD — converted server-side to the sheet's own M/D/YYYY text. */
   plannedDeliveryDate?: string;
   note?: string;
   wantsTaxInvoice?: boolean;
-  /** Stamps สถานะการดำเนินงาน='ส่งสำเร็จ' and its timestamp column with now(). */
+  /** Stamps "ปัญหาการส่ง" (the closest real column — the sheet has no column
+   * dedicated purely to this app's status vocabulary) with 'ส่งสำเร็จ'. */
   markDelivered?: boolean;
-  /** Sets สถานะการดำเนินงาน to an arbitrary known value (see server/lib.ts's
+  /** Sets "ปัญหาการส่ง" to an arbitrary known value (see server/lib.ts's
    * allowlist) — used when closing a batch-picking lot ("กำลังจัดส่ง") or a
    * driver reporting a failed delivery ("ส่งไม่สำเร็จ"). This app's own
    * record of an outcome, kept apart from API Import's own Status column
@@ -17,14 +19,15 @@ export interface RouteOrderUpdatePayload {
   status?: string;
   /** Hides/unhides the order from normal operational views without deleting it. */
   archived?: boolean;
-  /** Stamps "คนส่ง" with "{driver}/{vehicle}/{batchId}" after a batch Assign or
-   * edit — pass all three together to set it. The driver's name is resolved
-   * server-side from the Users tab (not sent from here), since listing users
-   * is admin/manager-only and admin_staff can also run the Planner. */
+  /** Stamps "Route"/"BATCH ROUTE"/"คนส่ง"/"วันที่ Assign" (four separate
+   * columns) after a batch Assign or edit — pass all three below together to
+   * set them. The driver's username is resolved server-side from the Users
+   * tab (not sent from here), since listing users is admin/manager-only and
+   * admin_staff can also run the Planner. */
   courierVehicleId?: string;
   courierVehicleName?: string;
   courierBatchId?: string;
-  /** Blanks "คนส่ง" back out — an order pulled out of its batch. */
+  /** Blanks all four Assign columns back out — an order pulled out of its batch. */
   clearCourierStamp?: boolean;
 }
 

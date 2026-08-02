@@ -40,24 +40,47 @@ export const SHEET_TABS = {
   skuMaster: { sheetId: SKU_SHEET_ID, gid: '0' },
 } as const;
 
-/** Exact header text and left-to-right order for "คำสั่งซื้อ VS" under the
- * new staff-only layout — the single source of truth both the frontend
- * reader (staffOrderInfo.ts) and the backend writer (server/lib.ts) key off
- * of by name, never by column position. Order UID is the join key against
- * API Import; every other column is something staff enter through this
- * app's own UI (see src/data/types.ts's StaffOrderInfo for what each one
- * means) — nothing here duplicates a column API Import already has. */
+/** Exact header text and left-to-right order (columns A–M) for "คำสั่งซื้อ VS"
+ * as the real sheet actually has it — the single source of truth both the
+ * frontend reader (staffOrderInfo.ts) and the backend writer/exporter
+ * (server/lib.ts) key off of by name, never by column position. Confirmed
+ * directly against the live sheet (2026-08), since the sheet is set up and
+ * maintained by hand and has its own Apps Script/formulas referencing these
+ * exact header strings — never rename any of them here without renaming
+ * them in the sheet first.
+ *
+ * "เลขคำสั่งซื้อ" (the order number, e.g. "UM-260802-3582498251") is the join
+ * key against API Import's own "Order UID" column — same value, different
+ * header text in each tab. "โปรโมชั่น" exists in the sheet but nothing in
+ * this app reads or writes it. "new customer" and "Phone" are populated by
+ * an ARRAYFORMULA anchored elsewhere in the sheet — see
+ * STAFF_READONLY_HEADERS below — they must never be written by this app or
+ * the formula breaks for the whole column. */
 export const STAFF_ORDER_INFO_HEADERS = [
-  'Order UID',
-  'วันที่จะจัดส่ง',
-  'หมายเหตุ',
-  'ขอใบกำกับภาษี',
-  'สถานะการดำเนินงาน',
-  'เวลาที่บันทึกสถานะ',
-  'คนส่ง',
-  'Archived',
-  'new customer',
+  'เลขคำสั่งซื้อ', // A — join key
+  'Route', // B — vehicle/route name, set on batch Assign
+  'BATCH ROUTE', // C — batch id, set on batch Assign
+  'วันที่จะจัดส่ง', // D
+  'หมายเหตุ', // E
+  'ใบกำกับภาษี', // F
+  'โปรโมชั่น', // G — not used by this app
+  'ปัญหาการส่ง', // H — this app's operational status (mark-delivered / delivery-failed / pick-lot-close all write here)
+  'คนส่ง', // I — driver username, set on batch Assign
+  'วันที่ Assign', // J — set on batch Assign
+  'new customer', // K — READ-ONLY, ARRAYFORMULA-driven
+  'Phone', // L — READ-ONLY, ARRAYFORMULA-driven
+  'Archived', // M
 ] as const;
+
+/** Columns this app must never write to under any circumstance — both are
+ * driven by an ARRAYFORMULA elsewhere in the sheet that spills its computed
+ * value into every row of the column; writing even an empty string into
+ * one of these cells plants a literal value that blocks the formula's
+ * spill for that row and breaks it for the rest of the column below.
+ * server/lib.ts checks every write against this set before it ever reaches
+ * the Sheets API, as a second line of defense beyond just "don't look these
+ * headers up as write targets." */
+export const STAFF_READONLY_HEADERS = new Set<string>(['new customer', 'Phone']);
 
 export type SheetTabKey = keyof typeof SHEET_TABS;
 
