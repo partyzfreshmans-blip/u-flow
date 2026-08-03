@@ -114,13 +114,38 @@ function matchRule(rules: ZoneRule[], areaHaystack: string, provinceHaystack: st
   return null;
 }
 
+/** Drops hyphenated compound tokens (e.g. "เชียงใหม่-ลำพูน",
+ * "Chiang Mai-Lamphun") from free text before it's used to guess a province.
+ * That exact shape is how a province name ends up in an address it has
+ * nothing to do with — a Lamphun customer living on ถนนเชียงใหม่-ลำพูน — and
+ * it's the reason province matching was originally restricted to the
+ * structured column. A genuine province mention ("จ.ลำพูน", "ลำพูน 51000")
+ * is never hyphenated to another word, so removing these costs nothing. */
+function stripHyphenatedCompounds(text: string): string {
+  // Any run of letters (Thai U+0E00–U+0E7F or Latin, spaces allowed inside a
+  // multi-word Latin name) joined to another by a hyphen/en-dash/em-dash.
+  return text.replace(/[฀-๿a-zA-Z][฀-๿a-zA-Z ]*[-–—][฀-๿a-zA-Z][฀-๿a-zA-Z ]*/g, ' ');
+}
+
 /** Legacy method: guesses the zone by searching the free-text address for
  * area terms and the structured district/province column for province terms.
- * Used only when a coordinate is missing or not yet (or never) geocoded. */
+ * Used only when a coordinate is missing or not yet (or never) geocoded.
+ *
+ * When the structured "อำเภอ, จังหวัด" column is blank — which is the norm
+ * for orders whose source tab never carried those columns — province terms
+ * fall back to the free-text address instead, with hyphenated road-name
+ * compounds stripped first (see stripHyphenatedCompounds). Without that
+ * fallback every such order resolves to "—" and the planner's
+ * "จัดอัตโนมัติตามโซน" has nothing at all to match on. Rows that DO have a
+ * structured column are matched exactly as before — the free text is never
+ * consulted for province there, so the original road-name protection is
+ * unchanged for them. */
 export function matchZone(rules: ZoneRule[], districtProvince: string, freeTextAddress: string): ZoneMatch {
-  const structured = districtProvince ?? '';
-  const areaHaystack = `${structured} ${freeTextAddress ?? ''}`;
-  const rule = matchRule(rules, areaHaystack, structured);
+  const structured = (districtProvince ?? '').trim();
+  const freeText = freeTextAddress ?? '';
+  const areaHaystack = `${structured} ${freeText}`;
+  const provinceHaystack = structured || stripHyphenatedCompounds(freeText);
+  const rule = matchRule(rules, areaHaystack, provinceHaystack);
   if (rule) return { zoneId: rule.id, zoneName: rule.name, color: rule.color, route: rule.route, reason: rule.name, source: 'text' };
 
   const province = structured.split(',').pop()?.trim();

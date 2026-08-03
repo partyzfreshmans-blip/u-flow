@@ -60,11 +60,56 @@ function buildOrderUnitQtyMap(orderLineItems: OrderLineItem[]): Map<string, Part
   return map;
 }
 
-function qtyTextForOrder(map: Map<string, Partial<Record<'ชิ้น' | 'แพ็ค' | 'ลัง', number>>>, orderNo: string): string {
-  const m = map.get(orderNo);
+type UnitQty = Partial<Record<'ชิ้น' | 'แพ็ค' | 'ลัง', number>>;
+
+function formatUnitQty(m: UnitQty | undefined): string {
   if (!m) return '—';
   const parts = (['ชิ้น', 'แพ็ค', 'ลัง'] as const).map((u) => (m[u] ? `${m[u]!.toLocaleString('en-US')} ${u}` : null)).filter((s): s is string => s !== null);
   return parts.length > 0 ? parts.join(' · ') : '—';
+}
+
+function qtyTextForOrder(map: Map<string, UnitQty>, orderNo: string): string {
+  return formatUnitQty(map.get(orderNo));
+}
+
+/** Merges several orders' unit breakdowns into one — the per-vehicle
+ * "how much is actually going on this truck" figure the planner shows next
+ * to each vehicle's stop count, for eyeballing against its capacity. */
+function sumUnitQty(map: Map<string, UnitQty>, orderNos: string[]): UnitQty {
+  const total: UnitQty = {};
+  for (const no of orderNos) {
+    const m = map.get(no);
+    if (!m) continue;
+    for (const u of ['ชิ้น', 'แพ็ค', 'ลัง'] as const) {
+      if (m[u]) total[u] = (total[u] ?? 0) + m[u]!;
+    }
+  }
+  return total;
+}
+
+/** The sheet's "new customer" column is an ARRAYFORMULA producing free text
+ * this app never writes, so its exact wording isn't guaranteed — treat any
+ * non-empty value as a flag unless it's explicitly a negative/placeholder.
+ * The raw text is always shown in the badge's tooltip, so staff can see what
+ * the sheet actually says regardless of how this reads it. */
+const NEW_CUSTOMER_NEGATIVE = /^(ไม่ใช่|ไม่|ลูกค้าเก่า|เก่า|no|false|n|old|0|-|–|—)$/i;
+function isNewCustomerFlag(text: string): boolean {
+  const s = (text ?? '').trim();
+  return s !== '' && !NEW_CUSTOMER_NEGATIVE.test(s);
+}
+
+/** Distance comparators that always sort an unknown (null) distance last,
+ * whichever direction is being applied — an order with no computable
+ * distance shouldn't silently rank as "closest" (what a 0 fallback did). */
+function byFarthestFirst(a: number | null, b: number | null): number {
+  if (a == null) return b == null ? 0 : 1;
+  if (b == null) return -1;
+  return b - a;
+}
+function byNearestFirst(a: number | null, b: number | null): number {
+  if (a == null) return b == null ? 0 : 1;
+  if (b == null) return -1;
+  return a - b;
 }
 
 /** "อำเภอ, จังหวัด" display value for the Order Management table — prefers a
@@ -1092,12 +1137,17 @@ export function computePlanner(state: AppState, actions: AppActions) {
   // never corrected. Once a customer has a corrected pin, that stale figure
   // could be wrong, so recompute live from the corrected coordinate instead
   // of trusting the sheet's number.
-  const distanceOf = (o: (typeof candidates)[number]) =>
-    o.locationSource === 'override'
-      ? warehouse && o.lat != null && o.lng != null
-        ? haversineKm(warehouse.lat, warehouse.lng, o.lat, o.lng)
-        : 0
-      : (o.distanceFromWhKm ?? (warehouse && o.lat != null && o.lng != null ? haversineKm(warehouse.lat, warehouse.lng, o.lat, o.lng) : 0));
+  //
+  // Returns null — never 0 — when there's nothing to compute from (no
+  // warehouse coordinate anywhere in the data, or this order has no pin).
+  // The old 0 fallback rendered as a confident "0.0 กม." on every row, which
+  // reads as "this stop is at the warehouse" rather than "unknown"; callers
+  // now hide the figure instead, and the comparators above sort nulls last.
+  const distanceKmOf = (o: (typeof candidates)[number]): number | null => {
+    const live = warehouse && o.lat != null && o.lng != null ? haversineKm(warehouse.lat, warehouse.lng, o.lat, o.lng) : null;
+    if (o.locationSource === 'override') return live;
+    return o.distanceFromWhKm ?? live;
+  };
 
   const byOrderNo = new Map(routeOrders.map((o) => [o.orderNo, o]));
   const vehicleNameById = new Map(vehicleSource.map((v) => [v.id, v.name]));
@@ -1219,7 +1269,11 @@ export function computePlanner(state: AppState, actions: AppActions) {
         stuckDetached: stuckDetachment != null,
         stuckDetachedFromText: stuckDetachment ? `${stuckDetachment.fromBatchId} · ${stuckDetachment.fromVehicleName}` : '',
         address: o.addressFromUnii || o.districtProvince,
-        districtProvince: o.districtProvince || '—',
+        // Geocode-preferring, same as the per-vehicle stops table and the
+        // Order Management table — the sheet's own อำเภอ/จังหวัด columns are
+        // often blank, and a reverse-geocoded value is the only thing that
+        // fills the gap (it's also what the zone matcher itself reads).
+        districtProvince: districtProvinceLabel(o, state.geocodeCache),
         phone: o.phone || '—',
         packedBy: packedByOrderNo.get(o.orderNo)?.name || 'ยังไม่จัด',
         plannedDeliveryDateText: o.plannedDeliveryDate || '—',
@@ -1228,9 +1282,12 @@ export function computePlanner(state: AppState, actions: AppActions) {
         qtyText: qtyTextFor(o.orderNo),
         zoneName: zone.zoneName,
         zoneColor: zone.color,
+        hasZone: zone.zoneId !== null,
         suggestedRoute: zone.route,
-        distanceKm: distanceOf(o),
-        distanceText: `${distanceOf(o).toFixed(1)} กม.`,
+        distanceKm: distanceKmOf(o),
+        distanceText: distanceKmOf(o) != null ? `${distanceKmOf(o)!.toFixed(1)} กม.` : '—',
+        isNewCustomer: isNewCustomerFlag(o.isNewCustomer),
+        newCustomerText: o.isNewCustomer.trim(),
         wantsTaxInvoice: o.wantsTaxInvoice,
         note: o.note,
         hasNote: o.note.trim() !== '',
@@ -1261,7 +1318,16 @@ export function computePlanner(state: AppState, actions: AppActions) {
         })(),
       };
     })
-    .sort((a, b) => b.distanceKm - a.distanceKm);
+    .sort((a, b) => byFarthestFirst(a.distanceKm, b.distanceKm));
+
+  // Drives the "ระยะ" column's show/hide on the unassigned table — with no
+  // warehouse coordinate in the data at all, every row is null and the whole
+  // column is noise.
+  const anyUnassignedDistance = unassigned.some((u) => u.distanceKm != null);
+  // Feeds the hint next to "จัดอัตโนมัติตามโซน": that button can only place
+  // orders whose zone actually resolved, so a large count here explains an
+  // otherwise silent no-op.
+  const unzonedUnassignedCount = unassigned.filter((u) => !u.hasZone).length;
 
   const unassignedOrderNos = unassigned.map((u) => u.orderNo);
   const selectedInUnassigned = state.plannerSelectedOrderNos.filter((no) => unassignedOrderNos.includes(no));
@@ -1306,6 +1372,15 @@ export function computePlanner(state: AppState, actions: AppActions) {
       .filter((o): o is NonNullable<typeof o> => o != null)
       .map((o, i, arr) => {
         const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
+        // Leg distance — how far this stop is from the one before it (from
+        // the warehouse for the first stop), which is what actually matters
+        // when sequencing a route. The previous column showed distance from
+        // the warehouse for every stop, which for a route already sorted by
+        // that same figure told the planner nothing new.
+        const prevOrder = i === 0 ? null : arr[i - 1];
+        const prevPoint =
+          i === 0 ? warehouse : prevOrder && prevOrder.lat != null && prevOrder.lng != null ? { lat: prevOrder.lat, lng: prevOrder.lng } : null;
+        const legKm = prevPoint && o.lat != null && o.lng != null ? haversineKm(prevPoint.lat, prevPoint.lng, o.lat, o.lng) : null;
         return {
           seq: i + 1,
           // Load codes count down so the first drop is loaded last.
@@ -1313,14 +1388,25 @@ export function computePlanner(state: AppState, actions: AppActions) {
           orderNo: o.orderNo,
           customer: o.customer,
           address: o.addressFromUnii || o.districtProvince,
+          // Resolved ตำบล/อำเภอ/จังหวัด — prefers the reverse-geocoded value
+          // over the sheet's own column, same as the Order Management table.
+          districtProvince: districtProvinceLabel(o, state.geocodeCache),
           phone: o.phone,
           amtText: fmt(o.totalAmount),
           amount: o.totalAmount,
           itemCount: o.itemCount,
+          qtyText: qtyTextFor(o.orderNo),
+          isNewCustomer: isNewCustomerFlag(o.isNewCustomer),
+          newCustomerText: o.isNewCustomer.trim(),
+          note: o.note,
+          hasNote: o.note.trim() !== '',
           paymentType: o.paymentType,
           zoneName: zone.zoneName,
           zoneColor: zone.color,
-          distanceText: `${distanceOf(o).toFixed(1)} กม.`,
+          hasZone: zone.zoneId !== null,
+          legDistanceKm: legKm,
+          legDistanceText: legKm != null ? `${legKm.toFixed(1)} กม.` : '—',
+          legFromLabel: i === 0 ? 'จากคลัง' : `จากจุดที่ ${i}`,
           mapLink: o.mapLink,
           locationSource: o.locationSource,
           // A corrected coordinate always wins the navigate link too — the
@@ -1334,12 +1420,13 @@ export function computePlanner(state: AppState, actions: AppActions) {
             o.locationSource === 'override' && o.lat != null && o.lng != null
               ? `https://www.google.com/maps/search/?api=1&query=${o.lat},${o.lng}`
               : o.mapLink || (o.lat != null && o.lng != null ? `https://www.google.com/maps/search/?api=1&query=${o.lat},${o.lng}` : ''),
-          isCod: isCodPayment(o.paymentType),
-          codMethod: state.routeCodMethod[o.orderNo] ?? 'cash',
-          codCollected: state.routeCodCollected[o.orderNo] ?? '',
-          setCodCash: () => actions.saveRouteCod(state.routeCodCollected, { ...state.routeCodMethod, [o.orderNo]: 'cash' }),
-          setCodTransfer: () => actions.saveRouteCod(state.routeCodCollected, { ...state.routeCodMethod, [o.orderNo]: 'transfer' }),
-          onCodCollected: (val: string) => actions.saveRouteCod({ ...state.routeCodCollected, [o.orderNo]: val.replace(/[^0-9]/g, '') }, state.routeCodMethod),
+          // COD collection (cash/transfer + amount received) is deliberately
+          // NOT exposed here anymore: it belongs to the money-handling flow,
+          // not route planning. The same per-order state is still fully
+          // editable on the COD clearing page (computeCod) and in Driver View
+          // (computeDriverRouteDetail), both reading the same
+          // state.routeCodMethod/routeCodCollected — nothing was lost, it
+          // just stopped being duplicated onto the planning table.
           status: o.status,
           stStyle: sheetStatusStyle(o.status),
           isDelivered: DELIVERY_DONE_STATUSES.includes(o.status),
@@ -1368,21 +1455,13 @@ export function computePlanner(state: AppState, actions: AppActions) {
         };
       });
 
-    // COD tracking for this route: cash owed back at clearing excludes
-    // transfers, which are already settled — same split as the COD page.
-    const codStops = stops.filter((s) => s.isCod);
-    let codCashExpected = 0;
-    let codCashCollected = 0;
-    let codTransferTotal = 0;
-    for (const s of codStops) {
-      if (s.codMethod === 'transfer') {
-        codTransferTotal += s.amount;
-      } else {
-        codCashExpected += s.amount;
-        codCashCollected += Number(s.codCollected || 0);
-      }
-    }
-    const codDiff = codCashCollected - codCashExpected;
+    // How much is physically going on this truck — the figure to eyeball
+    // against its capacity while routing. itemCount is always available (it
+    // comes with the order); the ชิ้น/แพ็ค/ลัง breakdown needs SKU Detail
+    // line items to have loaded, and reads "—" until they do.
+    const stopOrderNos = stops.map((s) => s.orderNo);
+    const totalItemCount = stops.reduce((a, s) => a + s.itemCount, 0);
+    const totalQtyText = formatUnitQty(sumUnitQty(orderUnitQty, stopOrderNos));
 
     return {
       id: v.id,
@@ -1394,17 +1473,15 @@ export function computePlanner(state: AppState, actions: AppActions) {
       stops,
       stopCount: stops.length,
       totalText: fmt(stops.reduce((a, s) => a + s.amount, 0)),
-      codCount: codStops.length,
-      codCashExpected,
-      codCashCollected,
-      codCashExpectedText: fmt(codCashExpected),
-      codCashCollectedText: fmt(codCashCollected),
-      codTransferTotal,
-      codTransferText: fmt(codTransferTotal),
-      hasCodTransfer: codTransferTotal > 0,
-      codDiffText: codDiff === 0 ? 'ยอดตรง' : (codDiff > 0 ? 'เกิน +' : 'ขาด −') + fmt(Math.abs(codDiff)),
-      codDiffStyle: codDiff === 0 ? badgeStyle('ok') : badgeStyle('bad'),
-      codMismatch: codCashExpected > 0 && codDiff !== 0,
+      totalItemCount,
+      totalItemCountText: totalItemCount.toLocaleString('en-US'),
+      totalQtyText,
+      hasQtyBreakdown: totalQtyText !== '—',
+      // False when not a single stop on this vehicle has a computable leg
+      // distance (no warehouse coordinate, or no pins) — the table hides the
+      // whole ระยะ column rather than printing a column of "—".
+      hasLegDistance: stops.some((s) => s.legDistanceKm != null),
+      unzonedCount: stops.filter((s) => !s.hasZone).length,
       // Toggles each click: applies the direction currently offered, then
       // flips it for next time — so one button alternates between
       // farthest-first (the ops sheet's usual order) and nearest-first.
@@ -1417,9 +1494,9 @@ export function computePlanner(state: AppState, actions: AppActions) {
         const sorted = [...orderNos].sort((a, b) => {
           const oa = byOrderNo.get(a);
           const ob = byOrderNo.get(b);
-          const da = oa ? distanceOf(oa) : 0;
-          const db = ob ? distanceOf(ob) : 0;
-          return sortDirection === 'far' ? db - da : da - db;
+          const da = oa ? distanceKmOf(oa) : null;
+          const db = ob ? distanceKmOf(ob) : null;
+          return sortDirection === 'far' ? byFarthestFirst(da, db) : byNearestFirst(da, db);
         });
         applyVehicleOrderNos(v.id, sorted);
         actions.patch({ routeSortDirection: { ...state.routeSortDirection, [v.id]: sortDirection === 'far' ? 'near' : 'far' } });
@@ -1520,12 +1597,6 @@ export function computePlanner(state: AppState, actions: AppActions) {
     }
   };
 
-  const codCashExpectedTotal = vehicles.reduce((a, v) => a + v.codCashExpected, 0);
-  const codCashCollectedTotal = vehicles.reduce((a, v) => a + v.codCashCollected, 0);
-  const codTransferGrandTotal = vehicles.reduce((a, v) => a + v.codTransferTotal, 0);
-  const codRouteCount = vehicles.filter((v) => v.codCount > 0).length;
-  const codGrandDiff = codCashCollectedTotal - codCashExpectedTotal;
-
   const suggestByZone = () => {
     const plan: RoutePlanShape = { ...state.routePlan };
     let assignedCount = 0;
@@ -1551,7 +1622,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
       plan[id] = [...plan[id]].sort((a, b) => {
         const oa = byOrderNo.get(a);
         const ob = byOrderNo.get(b);
-        return (ob ? distanceOf(ob) : 0) - (oa ? distanceOf(oa) : 0);
+        return byFarthestFirst(oa ? distanceKmOf(oa) : null, ob ? distanceKmOf(ob) : null);
       });
     }
     actions.setRoutePlan(plan);
@@ -1659,13 +1730,11 @@ export function computePlanner(state: AppState, actions: AppActions) {
     plannerDate: state.plannerDate,
     onPlannerDate: (v: string) => actions.patch({ plannerDate: v }),
     clearPlannerDate: () => actions.patch({ plannerDate: '' }),
-    codRouteCount,
-    codCashExpectedText: fmt(codCashExpectedTotal),
-    codCashCollectedText: fmt(codCashCollectedTotal),
-    codTransferText: fmt(codTransferGrandTotal),
-    hasCodTransfer: codTransferGrandTotal > 0,
-    codGrandDiffText: codGrandDiff === 0 ? 'ยอดตรง' : (codGrandDiff > 0 ? 'เกิน +' : 'ขาด −') + fmt(Math.abs(codGrandDiff)),
-    codGrandDiffStyle: codGrandDiff === 0 ? badgeStyle('ok') : badgeStyle('bad'),
+    // COD figures are deliberately absent from this view-model — collection
+    // status lives on the COD clearing page, which owns the same underlying
+    // state. See the note on each stop above.
+    anyUnassignedDistance,
+    unzonedUnassignedCount,
     suggestByZone,
     clearAll: () => {
       const plan: RoutePlanShape = { ...state.routePlan };

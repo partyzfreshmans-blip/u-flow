@@ -184,14 +184,20 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
         )}
       </div>
 
-      {/* COD overview — collection status across every route going out */}
-      {v.codRouteCount > 0 && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', padding: '10px 15px', marginBottom: 14, borderRadius: 10, background: 'var(--color-surface)', boxShadow: 'var(--shadow-sm)', fontSize: 12.5 }}>
-          <span style={{ fontWeight: 600 }}><i className="ph ph-money" style={{ marginRight: 6, color: 'var(--color-accent-300)' }} />COD {v.codRouteCount} รูท</span>
-          <span>ต้องเก็บสด {v.codCashExpectedText}</span>
-          <span>เก็บมาแล้ว {v.codCashCollectedText}</span>
-          {v.hasCodTransfer && <span style={{ color: 'var(--color-neutral-400)' }}>โอนแล้ว {v.codTransferText}</span>}
-          <span style={v.codGrandDiffStyle}>{v.codGrandDiffText}</span>
+      {/* COD collection status deliberately lives on the COD clearing page
+          only (see computePlanner's own note) — this page is for deciding
+          what goes on which truck, not for handling money. */}
+
+      {/* Zone coverage — "จัดอัตโนมัติตามโซน" can only place orders whose zone
+          actually resolved, so say so plainly instead of letting the button
+          look broken when it silently places nothing. */}
+      {v.canEdit && v.unzonedUnassignedCount > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '9px 15px', marginBottom: 14, borderRadius: 10, background: 'var(--st-info-bg)', color: 'var(--st-info-fg)', fontSize: 12.5 }}>
+          <i className="ph ph-path" style={{ flex: 'none' }} />
+          <span>
+            {v.unzonedUnassignedCount} จาก {v.unassignedCount} ออเดอร์ที่ยังไม่จัด ยังระบุโซนไม่ได้ — "จัดอัตโนมัติตามโซน" จะข้ามรายการเหล่านี้
+            {state.geocodeProgress ? ' (กำลังระบุพื้นที่จากพิกัดอยู่ รอสักครู่แล้วลองใหม่)' : ' — ตรวจว่าที่อยู่มีชื่อจังหวัด/อำเภอ หรือเพิ่มคำในตำบล/อำเภอที่ "ตั้งค่าโซน"'}
+          </span>
         </div>
       )}
 
@@ -326,10 +332,15 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                 </div>
                 <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                   <span style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{veh.stopCount} จุด · {veh.totalText}</span>
-                  {veh.codCount > 0 && (
-                    <span style={{ fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                      <i className="ph ph-money" style={{ color: 'var(--color-accent-300)' }} />COD {veh.codCashCollectedText} / {veh.codCashExpectedText}
-                      <span style={veh.codDiffStyle}>{veh.codDiffText}</span>
+                  {/* Load size — for eyeballing against this truck's capacity. */}
+                  {veh.stopCount > 0 && (
+                    <span
+                      style={{ fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 5, color: 'var(--color-neutral-300)' }}
+                      title="ยอดรวมของที่ต้องขึ้นรถคันนี้ (ใช้เทียบกับความจุรถ)"
+                    >
+                      <i className="ph ph-package" style={{ color: 'var(--color-accent-300)' }} />
+                      {veh.totalItemCountText} รายการ
+                      {veh.hasQtyBreakdown && <span style={{ color: 'var(--color-neutral-500)' }}>· {veh.totalQtyText}</span>}
                     </span>
                   )}
                   {v.canEdit && veh.batchId && (
@@ -374,12 +385,13 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                     <tr>
                       <th style={{ width: 20 }}></th>
                       <th style={{ width: 40, textAlign: 'center' }}>ลำดับ</th><th style={{ width: 62, textAlign: 'center' }}>ลำดับโหลด</th>
-                      <th style={{ minWidth: 140 }}>ลูกค้า</th>
-                      <th style={{ width: 85 }}>โซน</th>
+                      {/* Widened with the space freed by dropping the COD and
+                          สถานะ columns, so ตำบล/อำเภอ finally fits. */}
+                      <th style={{ minWidth: 300 }}>ลูกค้า / ที่อยู่</th>
+                      <th style={{ width: 110 }}>โซน</th>
+                      <th style={{ width: 110 }}>จำนวน</th>
                       <th style={{ width: 80, textAlign: 'right' }}>ยอดเงิน</th>
-                      <th style={{ width: 172 }}>COD</th>
-                      <th style={{ width: 62, textAlign: 'right' }}>ระยะ</th>
-                      <th style={{ width: 96 }}>สถานะ</th>
+                      {veh.hasLegDistance && <th style={{ width: 74, textAlign: 'right' }} title="ระยะจากจุดก่อนหน้า (จุดแรกวัดจากคลัง)">ระยะ</th>}
                       <th style={{ width: 168 }}></th>
                     </tr>
                   </thead>
@@ -410,42 +422,53 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                         <td style={{ textAlign: 'center', fontWeight: 600 }}>{s.seq}</td>
                         <td style={{ textAlign: 'center', fontFamily: 'ui-monospace, monospace', fontSize: 12, color: 'var(--color-accent-200)' }}>{s.loadCode}</td>
                         <td>
-                          {s.customer}
-                          <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', maxWidth: 210, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                            {s.customer}
+                            {s.isNewCustomer && (
+                              <span
+                                style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, padding: '1px 6px', borderRadius: 5, background: 'var(--st-ok-bg)', color: 'var(--st-ok-fg)', fontWeight: 600, whiteSpace: 'nowrap' }}
+                                title={`ลูกค้าใหม่ (จากชีต: ${s.newCustomerText})`}
+                              >
+                                <i className="ph ph-star" />ลูกค้าใหม่
+                              </span>
+                            )}
+                            {s.hasNote && (
+                              <i
+                                className="ph ph-note-pencil"
+                                title={s.note}
+                                style={{ fontSize: 13, color: 'var(--st-warn-fg)', cursor: 'help' }}
+                              />
+                            )}
+                          </div>
+                          {/* Address wraps now instead of being clipped — the
+                              ตำบล/อำเภอ at the end is the part that matters
+                              when sequencing, and it was always the part cut off. */}
+                          <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', lineHeight: 1.45 }}>
                             {s.locationSource === 'override' && <i className="ph ph-map-pin-fill" style={{ color: 'var(--st-ok-fg)', marginRight: 3 }} title="พิกัดถูกแก้ไขแล้ว" />}
                             {s.orderNo} · {s.address}
                           </div>
+                          {s.districtProvince !== '-' && (
+                            <div style={{ fontSize: 10.5, color: 'var(--color-neutral-400)' }}>
+                              <i className="ph ph-map-pin" style={{ marginRight: 3 }} />{s.districtProvince}
+                            </div>
+                          )}
                         </td>
-                        <td style={{ maxWidth: 85, overflow: 'hidden' }}>
-                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, whiteSpace: 'nowrap', maxWidth: 85, overflow: 'hidden', textOverflow: 'ellipsis' }} title={s.zoneName}>
+                        <td style={{ maxWidth: 110, overflow: 'hidden' }}>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, maxWidth: 110, overflow: 'hidden', textOverflow: 'ellipsis' }} title={s.zoneName}>
                             <span style={{ width: 9, height: 9, borderRadius: '50%', background: s.zoneColor, flex: 'none' }} />
                             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.zoneName}</span>
                           </span>
                         </td>
-                        <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{s.amtText}</td>
-                        <td>
-                          {s.isCod ? (
-                            v.canEdit ? (
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
-                                <label className="seg-opt" style={{ fontSize: 10.5 }}>
-                                  <input type="radio" checked={s.codMethod === 'cash'} onChange={s.setCodCash} />สด
-                                </label>
-                                <label className="seg-opt" style={{ fontSize: 10.5 }}>
-                                  <input type="radio" checked={s.codMethod === 'transfer'} onChange={s.setCodTransfer} />โอน
-                                </label>
-                                {s.codMethod === 'cash' && (
-                                  <input className="input" style={{ minHeight: 26, width: 58, fontSize: 11 }} inputMode="numeric" placeholder="เก็บได้" value={s.codCollected} onChange={(e) => s.onCodCollected(e.target.value)} />
-                                )}
-                              </div>
-                            ) : (
-                              <span style={{ fontSize: 11, color: 'var(--color-neutral-400)' }}>{s.codMethod === 'transfer' ? 'โอน' : `สด ${s.codCollected || 0}`}</span>
-                            )
-                          ) : (
-                            <span style={{ fontSize: 11, color: 'var(--color-neutral-600)' }}>—</span>
-                          )}
+                        <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)' }}>
+                          <div style={{ whiteSpace: 'nowrap' }}>{s.itemCount.toLocaleString('en-US')} รายการ</div>
+                          {s.qtyText !== '—' && <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)' }}>{s.qtyText}</div>}
                         </td>
-                        <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{s.distanceText}</td>
-                        <td style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}><span style={s.stStyle}>{s.status || '—'}</span></td>
+                        <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{s.amtText}</td>
+                        {veh.hasLegDistance && (
+                          <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }} title={s.legFromLabel}>
+                            {s.legDistanceText}
+                          </td>
+                        )}
                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                           {v.canEdit && !veh.batchLocked && (
                             <>
@@ -519,7 +542,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                     <th style={{ width: 130 }}>หมายเหตุ</th>
                     <th style={{ width: 85 }}>จำนวน</th>
                     <th style={{ width: 85, textAlign: 'right' }}>ยอดเงิน</th>
-                    <th style={{ width: 65, textAlign: 'right' }}>ระยะ</th>
+                    {v.anyUnassignedDistance && <th style={{ width: 65, textAlign: 'right' }} title="ระยะจากคลัง">ระยะ</th>}
                     <th style={{ width: 130 }}>จัดลงรถ</th>
                     <th style={{ width: 32 }}></th>
                   </tr>
@@ -563,6 +586,14 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                           ) : (
                             o.customer
                           )}
+                          {o.isNewCustomer && (
+                            <span
+                              style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, padding: '2px 7px', borderRadius: 6, background: 'var(--st-ok-bg)', color: 'var(--st-ok-fg)', fontWeight: 600, whiteSpace: 'nowrap' }}
+                              title={`ลูกค้าใหม่ (จากชีต: ${o.newCustomerText})`}
+                            >
+                              <i className="ph ph-star" />ลูกค้าใหม่
+                            </span>
+                          )}
                           {o.wantsTaxInvoice && (
                             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, padding: '2px 7px', borderRadius: 6, background: 'var(--st-info-bg)', color: 'var(--st-info-fg)', whiteSpace: 'nowrap' }}>
                               <i className="ph ph-receipt" />ต้องการใบกำกับ
@@ -578,15 +609,18 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                           )}
                         </div>
                         <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', marginTop: 1 }}>{o.orderNo}</div>
+                        {/* Wraps rather than clipping — the ตำบล/อำเภอ tail is
+                            the part that matters for routing and was exactly
+                            what the old ellipsis cut off. */}
                         <div
                           title={o.locationSource === 'override' ? `${o.address} (พิกัดถูกแก้ไขแล้ว)` : o.address}
-                          style={{ fontSize: 11, color: 'var(--color-neutral-400)', maxWidth: 320, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                          style={{ fontSize: 11, color: 'var(--color-neutral-400)', lineHeight: 1.45 }}
                         >
                           {o.locationSource === 'override' && <i className="ph ph-map-pin-fill" style={{ color: 'var(--st-ok-fg)', marginRight: 3 }} />}
                           {o.address}
                         </div>
                       </td>
-                      <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 110 }} title={o.districtProvince}>{o.districtProvince}</td>
+                      <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', lineHeight: 1.45 }} title={o.districtProvince}>{o.districtProvince}</td>
                       <td style={{ fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.phone}</td>
                       <td style={{ fontSize: 11.5, color: o.packedBy === 'ยังไม่จัด' ? 'var(--color-neutral-600)' : 'var(--color-neutral-300)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 80 }} title={o.packedBy}>{o.packedBy}</td>
                       <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>{o.plannedDeliveryDateText}</td>
@@ -595,7 +629,9 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                       </td>
                       <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 85 }} title={o.qtyText}>{o.qtyText}</td>
                       <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.amtText}</td>
-                      <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.distanceText}</td>
+                      {v.anyUnassignedDistance && (
+                        <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.distanceText}</td>
+                      )}
                       <td>
                         {o.bookedByDriver && o.canDecideBooking ? (
                           rejectingOrderNo === o.orderNo ? (
