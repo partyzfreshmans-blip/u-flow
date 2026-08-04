@@ -2364,6 +2364,87 @@ export async function handleExportRouteOrders(token: string | null, orderNos?: s
   }
 }
 
+/** "Export รายการนี้เป็น Excel" on the Order Management line-items modal —
+ * one order's SKU Detail rows as a .xlsx. Reads the tab through the same
+ * ~60s-cached path the modal's own list read uses, then filters to this
+ * order (the Sheets API can't filter by column value server-side any more
+ * than the old CSV export could). exceljs is dynamically imported for the
+ * same cold-start reason as handleExportRouteOrders above. */
+export async function handleExportOrderLineItems(token: string | null, body: unknown): Promise<ApiResult | FileResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+
+  const { orderNo } = (body ?? {}) as Record<string, unknown>;
+  if (typeof orderNo !== 'string' || orderNo.trim() === '') {
+    return { status: 400, body: { error: 'ต้องระบุเลขคำสั่งซื้อ' } };
+  }
+  const wanted = orderNo.trim();
+
+  try {
+    const { data: rows } = await skuDetailRowsCache.read(async () => {
+      const sheets = await getSheetsClient();
+      const title = await resolveSheetTitle(sheets, SKU_DETAIL_GID);
+      const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${title}!A:Z` });
+      return sheetRowsToRecords(res.data.values ?? []);
+    });
+    const lines = rows.filter((r) => (r[LINE_ITEM_ORDER_NO_HEADER] ?? '').trim() === wanted);
+    if (lines.length === 0) {
+      return { status: 404, body: { error: `ไม่พบรายการสินค้าของออเดอร์ ${wanted} ใน SKU Detail` } };
+    }
+
+    const num = (v: string | undefined) => {
+      const n = Number((v ?? '').replace(/,/g, '').trim());
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    const { default: ExcelJS } = await import('exceljs');
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('รายการสินค้า');
+    sheet.columns = [
+      { header: 'SKU', key: 'sku', width: 16 },
+      { header: 'ชื่อสินค้า', key: 'name', width: 44 },
+      { header: 'หน่วย', key: 'unit', width: 10 },
+      { header: 'จำนวน', key: 'qty', width: 10 },
+      { header: 'ราคา/หน่วย', key: 'unitPrice', width: 13 },
+      { header: 'ส่วนลด', key: 'discount', width: 11 },
+      { header: 'ยอดรวมรายการ', key: 'lineTotal', width: 15 },
+      { header: 'โปรโมชั่นที่ใช้', key: 'promoSku', width: 16 },
+    ];
+    sheet.getRow(1).font = { bold: true };
+    for (const r of lines) {
+      sheet.addRow({
+        sku: (r['SKU'] ?? '').trim(),
+        name: (r['ชื่อสินค้า'] ?? '').trim(),
+        unit: (r['หน่วย'] ?? '').trim(),
+        qty: num(r['จำนวน']),
+        unitPrice: num(r['ราคา/หน่วย']),
+        discount: num(r['ส่วนลด']),
+        lineTotal: num(r['ยอดรวมรายการ']),
+        promoSku: (r['Promo SKU'] ?? '').trim(),
+      });
+    }
+    // Totals row, so the file stands on its own without re-deriving the sum.
+    const totalRow = sheet.addRow({
+      name: 'รวมทั้งบิล',
+      qty: lines.reduce((a, r) => a + num(r['จำนวน']), 0),
+      lineTotal: lines.reduce((a, r) => a + num(r['ยอดรวมรายการ']), 0),
+    });
+    totalRow.font = { bold: true };
+
+    const buffer = (await workbook.xlsx.writeBuffer()) as unknown as Buffer;
+    return {
+      status: 200,
+      filename: `order-${wanted}.xlsx`,
+      contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      buffer,
+    };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'สร้างไฟล์ Excel ไม่สำเร็จ';
+    console.error('[sku-detail/export]', message);
+    return { status: 500, body: { error: message } };
+  }
+}
+
 /**
  * Create-or-update a promotion row in the "โปรโมชั่น" tab, matched by SKU —
  * an existing SKU updates that row in place; a new one is written to the

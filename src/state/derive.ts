@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react';
 import { orders } from '../data/mockData';
 import type { PickLot } from '../data/pickLots';
-import { PROMO_UNITS, type ApiImportOrder, type Order, type OrderLineItem, type Promo, type PromoPackUnit, type PromoUnit, type RouteOrder } from '../data/types';
+import { PROMO_UNITS, type ApiImportOrder, type Order, type OrderLineItem, type Promo, type PromoPackUnit, type PromoUnit, type RouteOrder, type Sku } from '../data/types';
 import { lineDiff, lineNetTotal, receivingFolderKey, recordHasDiscrepancy, recordTotal, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { loadCode } from '../data/vehicles';
 import { nextBatchId, type BatchRoute } from '../data/batchRoutes';
@@ -616,18 +616,70 @@ function promoPriceMatches(promo: Promo, price: number): boolean {
   return points.some((p) => Math.abs(p - price) < 0.01);
 }
 
+/** Per-line stock verdict against the SKU Master (state.skus).
+ *
+ * Deliberately only answers พอ/ไม่พอ when the comparison is like-for-like:
+ * a matching SKU row must exist AND carry the same unit as the line. A line
+ * ordered in ลัง compared against a stock figure counted in ชิ้น would
+ * produce a confidently wrong "ไม่พอ", which is worse for a warehouse than
+ * admitting the data doesn't support an answer — hence the third state the
+ * spec asks for. The tooltip always says which case applied. */
+function stockStatusFor(skus: Sku[], sku: string, unit: string, qty: number): { state: 'ok' | 'short' | 'unknown'; label: string; title: string } {
+  const candidates = skus.filter((s) => s.displayId === sku || s.id === sku);
+  if (candidates.length === 0) return { state: 'unknown', label: 'ไม่มีข้อมูล', title: `ไม่พบ SKU ${sku} ในฐานข้อมูลสินค้า (SKU Master)` };
+  const norm = (u: string) => u.trim().toLowerCase();
+  const sameUnit = candidates.find((s) => norm(s.unit) === norm(unit));
+  if (!sameUnit) {
+    const units = Array.from(new Set(candidates.map((s) => s.unit).filter(Boolean))).join(', ');
+    return {
+      state: 'unknown',
+      label: 'ไม่มีข้อมูล',
+      title: `เทียบสต็อกไม่ได้ — ออเดอร์สั่งเป็น "${unit}" แต่ฐานข้อมูลเก็บสต็อกเป็น "${units || 'ไม่ระบุหน่วย'}"`,
+    };
+  }
+  const enough = sameUnit.stock >= qty;
+  return {
+    state: enough ? 'ok' : 'short',
+    label: enough ? 'พอ' : 'ไม่พอ',
+    title: `สต็อกคงเหลือ ${sameUnit.stock.toLocaleString('en-US')} ${sameUnit.unit} · ออเดอร์นี้ต้องใช้ ${qty.toLocaleString('en-US')} ${unit}`,
+  };
+}
+
 export function computeOrderDetail(state: AppState, actions: AppActions) {
   const total = state.orderDetailLines.reduce((a, l) => a + l.lineTotal, 0);
   const orderNo = state.orderDetailOrderNo;
   const draft = state.orderEditDraft;
   const saveStatus = state.orderSaveStatus[orderNo];
 
+  // Contact/area for the header, read live off the shared order list rather
+  // than snapshotted into its own state when the modal opened — one less
+  // thing to keep in sync, and it picks up a corrected pin's geocode too.
+  const order = state.routeOrders.find((o) => o.orderNo === orderNo) ?? null;
+  const resolvedOrder = order ? resolveRouteOrderLocations([order], state.customers)[0] : null;
+
+  // Footer summary. Quantities are bucketed by unit (same ชิ้น/แพ็ค/ลัง
+  // buckets the planner uses) rather than summed blindly: an order mixing
+  // ชิ้น and ลัง has no single meaningful "total pieces", and printing one
+  // would misstate what's actually being picked.
+  const unitTotals: UnitQty = {};
+  for (const l of state.orderDetailLines) {
+    const detected = detectUnit(l.unit);
+    const bucket = detected === 'หีบ' ? 'ลัง' : detected === 'คู่' ? 'ชิ้น' : detected;
+    unitTotals[bucket] = (unitTotals[bucket] ?? 0) + l.qty;
+  }
+  const skuCount = new Set(state.orderDetailLines.map((l) => l.sku)).size;
+
   return {
     open: state.orderDetailOpen,
     orderNo,
     customer: state.orderDetailCustomer,
+    phone: resolvedOrder?.phone.trim() || '',
+    districtProvince: resolvedOrder ? districtProvinceLabel(resolvedOrder, state.geocodeCache) : '',
     loading: state.orderDetailLoading,
     error: state.orderDetailError,
+    skuCount,
+    skuCountText: `${skuCount.toLocaleString('en-US')} SKU`,
+    qtyTotalText: formatUnitQty(unitTotals),
     lines: state.orderDetailLines.map((l) => {
       const unitPriceText = fmt(l.unitPrice);
       const lineTotalText = fmt(l.lineTotal);
@@ -637,10 +689,14 @@ export function computeOrderDetail(state: AppState, actions: AppActions) {
       // one of that promo's real price points — never a guess from SKU alone.
       const matchedPromo = state.promos.find((p) => p.sku === l.sku && p.st === 'Active' && promoPriceMatches(p, l.unitPrice));
       const isConfirmed = l.promoSku !== '' && l.promoSku === matchedPromo?.sku;
+      const stock = stockStatusFor(state.skus, l.sku, l.unit, l.qty);
       return {
         ...l,
         unitPriceText,
         lineTotalText,
+        stockState: stock.state,
+        stockLabel: stock.label,
+        stockTitle: stock.title,
         matchedPromoSku: matchedPromo?.sku ?? null,
         isConfirmed,
         linkedPromoSku: l.promoSku || null,

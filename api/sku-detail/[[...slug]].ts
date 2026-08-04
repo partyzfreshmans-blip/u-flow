@@ -1,6 +1,7 @@
-import { handleFetchSkuDetailList, handleLinkLineItemPromo } from '../../server/lib.js';
+import { handleExportOrderLineItems, handleFetchSkuDetailList, handleLinkLineItemPromo } from '../../server/lib.js';
 import { bearerToken } from '../../server/session.js';
 import { logUnmatchedRoute, routeSlug } from '../_routing.js';
+import { sendResult } from '../_send.js';
 import type { ApiRequest, ApiResponse } from '../_types.js';
 
 // Consolidates api/sku-detail/link-promo.ts + a new 'list' read route into
@@ -23,6 +24,12 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   if (slug === 'link-promo' && req.method === 'POST') {
     const { status, body } = await handleLinkLineItemPromo(token, req.body);
     res.status(status).json(body);
+    return;
+  }
+  // 'export' streams one order's line items back as a .xlsx instead of JSON —
+  // a sub-route here rather than its own file, same 12-function reason.
+  if (slug === 'export' && req.method === 'POST') {
+    sendResult(res, await handleExportOrderLineItems(token, req.body));
     return;
   }
   logUnmatchedRoute('sku-detail', req, slug);

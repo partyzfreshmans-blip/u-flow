@@ -10,6 +10,7 @@ import {
   handleDecideBooking,
   handleDriveUpload,
   handleExportBatchRouteHistory,
+  handleExportOrderLineItems,
   handleExportRouteOrders,
   handleFetchApiImportOrders,
   handleFetchCsMasterList,
@@ -141,6 +142,10 @@ app.get('/api/sku-detail/list', async (req, res) => {
 app.post('/api/sku-detail/link-promo', async (req, res) => {
   const { status, body } = await handleLinkLineItemPromo(bearerToken(req.headers.authorization), req.body);
   res.status(status).json(body);
+});
+
+app.post('/api/sku-detail/export', async (req, res) => {
+  sendResult(res, await handleExportOrderLineItems(bearerToken(req.headers.authorization), req.body));
 });
 
 app.get('/api/sku-master/list', async (req, res) => {

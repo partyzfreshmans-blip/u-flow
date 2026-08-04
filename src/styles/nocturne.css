@@ -196,18 +196,74 @@ textarea.input { min-height: 90px; resize: vertical; font-family: inherit; }
   position: fixed; inset: 0; display: grid; place-items: center;
   padding: var(--space-4); z-index: 50;
   background: color-mix(in srgb, var(--color-neutral-900) 50%, transparent);
+  /* Without an explicit track the single implicit row is auto-sized, i.e.
+   * indefinite — and a percentage max-height on a grid item can't resolve
+   * against an indefinite track, so .dialog's max-height silently behaves as
+   * `none` and a tall dialog overflows the viewport anyway. Pinning the row
+   * to 1fr of this (definite, inset:0) container makes it resolvable.
+   * minmax(0, 1fr) rather than plain 1fr so the row may also shrink below
+   * its content, which is what lets the dialog cap instead of stretching. */
+  grid-template-rows: minmax(0, 1fr);
 }
 .dialog {
   width: min(440px, 100%); display: flex; flex-direction: column; gap: var(--space-3);
   padding: var(--space-4); border-radius: var(--radius-lg);
   background: var(--color-surface); box-shadow: var(--shadow-lg);
+  /* The backdrop is position:fixed with place-items:center, so without a
+   * ceiling a tall dialog grows past BOTH edges of the viewport with nothing
+   * able to scroll it — which also pushes .dialog-actions (and its ปิด
+   * button) off-screen, making the dialog look like it has no way out.
+   * 100% resolves against the backdrop's content box, i.e. viewport minus
+   * its own padding, so this needs no hardcoded padding maths. */
+  max-height: 100%;
 }
 .dialog-title {
   font-family: var(--font-heading); font-weight: var(--font-heading-weight);
   font-size: 20px;
 }
-.dialog-body { font-size: 14px; opacity: 0.85; }
+/* min-height:0 is what actually lets this flex child shrink below its
+ * content height (min-height:auto is the default and would refuse to), which
+ * is the precondition for overflow-y to ever engage. Together they keep the
+ * title above and the actions below pinned while only the body scrolls. */
+.dialog-body { font-size: 14px; opacity: 0.85; overflow-y: auto; min-height: 0; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-2); }
+
+/* A table whose header stays put while its rows scroll inside .dialog-body.
+ * Sticky must sit on the th cells (a sticky <tr> is not honoured), and the
+ * cells need their own opaque background since .table thead's own background
+ * lives on the row and would let scrolled rows show through. */
+.dialog-sticky-head thead th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--color-surface);
+  box-shadow: inset 0 -1px 0 var(--color-divider);
+}
+
+/* Always-visible summary strip at the bottom of a dialog — outside
+ * .dialog-body so scrolling the body never moves it. */
+.dialog-footer-bar {
+  display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-divider);
+}
+
+/* — printing a dialog —
+ * Hide the app behind the modal rather than unmounting anything: visibility
+ * (unlike display:none) leaves layout intact, so the dialog's own contents
+ * still lay out normally. The body's scroll cap is lifted so a long item
+ * list prints in full instead of only its visible window. */
+@media print {
+  body * { visibility: hidden; }
+  .dialog-backdrop, .dialog-backdrop * { visibility: visible; }
+  .dialog-backdrop {
+    position: absolute; inset: 0; display: block; padding: 0; background: none;
+  }
+  .dialog {
+    width: 100% !important; max-height: none; box-shadow: none; padding: 0;
+  }
+  .dialog-body { overflow: visible !important; max-height: none !important; }
+  .dialog-sticky-head thead th { position: static; }
+  .no-print { display: none !important; }
+}
 
 /* — planner: vehicle list (left) + map (right, sticky while scrolling) —
    align-items isn't set on the grid itself, so both columns stretch to the
