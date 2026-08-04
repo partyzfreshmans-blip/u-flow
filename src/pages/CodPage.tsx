@@ -89,11 +89,17 @@ export function CodPage({ state, actions }: { state: AppState; actions: AppActio
                             <input type="radio" name={`m-${r.id}`} checked={r.isTransfer} onChange={r.setTransfer} disabled={v.codClosed} />
                             <i className="ph ph-bank" />โอน
                           </label>
+                          <label className="seg-opt" style={{ flex: 1, justifyContent: 'center', padding: '5px 8px', fontSize: 12 }}>
+                            <input type="radio" name={`m-${r.id}`} checked={r.isCredit} onChange={r.setCredit} disabled={v.codClosed} />
+                            <i className="ph ph-hourglass" />เครดิต
+                          </label>
                         </div>
                       </td>
                       <td style={{ textAlign: 'right' }}>
-                        {r.isTransfer ? (
-                          <span style={{ fontSize: 12, color: 'var(--color-neutral-600)' }}>ไม่ต้องคืนเงินสด</span>
+                        {!r.isCash ? (
+                          <span style={{ fontSize: 12, color: 'var(--color-neutral-600)' }}>
+                            {r.isCredit ? 'ขายเครดิต ยังไม่เก็บเงิน' : 'ไม่ต้องคืนเงินสด'}
+                          </span>
                         ) : (
                           <input
                             className="input"
@@ -125,6 +131,12 @@ export function CodPage({ state, actions }: { state: AppState; actions: AppActio
                 <span style={{ color: 'var(--color-neutral-500)' }}><i className="ph ph-bank" style={{ marginRight: 5 }} />โอน ({v.transferCount} ออเดอร์)</span>
                 <span style={{ fontVariantNumeric: 'tabular-nums' }}>{v.transferText}</span>
               </div>
+              {v.hasCredit && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5 }}>
+                  <span style={{ color: 'var(--st-warn-fg)' }}><i className="ph ph-hourglass" style={{ marginRight: 5 }} />เครดิต ค้างชำระ ({v.creditCount} ออเดอร์)</span>
+                  <span style={{ fontVariantNumeric: 'tabular-nums' }}>{v.creditText}</span>
+                </div>
+              )}
               <div className="hr" style={{ margin: '2px 0' }} />
               <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: 'var(--color-neutral-400)' }}>เงินสดที่คืนจริง</span><b style={{ fontVariantNumeric: 'tabular-nums' }}>{v.codReturnedText}</b></div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><span style={{ color: 'var(--color-neutral-400)' }}>ส่วนต่างเงินสด</span><span style={v.codDiffStyle}>{v.codDiffText}</span></div>
@@ -178,6 +190,10 @@ export function CodPage({ state, actions }: { state: AppState; actions: AppActio
                           <input type="radio" name={`mm-${r.id}`} checked={r.isTransfer} onChange={r.setTransfer} disabled={v.codClosed} />
                           <i className="ph ph-bank" />โอน
                         </label>
+                        <label className="seg-opt" style={{ flex: 1, justifyContent: 'center' }}>
+                          <input type="radio" name={`mm-${r.id}`} checked={r.isCredit} onChange={r.setCredit} disabled={v.codClosed} />
+                          <i className="ph ph-hourglass" />เครดิต
+                        </label>
                       </div>
                     </div>
                     {r.isCash ? (
@@ -187,7 +203,8 @@ export function CodPage({ state, actions }: { state: AppState; actions: AppActio
                       </div>
                     ) : (
                       <div style={{ display: 'flex', gap: 7, padding: '9px 11px', borderRadius: 9, background: 'var(--st-info-bg)', color: 'var(--st-info-fg)', fontSize: 12 }}>
-                        <i className="ph ph-check-circle-fill" style={{ flex: 'none' }} />โอนเข้าบัญชีแล้ว ไม่ต้องคืนเงินสด
+                        <i className="ph ph-check-circle-fill" style={{ flex: 'none' }} />
+                        {r.isCredit ? 'ขายเครดิต — ยังไม่เก็บเงิน ไม่ต้องคืนเงินสด' : 'โอนเข้าบัญชีแล้ว ไม่ต้องคืนเงินสด'}
                       </div>
                     )}
                   </div>

@@ -66,7 +66,11 @@ export const DELIVERY_FAILED_STATUS_VALUE = 'ส่งไม่สำเร็�
 // lot) can't accidentally write a typo/garbage value into the column. Never
 // includes API Import's own status text (รอยืนยันออเดอร์/กำลังดำเนินการ/etc.)
 // since this app never writes to that column at all anymore.
-const KNOWN_OPERATIONAL_STATUS_VALUES = ['กำลังจัดส่ง', DELIVERED_STATUS_VALUE, DELIVERY_FAILED_STATUS_VALUE];
+/** Driver pushed the stop to a later day (Driver View's "เลื่อนส่ง") — written
+ * alongside a new "วันที่จะจัดส่ง" in the same request, so the sheet records
+ * both what happened and when it's now due. Not a done state. */
+export const POSTPONED_STATUS_VALUE = 'เลื่อนส่ง';
+const KNOWN_OPERATIONAL_STATUS_VALUES = ['กำลังจัดส่ง', DELIVERED_STATUS_VALUE, DELIVERY_FAILED_STATUS_VALUE, POSTPONED_STATUS_VALUE];
 
 // Columns in the "โปรโมชั่น" tab — same header-name lookup approach as the
 // คำสั่งซื้อ tab above (never by fixed position).
@@ -1652,10 +1656,10 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
   if (!isRouteOrdersTabConfigured()) return { status: 500, body: { error: ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE } };
   // Different fields on this one endpoint serve different features with
   // different permission requirements: markDelivered and the
-  // DELIVERY_FAILED_STATUS_VALUE status are the driver's own actions from
-  // Driver View; any other status is the batch-pick-lot close write
-  // (Checker's job, per the permission matrix); everything else is the
-  // Order Management edit form.
+  // DELIVERY_FAILED_STATUS_VALUE / POSTPONED_STATUS_VALUE statuses are the
+  // driver's own three outcomes from Driver View; any OTHER status is the
+  // batch-pick-lot close write (Checker's job, per the permission matrix);
+  // everything else is the Order Management edit form.
   if (markDelivered === true) {
     if (!['administrator', 'manager', 'driver'].includes(payload.role)) {
       return { status: 403, body: { error: 'ไม่มีสิทธิ์ทำเครื่องหมายส่งสำเร็จ' } };
@@ -1663,6 +1667,13 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
   } else if (status === DELIVERY_FAILED_STATUS_VALUE) {
     if (!['administrator', 'manager', 'driver'].includes(payload.role)) {
       return { status: 403, body: { error: 'ไม่มีสิทธิ์ทำเครื่องหมายส่งไม่สำเร็จ' } };
+    }
+  } else if (status === POSTPONED_STATUS_VALUE) {
+    // Postponing also rewrites "วันที่จะจัดส่ง" in the same request — that
+    // pairing is the whole point, so a driver must be able to send both
+    // together rather than being bounced into the checker-only branch below.
+    if (!['administrator', 'manager', 'driver'].includes(payload.role)) {
+      return { status: 403, body: { error: 'ไม่มีสิทธิ์เลื่อนวันจัดส่ง' } };
     }
   } else if (typeof status === 'string') {
     if (!['administrator', 'manager', 'checker'].includes(payload.role)) {

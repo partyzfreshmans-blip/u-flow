@@ -23,11 +23,11 @@ import { coordKey, loadGeocodeCache, saveGeocodeCache, type GeocodeCache } from 
 import { reverseGeocode } from '../data/sources/geocoding';
 import { resolveRouteOrderLocations } from '../data/customerLocation';
 import { GEOCODE_MIN_INTERVAL_MS } from '../config/geocoding';
-import { loadRouteCodState, saveRouteCodState } from '../data/routeCod';
+import { loadRouteCodState, saveRouteCodState, type CodMethod } from '../data/routeCod';
 import { addDays, dayKey, dayKeyToDate, isoToSheetDateText, sheetDateToDayKey, todayDayKey } from '../data/dateUtils';
 import { updateRouteOrder } from '../data/sources/routeOrdersWrite';
 import { bulkArchive, bulkAssign, bulkSetDeliveryDate, bulkSetNote, bulkSetPromotion, bulkSetStatus, bulkSetTaxInvoice, type BulkUpdateFailure } from '../data/sources/routeOrdersBulkWrite';
-import { loadDriverQueue, saveDriverQueue } from '../data/driverQueue';
+import { enqueueDriverItem, loadDriverQueue, loadLastDriverVehicle, saveDriverQueue, saveLastDriverVehicle, type DriverQueueItem } from '../data/driverQueue';
 import { loadPickLots, savePickLots, type PickLot, type PickLotLine } from '../data/pickLots';
 import { loadBatchRoutes, saveBatchRoutes, type BatchRoute } from '../data/batchRoutes';
 import { loadStuckDetachments, saveStuckDetachments, type StuckDetachmentIndex } from '../data/stuckDetachments';
@@ -35,7 +35,7 @@ import { loadDeliveryFailures, saveDeliveryFailures, type DeliveryFailureIndex, 
 import { loadPreDepartureChecklists, savePreDepartureChecklists, type PreDepartureChecklistIndex } from '../data/preDeparture';
 import { loadFailedDeliveryQueue, removeFailedDeliveryQueueItem, saveFailedDeliveryQueueItem, type FailedDeliveryQueueItem } from '../data/failedDeliveryQueue';
 import { fetchBatchRoutes as apiFetchBatchRoutes, upsertBatchRoutes as apiUpsertBatchRoutes } from '../data/sources/batchRoutesApi';
-import { DELIVERED_STATUSES, DELIVERY_FAILED_STATUS, PICK_CLOSED_STATUS } from './helpers';
+import { DELIVERED_STATUSES, DELIVERY_FAILED_STATUS, PICK_CLOSED_STATUS, POSTPONED_STATUS } from './helpers';
 import { effectiveDeliveryDayKey, ordersNeedingStuckBatchDetach } from './derive';
 import type { AttachmentScope } from '../config/drive';
 import type { ApiImportOrder, CsMasterCustomer, OrderLineItem, Promo, PromoPackUnit, PromoTier, PromoUnit, RouteKey, RouteOrder, Sku } from '../data/types';
@@ -164,7 +164,7 @@ export interface AppState {
   plannerDate: string;
   /** COD tracking per order, route-by-route (which vehicle is implied by routePlan). */
   routeCodCollected: Record<string, string>;
-  routeCodMethod: Record<string, 'cash' | 'transfer'>;
+  routeCodMethod: Record<string, CodMethod>;
   /** Direction the "เรียงไกล→ใกล้" button will apply next, per vehicle —
    * toggles each click. Missing = 'far' (the original default). */
   routeSortDirection: Record<string, 'far' | 'near'>;
@@ -216,8 +216,14 @@ export interface AppState {
    * viewing — null = date-selection screen. Reset to null whenever the
    * vehicle changes (see setDriverVehicle). */
   driverSelectedBatchId: string | null;
+  /** ISO day the driver's date picker is showing; '' means "today", resolved
+   * at read time so an app left open overnight rolls over on its own instead
+   * of pinning yesterday. */
+  driverDate: string;
   /** orderNos marked delivered locally but not yet confirmed synced to the sheet. */
-  driverSyncQueue: string[];
+  /** Stop outcomes recorded on the phone but not yet confirmed written back —
+   * delivered marks and postponements alike (see src/data/driverQueue.ts). */
+  driverSyncQueue: DriverQueueItem[];
   driverOnline: boolean;
   /** batchId -> which SKUs are ticked + whether "ยืนยันเริ่มเดินทาง" was
    * pressed for that batch's pre-departure checklist. */
@@ -414,6 +420,16 @@ function initialRouteFromUrl(): Pick<AppState, 'route' | 'driverVehicleId'> {
   return vehicleId ? { route: 'driver', driverVehicleId: vehicleId } : { route: 'dashboard', driverVehicleId: null };
 }
 
+/** The vehicle Driver View was last opened on, for a non-driver account that
+ * picked one by hand. Deliberately only a fallback: an authenticated driver
+ * still lands on their OWN session-assigned vehicle (see initialSession),
+ * and a ?driver= link still wins over both, so this can never be used to
+ * resurface someone else's route. */
+function rememberedDriverVehicle(): string | null {
+  if (typeof window === 'undefined') return null;
+  return loadLastDriverVehicle();
+}
+
 /** Restores a still-valid session from localStorage synchronously at module
  * load (a plain localStorage read, no need for an effect+flash of the login
  * page) and, when one exists, routes straight to that role's default page —
@@ -423,7 +439,11 @@ function initialSession(): Pick<AppState, 'session' | 'route' | 'driverVehicleId
   if (typeof window === 'undefined') return { session: null, route: 'dashboard', driverVehicleId: null };
   const session = loadSession();
   if (!session) return { session: null, route: 'dashboard', driverVehicleId: null };
-  return { session, route: defaultRouteFor(session.role), driverVehicleId: session.role === 'driver' ? session.driverVehicleId : null };
+  return {
+    session,
+    route: defaultRouteFor(session.role),
+    driverVehicleId: session.role === 'driver' ? session.driverVehicleId : rememberedDriverVehicle(),
+  };
 }
 
 /** Fresh create-promo form defaults — 90 days out is a reasonable long-run
@@ -514,6 +534,7 @@ export const initialState: AppState = {
   orderLocationError: null,
 
   driverSelectedBatchId: null,
+  driverDate: '',
   driverSyncQueue: [],
   driverOnline: typeof navigator === 'undefined' || navigator.onLine,
   preDepartureChecklists: {},
@@ -844,16 +865,23 @@ export function useAppStore() {
   function syncDriverQueue() {
     const queue = loadDriverQueue();
     if (queue.length === 0) return;
-    queue.forEach((orderNo) => {
-      updateRouteOrder({ orderNo, markDelivered: true })
+    queue.forEach((item) => {
+      // A postponement writes the new delivery date AND the เลื่อนส่ง status
+      // in one request, so the sheet records both what happened and when the
+      // stop is now due — and both land in the Audit Log together.
+      const write =
+        item.kind === 'postponed'
+          ? updateRouteOrder({ orderNo: item.orderNo, plannedDeliveryDate: item.newDateIso, status: POSTPONED_STATUS })
+          : updateRouteOrder({ orderNo: item.orderNo, markDelivered: true });
+      write
         .then(() => {
-          const next = loadDriverQueue().filter((n) => n !== orderNo);
+          const next = loadDriverQueue().filter((q) => q.orderNo !== item.orderNo);
           saveDriverQueue(next);
           dispatch({ type: 'patch', patch: { driverSyncQueue: next } });
         })
         .catch(() => {
           /* leave it queued — the next online event, interval tick, or
-           * markDelivered call will retry it */
+           * markDelivered/postponeDelivery call will retry it */
         });
     });
   }
@@ -1450,7 +1478,7 @@ export function useAppStore() {
         }
       },
       dismissPlannerAssignSkippedMessage: () => dispatch({ type: 'patch', patch: { plannerAssignSkippedMessage: null } }),
-      saveRouteCod: (collected: Record<string, string>, method: Record<string, 'cash' | 'transfer'>) => {
+      saveRouteCod: (collected: Record<string, string>, method: Record<string, CodMethod>) => {
         saveRouteCodState({ collected, method });
         dispatch({ type: 'patch', patch: { routeCodCollected: collected, routeCodMethod: method } });
       },
@@ -1920,7 +1948,10 @@ export function useAppStore() {
           });
       },
 
-      setDriverVehicle: (vehicleId: string | null) => dispatch({ type: 'patch', patch: { driverVehicleId: vehicleId, driverSelectedBatchId: null } }),
+      setDriverVehicle: (vehicleId: string | null) => {
+        saveLastDriverVehicle(vehicleId);
+        dispatch({ type: 'patch', patch: { driverVehicleId: vehicleId, driverSelectedBatchId: null } });
+      },
       selectDriverBatch: (batchId: string | null) => dispatch({ type: 'patch', patch: { driverSelectedBatchId: batchId } }),
 
       openDeliveryFailureDialog: (orderNo: string) =>
@@ -2011,8 +2042,26 @@ export function useAppStore() {
           statusText: 'ส่งสำเร็จ',
           completedDateText: isoToSheetDateText(todayDayKey()),
         });
-        const queue = loadDriverQueue();
-        const nextQueue = queue.includes(orderNo) ? queue : [...queue, orderNo];
+        const nextQueue = enqueueDriverItem(loadDriverQueue(), { kind: 'delivered', orderNo });
+        saveDriverQueue(nextQueue);
+        dispatch({ type: 'patch', patch: { driverSyncQueue: nextQueue } });
+        syncDriverQueue();
+      },
+      /** "เลื่อนส่ง" — the stop didn't fail, it moved to another day. Applies
+       * the new date + status locally at once (so the driver's list stops
+       * showing it as outstanding immediately) and queues the sheet write on
+       * the same offline-safe outbox as markDelivered, so a postponement made
+       * with no signal is never lost. */
+      postponeDelivery: (orderNo: string, newDateIso: string) => {
+        dispatch({
+          type: 'applyOrderEdit',
+          orderNo,
+          plannedDeliveryDateSheetText: isoToSheetDateText(newDateIso),
+          note: null,
+          wantsTaxInvoice: null,
+        });
+        dispatch({ type: 'applyPickLotStatus', orderNo, statusText: POSTPONED_STATUS });
+        const nextQueue = enqueueDriverItem(loadDriverQueue(), { kind: 'postponed', orderNo, newDateIso });
         saveDriverQueue(nextQueue);
         dispatch({ type: 'patch', patch: { driverSyncQueue: nextQueue } });
         syncDriverQueue();

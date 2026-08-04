@@ -10,7 +10,7 @@ import { coordKey, type GeocodeCache } from '../data/geocodeCache';
 import { resolveRouteOrderLocations } from '../data/customerLocation';
 import { avgPricePerPiece, detectUnit } from '../data/sources/promotionsSheet';
 import { addDays, dayKey, dayKeyToDate, daysBetweenKeys, formatOrderedAt, formatThaiShortDate, formatThaiWeekdayDate, sheetDateTimeToMs, sheetDateToDayKey, suggestedDeliveryDayKey, todayDayKey } from '../data/dateUtils';
-import { badgeStyle, DELIVERED_STATUSES, DELIVERY_DONE_STATUSES, fmt, ORDER_RESOLVED_FOR_BATCH_STATUSES, sheetStatusStyle } from './helpers';
+import { badgeStyle, DELIVERED_STATUSES, DELIVERY_DONE_STATUSES, fmt, ORDER_RESOLVED_FOR_BATCH_STATUSES, POSTPONED_STATUS, sheetStatusStyle } from './helpers';
 import { canBookStop, canCancelBatchRoute, canCancelPickLot, canClosePickLot, canDecideBooking, canEditOrder, canEditPlan, canManageUsers, canPickWork, canViewRawOrderDebug, ROLES, ROLE_LABELS, seesAllActivityLog } from '../config/permissions';
 import type { BookingRow } from '../data/sources/bookingsApi';
 import type { AppActions, AppState } from './store';
@@ -1858,6 +1858,114 @@ type RoutePlanShape = Record<string, string[]>;
  * with no way for a driver to pick a different day; this reads the
  * permanent Batch Route records directly instead; scoped to the driver's
  * own vehicle whenever the account is actually a driver. */
+/** Vehicle picker for Driver View.
+ *
+ * Counts come from state.batchRoutes — the SAME source the date screen and
+ * route detail read — rather than computePlanner's vehicles[], which counts
+ * the admin's live routePlan draft for state.plannerDate. That mismatch is
+ * why a vehicle could advertise "1 จุด (วันนี้)" and then open to
+ * "ยังไม่มีรูทที่มอบหมายให้คันนี้": the draft stop had never been Assigned
+ * into a Batch Route, so the driver had nothing to open. A driver can only
+ * ever act on an assigned batch, so that is what gets counted here. */
+export function computeDriverVehicles(state: AppState) {
+  const byOrderNo = new Map(state.routeOrders.map((o) => [o.orderNo, o]));
+  const today = todayDayKey();
+  const isDriverView = state.session?.role === 'driver';
+  const source = isDriverView ? state.vehicles.filter((v) => v.id === state.session?.driverVehicleId) : state.vehicles;
+
+  return source.map((v) => {
+    const batches = state.batchRoutes.filter((b) => b.vehicleId === v.id && !b.cancelled);
+    const todays = batches.filter((b) => b.deliveryDate === today);
+    const orders = todays.flatMap((b) => b.orderNos.map((no) => byOrderNo.get(no)).filter((o): o is RouteOrder => o != null));
+    const remaining = orders.filter((o) => !ORDER_RESOLVED_FOR_BATCH_STATUSES.includes(o.status)).length;
+    // Upcoming/most recent other date, so a vehicle with nothing today still
+    // says when it does have work instead of just reading as empty.
+    const otherDates = Array.from(new Set(batches.map((b) => b.deliveryDate).filter((d) => d && d !== today))).sort();
+    const nextDate = otherDates.find((d) => d > today) ?? otherDates[otherDates.length - 1] ?? null;
+    const nextDateObj = nextDate ? dayKeyToDate(nextDate) : null;
+    return {
+      id: v.id,
+      name: v.name,
+      loadPrefix: v.loadPrefix,
+      todayStopCount: orders.length,
+      remainingCount: remaining,
+      todayTotalText: fmt(orders.reduce((a, o) => a + o.totalAmount, 0)),
+      hasToday: todays.length > 0,
+      hasAnyRoute: batches.length > 0,
+      nextDateText: nextDateObj ? formatThaiWeekdayDate(nextDateObj) : '',
+    };
+  });
+}
+
+/** Date selection for Driver View — the screen that previously announced
+ * "เลือกวันที่จัดส่ง" while offering no way to pick a date.
+ *
+ * Defaults to today so the common case needs no interaction at all; เมื่อวาน/
+ * วันนี้/พรุ่งนี้ are one tap each and the calendar covers looking further
+ * back. When the chosen day has no route it reports which days DO, so the
+ * driver isn't left guessing at a dead end. */
+export function computeDriverDayPicker(state: AppState, actions: AppActions, vehicleId: string) {
+  const byOrderNo = new Map(state.routeOrders.map((o) => [o.orderNo, o]));
+  const today = todayDayKey();
+  const selected = state.driverDate || today;
+
+  const batches = state.batchRoutes.filter((b) => b.vehicleId === vehicleId && !b.cancelled);
+  const describe = (b: BatchRoute) => {
+    const orders = b.orderNos.map((no) => byOrderNo.get(no)).filter((o): o is RouteOrder => o != null);
+    const doneCount = orders.filter((o) => ORDER_RESOLVED_FOR_BATCH_STATUSES.includes(o.status)).length;
+    return {
+      id: b.id,
+      dateIso: b.deliveryDate,
+      stopCount: b.orderNos.length,
+      doneCount,
+      remainingCount: orders.length - doneCount,
+      totalText: fmt(orders.reduce((a, o) => a + o.totalAmount, 0)),
+      statusLabel: doneCount === 0 ? 'ยังไม่เริ่ม' : doneCount < orders.length ? `ส่งแล้ว ${doneCount}/${orders.length}` : 'ส่งครบแล้ว',
+      statusStyle: doneCount === 0 ? badgeStyle('neutral') : doneCount < orders.length ? badgeStyle('warn') : badgeStyle('ok'),
+      codClosed: b.codClosed,
+    };
+  };
+
+  const onDate = batches.filter((b) => b.deliveryDate === selected).map(describe);
+  // Every other day this vehicle has work, nearest-to-today first — this is
+  // what replaces a bare "ไม่มี" when the picked day is empty.
+  const otherDays = Array.from(new Set(batches.map((b) => b.deliveryDate).filter((d) => d && d !== selected)))
+    .map((iso) => {
+      const d = dayKeyToDate(iso);
+      const stops = batches.filter((b) => b.deliveryDate === iso).reduce((a, b) => a + b.orderNos.length, 0);
+      return {
+        iso,
+        label: d ? formatThaiWeekdayDate(d) : iso,
+        stopCount: stops,
+        isPast: iso < today,
+        go: () => actions.patch({ driverDate: iso }),
+      };
+    })
+    .sort((a, b) => Math.abs(daysBetweenKeys(a.iso, today)) - Math.abs(daysBetweenKeys(b.iso, today)));
+
+  const selectedDate = dayKeyToDate(selected);
+  const shortcut = (iso: string) => ({
+    iso,
+    active: selected === iso,
+    hasRoute: batches.some((b) => b.deliveryDate === iso),
+    go: () => actions.patch({ driverDate: iso }),
+  });
+
+  return {
+    selected,
+    selectedLabel: selectedDate ? formatThaiWeekdayDate(selectedDate) : selected,
+    isToday: selected === today,
+    yesterday: shortcut(dayKey(addDays(new Date(), -1))),
+    today: shortcut(today),
+    tomorrow: shortcut(dayKey(addDays(new Date(), 1))),
+    onPickDate: (iso: string) => actions.patch({ driverDate: iso || today }),
+    routes: onDate,
+    isEmpty: onDate.length === 0,
+    otherDays,
+    hasAnyRoute: batches.length > 0,
+  };
+}
+
 export function computeDriverBatches(state: AppState, vehicleId: string) {
   const byOrderNo = new Map(state.routeOrders.map((o) => [o.orderNo, o]));
   const today = todayDayKey();
@@ -1902,6 +2010,7 @@ export function computeDriverRouteDetail(state: AppState, actions: AppActions, b
   const wh = resolved.find((o) => o.whLat != null && o.whLng != null);
   const warehouse = wh && wh.whLat != null && wh.whLng != null ? { lat: wh.whLat, lng: wh.whLng } : null;
   const vehicle = state.vehicles.find((v) => v.id === batch.vehicleId) ?? null;
+  const orderUnitQty = buildOrderUnitQtyMap(state.orderLineItems);
 
   const stops = batch.orderNos
     .map((no) => byOrderNo.get(no))
@@ -1915,15 +2024,28 @@ export function computeDriverRouteDetail(state: AppState, actions: AppActions, b
             : 0
           : (o.distanceFromWhKm ?? (warehouse && o.lat != null && o.lng != null ? haversineKm(warehouse.lat, warehouse.lng, o.lat, o.lng) : 0));
       const deliveryFailure = state.deliveryFailures[o.orderNo] ?? null;
+      const phone = o.phone.trim();
       return {
         seq: i + 1,
         loadCode: vehicle ? loadCode(vehicle.loadPrefix, i, arr.length) : '',
         orderNo: o.orderNo,
         customer: o.customer,
         address: o.addressFromUnii || o.districtProvince,
-        phone: o.phone,
+        /** Resolved ตำบล/อำเภอ shown under the street line — geocode-preferring,
+         * so it fills in even when the sheet's own column is blank. */
+        districtProvince: districtProvinceLabel(o, state.geocodeCache),
+        phone,
+        /** Empty when the order carries no number, so the card can drop the
+         * call button rather than render a dead tel: link. */
+        telHref: phone ? `tel:${phone.replace(/[^0-9+]/g, '')}` : '',
         amtText: fmt(o.totalAmount),
+        amount: o.totalAmount,
         itemCount: o.itemCount,
+        qtyText: qtyTextForOrder(orderUnitQty, o.orderNo),
+        isNewCustomer: isNewCustomerFlag(o.isNewCustomer),
+        newCustomerText: o.isNewCustomer.trim(),
+        note: o.note.trim(),
+        hasNote: o.note.trim() !== '',
         zoneColor: zone.color,
         distanceText: `${distanceKm.toFixed(1)} กม.`,
         googleMapsUrl:
@@ -1935,7 +2057,12 @@ export function computeDriverRouteDetail(state: AppState, actions: AppActions, b
         codCollected: state.routeCodCollected[o.orderNo] ?? '',
         setCodCash: () => actions.saveRouteCod(state.routeCodCollected, { ...state.routeCodMethod, [o.orderNo]: 'cash' }),
         setCodTransfer: () => actions.saveRouteCod(state.routeCodCollected, { ...state.routeCodMethod, [o.orderNo]: 'transfer' }),
+        setCodCredit: () => actions.saveRouteCod(state.routeCodCollected, { ...state.routeCodMethod, [o.orderNo]: 'credit' }),
         onCodCollected: (val: string) => actions.saveRouteCod({ ...state.routeCodCollected, [o.orderNo]: val.replace(/[^0-9]/g, '') }, state.routeCodMethod),
+        /** Moves the stop to another day rather than failing it — see
+         * postponeDelivery in store.ts (offline-safe, same outbox). */
+        postpone: (newDateIso: string) => actions.postponeDelivery(o.orderNo, newDateIso),
+        isPostponed: o.status === POSTPONED_STATUS,
         status: o.status,
         stStyle: sheetStatusStyle(o.status),
         isDelivered: DELIVERY_DONE_STATUSES.includes(o.status),
@@ -1949,11 +2076,19 @@ export function computeDriverRouteDetail(state: AppState, actions: AppActions, b
   let codCashExpected = 0;
   let codCashCollected = 0;
   for (const s of codStops) {
-    if (s.codMethod === 'transfer') continue;
+    // Transfers are already settled and credit sales have no money in play,
+    // so neither belongs in the cash figure the driver reconciles.
+    if (s.codMethod === 'transfer' || s.codMethod === 'credit') continue;
     codCashExpected += Number(byOrderNo.get(s.orderNo)?.totalAmount ?? 0);
     codCashCollected += Number(s.codCollected || 0);
   }
   const codDiff = codCashCollected - codCashExpected;
+
+  // "เหลืออีกกี่จุด" for the sticky bar — a stop counts as handled once it's
+  // delivered, failed, or postponed (ORDER_RESOLVED_FOR_BATCH_STATUSES);
+  // anything else is still work in front of the driver.
+  const doneCount = stops.filter((s) => ORDER_RESOLVED_FOR_BATCH_STATUSES.includes(s.status)).length;
+  const remainingCount = stops.length - doneCount;
 
   const d = dayKeyToDate(batch.deliveryDate);
   return {
@@ -1961,6 +2096,10 @@ export function computeDriverRouteDetail(state: AppState, actions: AppActions, b
     dateText: d ? formatThaiWeekdayDate(d) : batch.deliveryDate || '—',
     stops,
     stopCount: stops.length,
+    doneCount,
+    remainingCount,
+    progressText: `${doneCount}/${stops.length}`,
+    allDone: stops.length > 0 && remainingCount === 0,
     totalText: fmt(stops.reduce((sum, s) => sum + (byOrderNo.get(s.orderNo)?.totalAmount ?? 0), 0)),
     codCount: codStops.length,
     codCashExpectedText: fmt(codCashExpected),
@@ -2125,6 +2264,9 @@ export function computeBatchRouteHistory(state: AppState, actions: AppActions) {
         const method = state.routeCodMethod[o.orderNo] ?? 'cash';
         if (method === 'transfer') {
           codTransferTotal += o.totalAmount;
+        } else if (method === 'credit') {
+          // Unpaid credit sale — no cash owed back, so deliberately counted
+          // into neither the expected nor the collected cash figure.
         } else {
           codCashExpected += o.totalAmount;
           codCashCollected += Number(state.routeCodCollected[o.orderNo] || 0);
@@ -2563,27 +2705,39 @@ export function computeCod(state: AppState, actions: AppActions) {
   let transferSum = 0;
   let cashReturned = 0;
 
+  let creditSum = 0;
+
   const codRows = codOrders.map((o) => {
     const method = state.routeCodMethod[o.orderNo] ?? 'cash';
     const isTransfer = method === 'transfer';
+    const isCredit = method === 'credit';
     const ret = state.routeCodCollected[o.orderNo] ?? '';
     const retN = ret === '' ? null : Number(ret);
 
     expSum += o.totalAmount;
     if (isTransfer) {
       transferSum += o.totalAmount;
+    } else if (isCredit) {
+      // Goods went out unpaid: no cash for the driver to hand back, so this
+      // must stay out of cashExpected — counting it there would report the
+      // driver as short by the full amount at every clearing.
+      creditSum += o.totalAmount;
     } else {
       cashExpected += o.totalAmount;
       cashReturned += retN || 0;
     }
 
-    // A transfer is already in the company account, so there is no cash to
-    // reconcile — only cash rows can be short or over.
+    // A transfer is already in the company account and a credit sale has no
+    // money in play yet, so neither has cash to reconcile — only cash rows
+    // can be short or over.
     let diffText = '—';
     let diffStyle = badgeStyle('neutral');
     if (isTransfer) {
       diffText = 'โอนแล้ว';
       diffStyle = badgeStyle('info');
+    } else if (isCredit) {
+      diffText = 'เครดิต';
+      diffStyle = badgeStyle('warn');
     } else if (retN != null) {
       const diff = retN - o.totalAmount;
       if (diff === 0) {
@@ -2601,10 +2755,12 @@ export function computeCod(state: AppState, actions: AppActions) {
       expectedText: fmt(o.totalAmount),
       returned: ret,
       isTransfer,
-      isCash: !isTransfer,
-      methodLabel: isTransfer ? 'โอน' : 'เงินสด',
+      isCredit,
+      isCash: !isTransfer && !isCredit,
+      methodLabel: isTransfer ? 'โอน' : isCredit ? 'เครดิต' : 'เงินสด',
       setCash: () => actions.saveRouteCod(state.routeCodCollected, { ...state.routeCodMethod, [o.orderNo]: 'cash' }),
       setTransfer: () => actions.saveRouteCod(state.routeCodCollected, { ...state.routeCodMethod, [o.orderNo]: 'transfer' }),
+      setCredit: () => actions.saveRouteCod(state.routeCodCollected, { ...state.routeCodMethod, [o.orderNo]: 'credit' }),
       diffText,
       diffStyle,
       onInput: (v: string) => actions.saveRouteCod({ ...state.routeCodCollected, [o.orderNo]: v.replace(/[^0-9]/g, '') }, state.routeCodMethod),
@@ -2617,6 +2773,7 @@ export function computeCod(state: AppState, actions: AppActions) {
   const codDiffText = totalDiff === 0 ? 'ยอดตรง' : (totalDiff > 0 ? 'เกิน +' : 'ขาด −') + fmt(Math.abs(totalDiff));
   const codDiffStyle = totalDiff === 0 ? badgeStyle('ok') : badgeStyle('bad');
   const transferCount = codRows.filter((r) => r.isTransfer).length;
+  const creditCount = codRows.filter((r) => r.isCredit).length;
 
   // A batch edited (orders added/removed via "แก้ไข batch") after its COD
   // round was already closed — updatedAt only moves forward on a genuine
@@ -2654,6 +2811,9 @@ export function computeCod(state: AppState, actions: AppActions) {
     transferText: fmt(transferSum),
     transferCount,
     hasTransfer: transferCount > 0,
+    creditText: fmt(creditSum),
+    creditCount,
+    hasCredit: creditCount > 0,
     codReturnedText: fmt(cashReturned),
     codMismatch,
     codDiffText,

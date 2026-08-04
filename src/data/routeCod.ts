@@ -6,11 +6,20 @@
 
 const STORAGE_KEY = 'warehouse-ops.routeCod.v1';
 
+/** How a COD order was settled at the door.
+ *  - cash: driver is holding the money and owes it back at clearing.
+ *  - transfer: already in the company account, nothing to hand back.
+ *  - credit: the customer took the goods without paying yet, so there is no
+ *    money in play now and none is owed back by the driver — it must not be
+ *    counted into the cash reconciliation the way an unpaid cash row would.
+ */
+export type CodMethod = 'cash' | 'transfer' | 'credit';
+
 export interface RouteCodState {
   /** orderNo -> amount actually collected, as typed (digits only). */
   collected: Record<string, string>;
   /** orderNo -> how it was settled. Defaults to cash when absent. */
-  method: Record<string, 'cash' | 'transfer'>;
+  method: Record<string, CodMethod>;
 }
 
 const EMPTY: RouteCodState = { collected: {}, method: {} };

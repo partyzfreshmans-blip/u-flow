@@ -66,6 +66,7 @@ const sheetStatusKind: Record<string, BadgeKind> = {
   'ส่งสำเร็จ': 'ok',
   'กำลังจัดส่ง': 'info',
   'ส่งไม่สำเร็จ': 'bad',
+  'เลื่อนส่ง': 'warn',
 };
 
 /** Written back (via routeOrdersWrite's generic `status` field) when a
@@ -76,6 +77,13 @@ const sheetStatusKind: Record<string, BadgeKind> = {
  * follow-up (redeliver, cancel, etc.), so it should keep surfacing in
  * stuck-order/incomplete tracking like any other still-open order. */
 export const DELIVERY_FAILED_STATUS = 'ส่งไม่สำเร็จ';
+
+/** Driver moved this stop to a later day rather than failing it — the order
+ * gets a new "วันที่จะจัดส่ง" and this status, both written together. Like
+ * DELIVERY_FAILED_STATUS this is deliberately NOT a done state (the delivery
+ * still has to happen), but it IS in ORDER_RESOLVED_FOR_BATCH_STATUSES below
+ * since the truck carrying it today is finished with it. */
+export const POSTPONED_STATUS = 'เลื่อนส่ง';
 
 export function sheetStatusStyle(status: string): CSSProperties {
   return badgeStyle(sheetStatusKind[status] ?? 'neutral');
@@ -110,7 +118,7 @@ export const DELIVERY_DONE_STATUSES = ['ส่งสำเร็จ', 'ได้
  * correct concern from "should this order still occupy a spot on a truck's
  * manifest." Used only to gate the cross-day stuck-order batch-detach
  * mechanism (see derive.ts's ordersNeedingStuckBatchDetach). */
-export const ORDER_RESOLVED_FOR_BATCH_STATUSES = [...DELIVERY_DONE_STATUSES, DELIVERY_FAILED_STATUS];
+export const ORDER_RESOLVED_FOR_BATCH_STATUSES = [...DELIVERY_DONE_STATUSES, DELIVERY_FAILED_STATUS, POSTPONED_STATUS];
 
 /** Narrower than DELIVERY_DONE_STATUSES above — actually-delivered outcomes
  * only, deliberately excluding "ยกเลิก" (an order the customer/Unii itself

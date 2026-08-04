@@ -39,6 +39,8 @@ export function saveDeliveryFailures(index: DeliveryFailureIndex): void {
   }
 }
 
-/** Common reasons a driver picks from — free-text note still available for
- * anything more specific. */
-export const DELIVERY_FAILURE_REASONS = ['ลูกค้าไม่รับสาย/ไม่อยู่', 'ลูกค้าปฏิเสธรับสินค้า', 'ที่อยู่ไม่ถูกต้อง/หาไม่เจอ', 'อื่นๆ'] as const;
+/** The reasons a driver taps in Driver View — deliberately a short, fixed
+ * set rendered as big buttons so reporting a failure needs no typing at all
+ * (a phone keyboard at a shop door is the slowest possible input). The
+ * free-text note is still there for anything more specific, but optional. */
+export const DELIVERY_FAILURE_REASONS = ['ร้านปิด', 'ลูกค้าไม่รับสาย', 'ของไม่ครบ', 'อื่นๆ'] as const;
