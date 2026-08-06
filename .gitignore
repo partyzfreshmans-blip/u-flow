@@ -27,3 +27,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# clasp (Apps Script) — scriptId is per-developer, never committed
+apps-script/.clasp.json

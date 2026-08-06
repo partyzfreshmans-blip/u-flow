@@ -1,0 +1,320 @@
+<script>
+/* DriverJs — the map screen a driver actually uses.
+
+   One pin per stop, coloured by state, and a list showing exactly the same
+   colours so the two never disagree. Stops outside the driver's zones are
+   drawn small and faded and can't be opened: tapping one only says whose
+   zone it is. */
+
+var map = null;
+var stopLayer = null;
+var meMarker = null;
+var refreshTimer = null;
+
+function openDriver() {
+  showScreen('screenDriver');
+  ensureMap();
+  bindDriverControls();
+  $('datePick').value = App.dateKey;
+  markActiveDateButton();
+  loadDay();
+  startAutoRefresh();
+}
+
+function ensureMap() {
+  if (map) { setTimeout(function () { map.invalidateSize(); }, 60); return; }
+  map = L.map('map', { zoomControl: false, attributionControl: true }).setView([18.56, 99.04], 11);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '© OpenStreetMap',
+  }).addTo(map);
+  L.control.zoom({ position: 'topleft' }).addTo(map);
+  stopLayer = L.layerGroup().addTo(map);
+  setTimeout(function () { map.invalidateSize(); }, 60);
+}
+
+var driverControlsBound = false;
+function bindDriverControls() {
+  if (driverControlsBound) return;
+  driverControlsBound = true;
+
+  $('btnToday').onclick = function () { setDate(App.today); };
+  $('btnTomorrow').onclick = function () { setDate(addDays(App.today, 1)); };
+  $('datePick').onchange = function (e) { if (e.target.value) setDate(e.target.value); };
+  $('btnRefresh').onclick = function () { loadDay(true); };
+  $('btnLocate').onclick = locateMe;
+  $('sheetHandle').onclick = function () { $('sheet').classList.toggle('open'); };
+  $('btnSortDistance').onclick = function (e) {
+    e.stopPropagation();
+    if (!App.myPos) { locateMe(true); return; }
+    App.sortByDistance = !App.sortByDistance;
+    renderStopList();
+  };
+}
+
+function setDate(dateKey) {
+  App.dateKey = dateKey;
+  $('datePick').value = dateKey;
+  markActiveDateButton();
+  loadDay();
+}
+
+function markActiveDateButton() {
+  $('btnToday').classList.toggle('on', App.dateKey === App.today);
+  $('btnTomorrow').classList.toggle('on', App.dateKey === addDays(App.today, 1));
+}
+
+/* ---------- loading ---------- */
+
+var loading = false;
+function loadDay(manual) {
+  if (loading) return;
+  loading = true;
+  if (manual) $('btnRefresh').textContent = '…';
+  call('api_driverDay', App.token, App.dateKey).then(function (day) {
+    App.day = day;
+    App.refreshSeconds = day.refreshSeconds || App.refreshSeconds;
+    renderSummary();
+    renderStops();
+    if (manual) toast('อัปเดตแล้ว');
+  }).catch(handleError).then(function () {
+    loading = false;
+    $('btnRefresh').textContent = '↻';
+  });
+}
+
+function startAutoRefresh() {
+  stopAutoRefresh();
+  refreshTimer = setInterval(function () {
+    // Refreshing a backgrounded tab burns battery and quota for nothing.
+    if (document.hidden || App.role !== 'driver') return;
+    loadDay();
+  }, Math.max(10, App.refreshSeconds) * 1000);
+}
+
+function stopAutoRefresh() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = null;
+}
+
+document.addEventListener('visibilitychange', function () {
+  if (!document.hidden && App.role === 'driver' && App.token) loadDay();
+});
+
+/* ---------- rendering ---------- */
+
+function renderSummary() {
+  var s = App.day.summary;
+  $('sumTotal').textContent = s.mineTotal;
+  $('sumClaimed').textContent = s.mineClaimed;
+  $('sumDone').textContent = s.mineDone;
+  $('sumAmount').textContent = baht(s.mineAmount);
+}
+
+function stopState(stop) {
+  if (stop.state === 'done') return 'done';
+  if (stop.state === 'failed') return 'failed';
+  if (stop.state === 'claimed') return stop.mine ? 'mine' : 'taken';
+  return 'available';
+}
+
+var STATE_LABEL = { available: 'ว่าง', mine: 'ฉันจองแล้ว', taken: 'มีคนจองแล้ว', done: 'ส่งแล้ว', failed: 'ส่งไม่สำเร็จ' };
+
+function renderStops() {
+  stopLayer.clearLayers();
+  var bounds = [];
+
+  if (App.day.warehouse && App.day.warehouse.lat) {
+    L.marker([App.day.warehouse.lat, App.day.warehouse.lng], {
+      icon: L.divIcon({ className: '', html: '<div class="pin wh"><span>คลัง</span></div>', iconSize: [34, 22], iconAnchor: [17, 11] }),
+      keyboard: false,
+    }).addTo(stopLayer);
+  }
+
+  App.day.otherStops.forEach(function (stop) {
+    var marker = L.marker([stop.lat, stop.lng], {
+      icon: L.divIcon({ className: '', html: '<div class="pin outside"></div>', iconSize: [20, 20], iconAnchor: [10, 20] }),
+      zIndexOffset: -500,
+    }).addTo(stopLayer);
+    marker.on('click', function () {
+      var owners = stop.ownerNames && stop.ownerNames.length ? stop.ownerNames.join(', ') : 'ยังไม่มีคนขับถือโซนนี้';
+      toast('จุดนี้อยู่โซน ' + stop.zoneName + ' — ' + owners);
+    });
+  });
+
+  App.day.stops.forEach(function (stop) {
+    var state = stopState(stop);
+    var label = stop.orderCount > 1 ? String(stop.orderCount) : '';
+    var marker = L.marker([stop.lat, stop.lng], {
+      icon: L.divIcon({
+        className: '',
+        html: '<div class="pin ' + state + '"><span>' + label + '</span></div>',
+        iconSize: [30, 30],
+        iconAnchor: [15, 30],
+      }),
+    }).addTo(stopLayer);
+    marker.on('click', function () { openStopDetail(stop); });
+    bounds.push([stop.lat, stop.lng]);
+  });
+
+  if (bounds.length) map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
+  renderStopList();
+}
+
+function renderStopList() {
+  var list = $('stopList');
+  clear(list);
+  var stops = App.day.stops.slice();
+
+  if (App.sortByDistance && App.myPos) {
+    stops.forEach(function (s) { s._d = distanceMeters(App.myPos.lat, App.myPos.lng, s.lat, s.lng); });
+    stops.sort(function (a, b) { return a._d - b._d; });
+  }
+
+  $('sheetTitle').textContent = 'จุดส่ง ' + stops.length + ' จุด · ' + thaiDate(App.dateKey);
+  $('btnSortDistance').textContent = App.sortByDistance ? '✓ เรียงตามระยะทาง' : 'เรียงตามระยะทาง';
+
+  if (!stops.length) {
+    list.appendChild(el('div', 'list-empty', 'ไม่มีจุดส่งในโซนของคุณสำหรับวันนี้'));
+    return;
+  }
+
+  stops.forEach(function (stop) {
+    var state = stopState(stop);
+    var card = el('button', 'stop-card');
+    var dot = el('div', 'dot');
+    dot.style.background = 'var(--' + (state === 'taken' ? 'outside' : state) + ')';
+    card.appendChild(dot);
+
+    var body = el('div');
+    body.style.minWidth = '0';
+    body.appendChild(el('div', 'name', stop.customer || '(ไม่มีชื่อลูกค้า)'));
+    var meta = stop.orderCount + ' ออเดอร์ · ' + stop.itemCount + ' รายการ';
+    if (App.sortByDistance && stop._d !== undefined) meta += ' · ' + formatDistance(stop._d);
+    body.appendChild(el('div', 'meta', meta));
+    var badges = el('div');
+    badges.style.marginTop = '4px';
+    var badge = el('span', 'badge ' + (state === 'taken' ? 'flag' : state), state === 'taken' ? (stop.driverName || 'มีคนจองแล้ว') : STATE_LABEL[state]);
+    badges.appendChild(badge);
+    if (stop.coordSource === 'pinfix') {
+      var fixed = el('span', 'badge flag', 'หมุดถูกแก้');
+      fixed.style.marginLeft = '4px';
+      badges.appendChild(fixed);
+    }
+    body.appendChild(badges);
+    card.appendChild(body);
+
+    card.appendChild(el('div', 'amount', baht(stop.amount)));
+    card.onclick = function () { openStopDetail(stop); };
+    list.appendChild(card);
+  });
+}
+
+/* ---------- stop detail ---------- */
+
+function openStopDetail(stop) {
+  var state = stopState(stop);
+  var back = el('div', 'modal-back');
+  var modal = el('div', 'modal');
+
+  modal.appendChild(el('h2', null, stop.customer || '(ไม่มีชื่อลูกค้า)'));
+  var sub = el('div', 'muted small', 'โซน ' + (stop.zoneName || stop.zoneId) + (stop.zoneLocked ? ' (ล็อกไว้ตอนจอง)' : ''));
+  modal.appendChild(sub);
+
+  var badgeRow = el('div', 'section');
+  badgeRow.appendChild(el('span', 'badge ' + (state === 'taken' ? 'flag' : state), state === 'taken' ? ('จองโดย ' + (stop.driverName || '—')) : STATE_LABEL[state]));
+  modal.appendChild(badgeRow);
+
+  var stats = el('div', 'summary section');
+  stats.appendChild(statBox(stop.orderCount, 'ออเดอร์'));
+  stats.appendChild(statBox(stop.itemCount, 'รายการ'));
+  stats.appendChild(statBox(baht(stop.amount), 'ยอดเก็บ (บาท)'));
+  modal.appendChild(stats);
+
+  if (stop.address || stop.subdistrict) {
+    var addr = el('div', 'section');
+    addr.appendChild(el('div', 'small muted', 'ที่อยู่ (ข้อมูลอ้างอิง ไม่ใช้ตัดสินโซน)'));
+    addr.appendChild(el('div', null, stop.address || stop.subdistrict));
+    modal.appendChild(addr);
+  }
+
+  var orders = el('div', 'section');
+  orders.appendChild(el('div', 'small muted', 'ออเดอร์ในจุดนี้'));
+  stop.orders.forEach(function (order) {
+    var line = el('div', 'order-line');
+    var left = el('div');
+    left.appendChild(el('div', null, order.orderNo));
+    left.appendChild(el('div', 'small muted', (order.itemCount || 0) + ' รายการ · ' + (order.payment || '—')));
+    line.appendChild(left);
+    var right = el('div', 'amount');
+    right.style.marginLeft = 'auto';
+    right.textContent = baht(order.amount);
+    line.appendChild(right);
+    orders.appendChild(line);
+  });
+  modal.appendChild(orders);
+
+  var actions = el('div', 'section btn-row');
+  var navButton = el('button', 'btn-lg', 'นำทาง');
+  navButton.onclick = function () {
+    window.open('https://www.google.com/maps/dir/?api=1&destination=' + stop.lat + ',' + stop.lng, '_blank');
+  };
+  actions.appendChild(navButton);
+  if (stop.phoneDial) {
+    var callButton = el('button', 'btn-lg btn-quiet', 'โทร');
+    callButton.onclick = function () { window.open('tel:' + stop.phoneDial, '_self'); };
+    actions.appendChild(callButton);
+  }
+  modal.appendChild(actions);
+
+  var close = el('button', 'btn-ghost btn-lg', 'ปิด');
+  close.style.marginTop = '10px';
+  close.onclick = function () { document.body.removeChild(back); };
+  modal.appendChild(close);
+
+  back.appendChild(modal);
+  back.onclick = function (e) { if (e.target === back) document.body.removeChild(back); };
+  document.body.appendChild(back);
+}
+
+function statBox(value, label) {
+  var box = el('div', 'stat');
+  box.appendChild(el('b', null, value));
+  box.appendChild(el('span', null, label));
+  return box;
+}
+
+/* ---------- my position ---------- */
+
+/** Asked for only when the driver taps the button — never tracked in the
+   background. Same rule the delivery-confirmation GPS will follow. */
+function locateMe(thenSort) {
+  if (!navigator.geolocation) { toast('เครื่องนี้ไม่รองรับการหาตำแหน่ง', true); return; }
+  toast('กำลังหาตำแหน่ง…');
+  navigator.geolocation.getCurrentPosition(function (pos) {
+    App.myPos = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+    if (meMarker) map.removeLayer(meMarker);
+    meMarker = L.circleMarker([App.myPos.lat, App.myPos.lng], {
+      radius: 8, color: '#fff', weight: 3, fillColor: '#10256b', fillOpacity: 1,
+    }).addTo(map);
+    map.setView([App.myPos.lat, App.myPos.lng], 14);
+    if (thenSort) { App.sortByDistance = true; }
+    renderStopList();
+  }, function () {
+    toast('ไม่ได้รับสิทธิ์เข้าถึงตำแหน่ง — เปิดสิทธิ์ในเบราว์เซอร์แล้วลองใหม่', true);
+  }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 });
+}
+
+function distanceMeters(lat1, lng1, lat2, lng2) {
+  var toRad = Math.PI / 180;
+  var dLat = (lat2 - lat1) * toRad;
+  var dLng = (lng2 - lng1) * toRad;
+  var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return 2 * 6371000 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function formatDistance(meters) {
+  return meters < 1000 ? Math.round(meters) + ' ม.' : (meters / 1000).toFixed(1) + ' กม.';
+}
+</script>

@@ -1,0 +1,96 @@
+<!-- Single page shell. Every screen is present in the DOM and toggled with a
+     class — no client-side router, no framework, one page load. -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" crossorigin="" />
+<?!= include('Styles'); ?>
+
+<div id="app">
+
+  <!-- ========== login ========== -->
+  <div class="screen active" id="screenLogin">
+    <div class="login-wrap">
+      <div class="login-title">Unii Routes</div>
+      <div class="muted">สาขา 584 เชียงใหม่–ลำพูน</div>
+
+      <div id="loginStep1">
+        <label>เลือกชื่อคนขับ</label>
+        <div class="driver-grid" id="driverGrid"></div>
+        <div class="list-empty hidden" id="noDrivers">
+          ยังไม่มีคนขับในระบบ — แอดมินต้องเพิ่มคนขับก่อน
+        </div>
+        <button class="btn-ghost btn-lg" id="btnAdminMode" style="margin-top:18px">เข้าหน้าแอดมิน</button>
+      </div>
+
+      <div id="loginStep2" class="hidden">
+        <div class="row" style="margin-top:10px">
+          <button class="btn-quiet" id="btnBackToDrivers">‹ กลับ</button>
+          <div class="spacer"></div>
+          <div style="font-weight:800" id="pinFor"></div>
+        </div>
+        <div class="pin-display" id="pinDots"></div>
+        <div class="keypad" id="keypad"></div>
+        <div class="banner danger hidden" id="pinError"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== driver ========== -->
+  <div class="screen" id="screenDriver">
+    <div class="topbar">
+      <div class="datebar">
+        <button data-day="0" id="btnToday">วันนี้</button>
+        <button data-day="1" id="btnTomorrow">พรุ่งนี้</button>
+        <input type="date" id="datePick" />
+      </div>
+      <div class="summary">
+        <div class="stat"><b id="sumTotal">0</b><span>จุดในโซนฉัน</span></div>
+        <div class="stat"><b id="sumClaimed">0</b><span>จองแล้ว</span></div>
+        <div class="stat"><b id="sumDone">0</b><span>ส่งแล้ว</span></div>
+        <div class="stat"><b id="sumAmount">0</b><span>ยอดรวม (บาท)</span></div>
+      </div>
+    </div>
+
+    <div class="map-wrap">
+      <div id="map"></div>
+      <button class="map-fab locate" id="btnLocate" title="ตำแหน่งฉัน">◎</button>
+      <button class="map-fab refresh" id="btnRefresh" title="รีเฟรช">↻</button>
+
+      <div class="sheet" id="sheet">
+        <div class="sheet-handle" id="sheetHandle">
+          <div style="width:100%">
+            <div class="sheet-grip"></div>
+            <div class="sheet-head" style="margin-top:6px">
+              <b id="sheetTitle">รายการจุดส่ง</b>
+              <div class="spacer"></div>
+              <button class="btn-quiet small" id="btnSortDistance" style="min-height:38px">เรียงตามระยะทาง</button>
+            </div>
+          </div>
+        </div>
+        <div class="sheet-body" id="stopList"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== admin ========== -->
+  <div class="screen" id="screenAdmin">
+    <div class="admin-tabs">
+      <button data-tab="overview" class="on">ภาพรวมวันนี้</button>
+      <button data-tab="clear">ต้องเคลียร์ <span id="clearCount"></span></button>
+      <button data-tab="drivers">คนขับ</button>
+      <button data-tab="zones">โซน</button>
+      <button data-tab="pins">หมุดที่แก้</button>
+      <button data-tab="diag">ตรวจระบบ</button>
+      <button data-tab="exit" class="btn-ghost">ออก</button>
+    </div>
+    <div class="admin-body" id="adminBody"></div>
+  </div>
+
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js" crossorigin=""></script>
+<?!= include('CoreJs'); ?>
+<?!= include('DriverJs'); ?>
+<?!= include('AdminJs'); ?>

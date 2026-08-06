@@ -1,0 +1,577 @@
+<script>
+/* AdminJs — the manager's screens: what today looks like, what needs
+   clearing, and the two things that change how zoning behaves (drivers and
+   polygons). Everything here goes through an admin token. */
+
+var adminTab = 'overview';
+var adminDate = null;
+var zoneMap = null;
+var zoneEditLayer = null;   // the polygon currently being drawn/edited
+var zoneLayerGroup = null;
+var zoneDrawControl = null;
+var editingZone = null;
+
+function openAdmin() {
+  showScreen('screenAdmin');
+  adminDate = adminDate || App.dateKey || App.today;
+  bindAdminTabs();
+  renderAdminTab();
+}
+
+var adminTabsBound = false;
+function bindAdminTabs() {
+  if (adminTabsBound) return;
+  adminTabsBound = true;
+  var buttons = document.querySelectorAll('.admin-tabs button');
+  for (var i = 0; i < buttons.length; i++) {
+    (function (button) {
+      button.onclick = function () {
+        var tab = button.getAttribute('data-tab');
+        if (tab === 'exit') {
+          clearSession();
+          showScreen('screenLogin');
+          backToDrivers();
+          return;
+        }
+        adminTab = tab;
+        for (var j = 0; j < buttons.length; j++) {
+          if (buttons[j].getAttribute('data-tab') !== 'exit') buttons[j].classList.toggle('on', buttons[j] === button);
+        }
+        renderAdminTab();
+      };
+    })(buttons[i]);
+  }
+}
+
+function renderAdminTab() {
+  var body = $('adminBody');
+  clear(body);
+  body.appendChild(el('div', 'muted', 'กำลังโหลด…'));
+  if (adminTab === 'overview') renderOverview();
+  else if (adminTab === 'clear') renderClearList();
+  else if (adminTab === 'drivers') renderDrivers();
+  else if (adminTab === 'zones') renderZones();
+  else if (adminTab === 'pins') renderPins();
+  else if (adminTab === 'diag') renderDiagnostics();
+}
+
+function adminDateBar(onChange) {
+  var bar = el('div', 'datebar');
+  var today = el('button', App.today === adminDate ? 'on' : '', 'วันนี้');
+  today.onclick = function () { adminDate = App.today; onChange(); };
+  bar.appendChild(today);
+  var tomorrow = el('button', addDays(App.today, 1) === adminDate ? 'on' : '', 'พรุ่งนี้');
+  tomorrow.onclick = function () { adminDate = addDays(App.today, 1); onChange(); };
+  bar.appendChild(tomorrow);
+  var picker = el('input');
+  picker.type = 'date';
+  picker.value = adminDate;
+  picker.onchange = function (e) { if (e.target.value) { adminDate = e.target.value; onChange(); } };
+  bar.appendChild(picker);
+  return bar;
+}
+
+/* ---------- overview ---------- */
+
+function renderOverview() {
+  call('api_adminDay', App.token, adminDate).then(function (day) {
+    var body = $('adminBody');
+    clear(body);
+    body.appendChild(adminDateBar(renderOverview));
+
+    var exceptionsTotal = day.exceptions.noCoord.length + day.exceptions.outOfBounds.length + day.exceptions.noZone.length;
+    $('clearCount').textContent = exceptionsTotal ? '(' + exceptionsTotal + ')' : '';
+    if (exceptionsTotal) {
+      var warn = el('div', 'banner danger', 'มี ' + exceptionsTotal + ' จุดที่ต้องเคลียร์ก่อนปล่อยรถ — ดูแท็บ "ต้องเคลียร์"');
+      body.appendChild(warn);
+    }
+
+    var totals = el('div', 'panel');
+    totals.appendChild(el('h3', null, 'สรุป ' + thaiDate(day.dateKey)));
+    var stats = el('div', 'summary');
+    stats.appendChild(statBox(day.totals.stops, 'จุดส่ง'));
+    stats.appendChild(statBox(day.totals.orders, 'ออเดอร์'));
+    stats.appendChild(statBox(day.totals.done, 'ส่งแล้ว'));
+    stats.appendChild(statBox(baht(day.totals.amount), 'ยอดรวม'));
+    totals.appendChild(stats);
+    totals.appendChild(el('div', 'small muted', 'อ่านจากชีต ' + day.counts.rowsScanned + ' แถว · ตรงวันที่ ' + day.counts.rowsForDate + ' แถว · ยังต้องส่ง ' + day.counts.ordersToDeliver + ' ออเดอร์ · ปิดงานแล้ว ' + day.counts.ordersFinished + ' ออเดอร์'));
+    body.appendChild(totals);
+
+    var workload = el('div', 'panel');
+    workload.appendChild(el('h3', null, 'งานของแต่ละคน'));
+    if (!day.workload.length) {
+      workload.appendChild(el('div', 'list-empty', 'ยังไม่มีคนขับที่ใช้งานอยู่'));
+    } else {
+      var table = el('table');
+      table.appendChild(tableHead(['คนขับ', 'จุด', 'ออเดอร์', 'ส่งแล้ว', 'ยอดเงิน']));
+      var tbody = el('tbody');
+      day.workload.sort(function (a, b) { return b.stops - a.stops; }).forEach(function (w) {
+        tbody.appendChild(tableRow([w.driverName || w.driverId, w.stops, w.orders, w.done, baht(w.amount)]));
+      });
+      table.appendChild(tbody);
+      workload.appendChild(table);
+    }
+    body.appendChild(workload);
+  }).catch(handleError);
+}
+
+function tableHead(labels) {
+  var thead = el('thead');
+  var tr = el('tr');
+  labels.forEach(function (label) { tr.appendChild(el('th', null, label)); });
+  thead.appendChild(tr);
+  return thead;
+}
+
+function tableRow(cells) {
+  var tr = el('tr');
+  cells.forEach(function (cell) {
+    if (cell && cell.nodeType) {
+      var td = el('td');
+      td.appendChild(cell);
+      tr.appendChild(td);
+    } else {
+      tr.appendChild(el('td', null, cell === null || cell === undefined ? '' : cell));
+    }
+  });
+  return tr;
+}
+
+/* ---------- things to clear ---------- */
+
+function renderClearList() {
+  call('api_adminDay', App.token, adminDate).then(function (day) {
+    var body = $('adminBody');
+    clear(body);
+    body.appendChild(adminDateBar(renderClearList));
+
+    exceptionPanel(body, 'ไม่มีพิกัด', 'ปักหมุดไม่ได้ ต้องแก้พิกัดลูกค้าก่อน', day.exceptions.noCoord, true);
+    exceptionPanel(body, 'พิกัดน่าสงสัย', 'อยู่นอกกรอบเชียงใหม่–ลำพูน อาจกรอกผิด', day.exceptions.outOfBounds, true);
+    exceptionPanel(body, 'ยังไม่มีโซน', 'ไม่ตกใน polygon ไหนเลย คนขับจะไม่เห็นจุดนี้', day.exceptions.noZone, true);
+    exceptionPanel(body, 'ยังไม่มีคนจอง', 'อยู่ในโซนแล้วแต่ยังไม่มีใครรับ', day.exceptions.unclaimed, false);
+  }).catch(handleError);
+}
+
+function exceptionPanel(body, title, subtitle, items, danger) {
+  var panel = el('div', 'panel');
+  var head = el('h3', null, title + ' (' + items.length + ')');
+  if (items.length && danger) head.style.color = 'var(--failed)';
+  panel.appendChild(head);
+  panel.appendChild(el('div', 'small muted', subtitle));
+  if (!items.length) {
+    panel.appendChild(el('div', 'list-empty', 'ไม่มี'));
+  } else {
+    var table = el('table');
+    table.appendChild(tableHead(['ลูกค้า', 'ออเดอร์', 'ยอด', 'ที่อยู่/โซน']));
+    var tbody = el('tbody');
+    items.forEach(function (item) {
+      tbody.appendChild(tableRow([
+        item.customer || '(ไม่มีชื่อ)',
+        item.orderCount,
+        baht(item.amount),
+        (item.zoneName || '') + (item.address ? ' · ' + item.address : ''),
+      ]));
+    });
+    table.appendChild(tbody);
+    panel.appendChild(table);
+  }
+  body.appendChild(panel);
+}
+
+/* ---------- drivers ---------- */
+
+function renderDrivers() {
+  Promise.all([call('api_adminDrivers', App.token), call('api_adminZones', App.token)]).then(function (results) {
+    var drivers = results[0];
+    var zones = results[1];
+    var body = $('adminBody');
+    clear(body);
+
+    var listPanel = el('div', 'panel');
+    listPanel.appendChild(el('h3', null, 'คนขับ (' + drivers.length + ')'));
+    if (!drivers.length) {
+      listPanel.appendChild(el('div', 'list-empty', 'ยังไม่มีคนขับ — เพิ่มคนแรกด้านล่าง'));
+    } else {
+      var table = el('table');
+      table.appendChild(tableHead(['ชื่อ', 'โซน', 'สถานะ', '']));
+      var tbody = el('tbody');
+      drivers.forEach(function (driver) {
+        var editButton = el('button', 'btn-quiet small', 'แก้ไข');
+        editButton.style.minHeight = '38px';
+        editButton.onclick = function () { fillDriverForm(driver, zones); };
+        tbody.appendChild(tableRow([
+          driver.displayName + ' (' + driver.driverId + ')',
+          driver.zoneIds.join(', ') || '—',
+          driver.active ? 'ใช้งาน' : 'ปิดใช้งาน',
+          editButton,
+        ]));
+      });
+      table.appendChild(tbody);
+      listPanel.appendChild(table);
+    }
+    body.appendChild(listPanel);
+    body.appendChild(driverForm(zones));
+  }).catch(handleError);
+}
+
+function driverForm(zones) {
+  var panel = el('div', 'panel');
+  panel.id = 'driverFormPanel';
+  panel.appendChild(el('h3', null, 'เพิ่ม / แก้ไขคนขับ'));
+
+  panel.appendChild(labelled('รหัสคนขับ (แก้ไม่ได้ภายหลัง)', inputField('dvId', 'text', 'D1')));
+  panel.appendChild(labelled('ชื่อที่แสดง', inputField('dvName', 'text', 'สมชาย')));
+  panel.appendChild(labelled('เบอร์โทร', inputField('dvPhone', 'tel', '08xxxxxxxx')));
+  panel.appendChild(labelled('PIN 4 หลัก (เว้นว่างไว้ = ไม่เปลี่ยน)', inputField('dvPin', 'tel', '••••')));
+  panel.appendChild(labelled('สีประจำตัว', inputField('dvColor', 'color', '')));
+
+  var zoneLabel = el('label', null, 'โซนที่ถือ (เลือกได้หลายโซน)');
+  panel.appendChild(zoneLabel);
+  var chips = el('div', 'chip-list');
+  chips.id = 'dvZones';
+  zones.forEach(function (zone) {
+    var chip = el('button', 'chip', zone.zoneName + ' (' + zone.zoneId + ')');
+    chip.setAttribute('data-zone', zone.zoneId);
+    chip.onclick = function () { chip.classList.toggle('on'); };
+    chips.appendChild(chip);
+  });
+  if (!zones.length) chips.appendChild(el('div', 'list-empty', 'ยังไม่มีโซน — วาดโซนในแท็บ "โซน" ก่อน'));
+  panel.appendChild(chips);
+
+  var activeRow = el('div', 'row');
+  activeRow.style.marginTop = '10px';
+  var activeBox = el('input');
+  activeBox.type = 'checkbox';
+  activeBox.id = 'dvActive';
+  activeBox.checked = true;
+  activeBox.style.width = '22px';
+  activeBox.style.minHeight = '22px';
+  activeRow.appendChild(activeBox);
+  activeRow.appendChild(el('span', null, 'เปิดใช้งาน'));
+  panel.appendChild(activeRow);
+
+  var save = el('button', 'btn-lg', 'บันทึกคนขับ');
+  save.style.marginTop = '12px';
+  save.onclick = saveDriverForm;
+  panel.appendChild(save);
+
+  var reset = el('button', 'btn-ghost btn-lg', 'ล้างฟอร์ม');
+  reset.style.marginTop = '8px';
+  reset.onclick = function () { fillDriverForm(null, zones); };
+  panel.appendChild(reset);
+
+  // Default colour has to be set after the node exists (type=color needs a
+  // valid 7-char hex or it silently falls back to black).
+  setTimeout(function () { if ($('dvColor') && !$('dvColor').value) $('dvColor').value = '#2f6fed'; }, 0);
+  return panel;
+}
+
+function labelled(text, field) {
+  var wrap = el('div');
+  wrap.appendChild(el('label', null, text));
+  wrap.appendChild(field);
+  return wrap;
+}
+
+function inputField(id, type, placeholder) {
+  var field = el('input');
+  field.id = id;
+  field.type = type;
+  if (placeholder) field.placeholder = placeholder;
+  if (type === 'tel') field.setAttribute('inputmode', 'numeric');
+  return field;
+}
+
+function fillDriverForm(driver, zones) {
+  $('dvId').value = driver ? driver.driverId : '';
+  $('dvId').disabled = !!driver;
+  $('dvName').value = driver ? driver.displayName : '';
+  $('dvPhone').value = driver ? driver.phone : '';
+  $('dvPin').value = '';
+  $('dvColor').value = driver ? driver.colorHex : '#2f6fed';
+  $('dvActive').checked = driver ? driver.active : true;
+  var chips = $('dvZones').querySelectorAll('.chip');
+  for (var i = 0; i < chips.length; i++) {
+    var zoneId = chips[i].getAttribute('data-zone');
+    chips[i].classList.toggle('on', !!(driver && driver.zoneIds.indexOf(zoneId) !== -1));
+  }
+  $('driverFormPanel').scrollIntoView({ behavior: 'smooth' });
+}
+
+function saveDriverForm() {
+  var zoneIds = [];
+  var chips = $('dvZones').querySelectorAll('.chip.on');
+  for (var i = 0; i < chips.length; i++) zoneIds.push(chips[i].getAttribute('data-zone'));
+
+  call('api_adminSaveDriver', App.token, {
+    driverId: $('dvId').value.trim(),
+    displayName: $('dvName').value.trim(),
+    phone: $('dvPhone').value.trim(),
+    pin: $('dvPin').value.trim(),
+    colorHex: $('dvColor').value,
+    zoneIds: zoneIds,
+    active: $('dvActive').checked,
+  }).then(function () {
+    toast('บันทึกคนขับแล้ว');
+    renderDrivers();
+  }).catch(handleError);
+}
+
+/* ---------- zones ---------- */
+
+function renderZones() {
+  call('api_adminZones', App.token).then(function (zones) {
+    var body = $('adminBody');
+    clear(body);
+
+    var mapPanel = el('div', 'panel');
+    mapPanel.appendChild(el('h3', null, 'วาดโซนบนแผนที่'));
+    mapPanel.appendChild(el('div', 'small muted', 'กดรูปหลายเหลี่ยมทางซ้ายเพื่อวาดโซนใหม่ หรือกด "แก้รูป" ที่โซนด้านล่างเพื่อแก้ของเดิม'));
+    var wrap = el('div', 'zone-map-wrap');
+    wrap.style.marginTop = '8px';
+    var mapNode = el('div');
+    mapNode.id = 'zoneMap';
+    wrap.appendChild(mapNode);
+    mapPanel.appendChild(wrap);
+
+    var form = el('div');
+    form.style.marginTop = '10px';
+    form.appendChild(labelled('รหัสโซน', inputField('znId', 'text', 'Z1')));
+    form.appendChild(labelled('ชื่อโซน', inputField('znName', 'text', 'Z1 ป่าซาง')));
+    form.appendChild(labelled('สี', inputField('znColor', 'color', '')));
+    form.appendChild(labelled('ลำดับความสำคัญ (เลขน้อยชนะเมื่อโซนทับกัน)', inputField('znPriority', 'number', '100')));
+    var save = el('button', 'btn-lg', 'บันทึกโซน');
+    save.style.marginTop = '12px';
+    save.onclick = saveZoneForm;
+    form.appendChild(save);
+    mapPanel.appendChild(form);
+    body.appendChild(mapPanel);
+
+    var listPanel = el('div', 'panel');
+    listPanel.appendChild(el('h3', null, 'โซนทั้งหมด (' + zones.length + ')'));
+    if (!zones.length) {
+      listPanel.appendChild(el('div', 'list-empty', 'ยังไม่มีโซน'));
+    } else {
+      var table = el('table');
+      table.appendChild(tableHead(['โซน', 'ลำดับ', 'สถานะ', '']));
+      var tbody = el('tbody');
+      zones.forEach(function (zone) {
+        var actions = el('div', 'row');
+        var editButton = el('button', 'btn-quiet small', 'แก้รูป');
+        editButton.style.minHeight = '38px';
+        editButton.onclick = function () { loadZoneForEdit(zone); };
+        actions.appendChild(editButton);
+        var toggle = el('button', 'btn-ghost small', zone.active ? 'ปิด' : 'เปิด');
+        toggle.style.minHeight = '38px';
+        toggle.onclick = function () {
+          call('api_adminSetZoneActive', App.token, zone.zoneId, !zone.active)
+            .then(function () { toast('อัปเดตโซนแล้ว'); renderZones(); })
+            .catch(handleError);
+        };
+        actions.appendChild(toggle);
+
+        var name = el('div');
+        name.appendChild(el('div', null, zone.zoneName));
+        name.appendChild(el('div', 'small muted', zone.zoneId + (zone.broken ? ' · รูปโซนเสีย!' : '')));
+        tbody.appendChild(tableRow([name, zone.priority, zone.active ? 'ใช้งาน' : 'ปิด', actions]));
+      });
+      table.appendChild(tbody);
+      listPanel.appendChild(table);
+    }
+    body.appendChild(listPanel);
+
+    initZoneMap(zones);
+  }).catch(handleError);
+}
+
+function initZoneMap(zones) {
+  // The panel is rebuilt on every save, so the previous map instance and its
+  // listeners have to be torn down or they accumulate for the whole session.
+  if (zoneMap) { zoneMap.remove(); zoneMap = null; }
+  zoneMap = L.map('zoneMap').setView([18.62, 99.0], 10);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(zoneMap);
+
+  zoneLayerGroup = L.featureGroup().addTo(zoneMap);
+  zones.forEach(function (zone) {
+    var rings = ringsFromJson(zone.polygonJson);
+    if (!rings) return;
+    L.polygon(ringsToLatLngs(rings), {
+      color: zone.colorHex,
+      weight: 2,
+      fillOpacity: zone.active ? 0.18 : 0.05,
+      dashArray: zone.active ? null : '6 6',
+    }).bindTooltip(zone.zoneName).addTo(zoneLayerGroup);
+  });
+  if (zoneLayerGroup.getLayers().length) zoneMap.fitBounds(zoneLayerGroup.getBounds(), { padding: [20, 20] });
+
+  var editable = new L.FeatureGroup();
+  zoneMap.addLayer(editable);
+  zoneEditLayer = editable;
+
+  zoneDrawControl = new L.Control.Draw({
+    position: 'topleft',
+    draw: { polygon: { allowIntersection: false, showArea: false }, polyline: false, rectangle: false, circle: false, marker: false, circlemarker: false },
+    edit: { featureGroup: editable, remove: true },
+  });
+  zoneMap.addControl(zoneDrawControl);
+
+  zoneMap.on(L.Draw.Event.CREATED, function (e) {
+    // One shape at a time: a zone is a single polygon, so a new drawing
+    // replaces whatever was staged rather than adding a second shape.
+    editable.clearLayers();
+    editable.addLayer(e.layer);
+  });
+
+  setTimeout(function () { zoneMap.invalidateSize(); }, 80);
+}
+
+function ringsFromJson(json) {
+  try {
+    var parsed = JSON.parse(json);
+    var geometry = parsed && parsed.type === 'Feature' ? parsed.geometry : parsed;
+    var coords = geometry && geometry.coordinates ? geometry.coordinates : geometry;
+    return coords && coords.length ? coords : null;
+  } catch (e) { return null; }
+}
+
+function ringsToLatLngs(rings) {
+  return rings.map(function (ring) {
+    return ring.map(function (point) { return [point[1], point[0]]; });
+  });
+}
+
+function loadZoneForEdit(zone) {
+  editingZone = zone;
+  $('znId').value = zone.zoneId;
+  $('znName').value = zone.zoneName;
+  $('znColor').value = zone.colorHex;
+  $('znPriority').value = zone.priority;
+  var rings = ringsFromJson(zone.polygonJson);
+  zoneEditLayer.clearLayers();
+  if (rings) {
+    var polygon = L.polygon(ringsToLatLngs(rings), { color: zone.colorHex });
+    zoneEditLayer.addLayer(polygon);
+    zoneMap.fitBounds(polygon.getBounds(), { padding: [20, 20] });
+  }
+  toast('กดไอคอนแก้ไข (ดินสอ) เพื่อลากจุด แล้วกด "บันทึกโซน"');
+  $('zoneMap').scrollIntoView({ behavior: 'smooth' });
+}
+
+function saveZoneForm() {
+  var layers = zoneEditLayer.getLayers();
+  if (!layers.length) { toast('ยังไม่ได้วาดรูปโซน', true); return; }
+  var geojson = layers[0].toGeoJSON();
+  var zoneId = $('znId').value.trim();
+  if (!zoneId) { toast('ใส่รหัสโซนก่อน', true); return; }
+
+  call('api_adminSaveZone', App.token, {
+    zoneId: zoneId,
+    zoneName: $('znName').value.trim() || zoneId,
+    colorHex: $('znColor').value,
+    priority: $('znPriority').value,
+    polygonJson: JSON.stringify(geojson.geometry),
+    active: true,
+  }).then(function () {
+    toast('บันทึกโซนแล้ว — คนขับจะเห็นผลทันทีที่รีเฟรช');
+    editingZone = null;
+    renderZones();
+  }).catch(handleError);
+}
+
+/* ---------- pin fixes ---------- */
+
+function renderPins() {
+  call('api_adminPinFixes', App.token).then(function (fixes) {
+    var body = $('adminBody');
+    clear(body);
+    var panel = el('div', 'panel');
+    panel.appendChild(el('h3', null, 'หมุดที่ถูกแก้ (' + fixes.length + ')'));
+    panel.appendChild(el('div', 'small muted', 'คีย์เป็นเบอร์โทร ดังนั้นการแก้ครั้งเดียวมีผลกับออเดอร์ของร้านนั้นทุกครั้งต่อไป'));
+    if (!fixes.length) {
+      panel.appendChild(el('div', 'list-empty', 'ยังไม่มีการแก้หมุด'));
+    } else {
+      var table = el('table');
+      table.appendChild(tableHead(['ลูกค้า / เบอร์', 'พิกัดใหม่', 'พิกัดเดิม', 'โดย', '']));
+      var tbody = el('tbody');
+      fixes.slice().reverse().forEach(function (fix) {
+        var who = el('div');
+        who.appendChild(el('div', null, fix.customerName || '(ไม่มีชื่อ)'));
+        who.appendChild(el('div', 'small muted', fix.phoneRaw + (fix.active ? '' : ' · ยกเลิกแล้ว')));
+
+        var revert = el('div');
+        if (fix.isCurrent) {
+          var button = el('button', 'btn-ghost small', 'ย้อนกลับ');
+          button.style.minHeight = '38px';
+          button.onclick = function () {
+            call('api_adminRevertPinFix', App.token, fix.phone)
+              .then(function () { toast('ย้อนกลับพิกัดเดิมแล้ว'); renderPins(); })
+              .catch(handleError);
+          };
+          revert.appendChild(button);
+        }
+
+        tbody.appendChild(tableRow([
+          who,
+          fix.latNew + ', ' + fix.lngNew,
+          fix.latOld === null ? '—' : fix.latOld + ', ' + fix.lngOld,
+          (fix.fixedBy || '—') + ' · ' + (fix.fixedAt || ''),
+          revert,
+        ]));
+      });
+      table.appendChild(tbody);
+      panel.appendChild(table);
+    }
+    body.appendChild(panel);
+  }).catch(handleError);
+}
+
+/* ---------- diagnostics ---------- */
+
+function renderDiagnostics() {
+  call('api_adminDiagnostics', App.token).then(function (info) {
+    var body = $('adminBody');
+    clear(body);
+
+    var panel = el('div', 'panel');
+    panel.appendChild(el('h3', null, 'คอลัมน์ที่แอพอ่านจากแท็บ "' + info.ordersTab + '"'));
+    panel.appendChild(el('div', 'small muted', 'ถ้าแถวไหนขึ้น "เดาจากตำแหน่งเดิม" แปลว่าหาชื่อหัวตารางไม่เจอ — ตรวจว่าหัวตารางถูกเปลี่ยนชื่อหรือไม่'));
+    var table = el('table');
+    table.appendChild(tableHead(['ฟิลด์', 'คอลัมน์', 'วิธีหา', 'หัวตารางจริง']));
+    var tbody = el('tbody');
+    info.report.forEach(function (item) {
+      var how = item.how === 'header' ? 'ตรงชื่อหัวตาราง' : (item.how === 'fallback' ? '⚠ เดาจากตำแหน่งเดิม' : '✗ ไม่พบ');
+      var row = tableRow([item.field + (item.required ? ' *' : ''), item.column, how, item.actualHeader || '—']);
+      if (item.how !== 'header') row.style.background = 'var(--warn-bg)';
+      tbody.appendChild(row);
+    });
+    table.appendChild(tbody);
+    panel.appendChild(table);
+    body.appendChild(panel);
+
+    var zonePanel = el('div', 'panel');
+    zonePanel.appendChild(el('h3', null, 'โซน'));
+    var zoneTable = el('table');
+    zoneTable.appendChild(tableHead(['โซน', 'ใช้งาน', 'จำนวนจุด', 'สถานะรูป']));
+    var zoneBody = el('tbody');
+    info.zones.forEach(function (zone) {
+      zoneBody.appendChild(tableRow([zone.zoneId, zone.active ? 'ใช่' : 'ไม่', zone.points, zone.broken ? '✗ รูปเสีย' : 'ปกติ']));
+    });
+    zoneTable.appendChild(zoneBody);
+    zonePanel.appendChild(zoneTable);
+    body.appendChild(zonePanel);
+
+    var configPanel = el('div', 'panel');
+    configPanel.appendChild(el('h3', null, 'ค่าตั้งต้น (_CONFIG)'));
+    configPanel.appendChild(el('div', 'small muted', 'เขตเวลา ' + info.timezone + ' · รูปแบบวันที่ ' + (info.localeIsUS ? 'เดือน/วัน/ปี' : 'วัน/เดือน/ปี') + ' · data version ' + info.dataVersion));
+    var configTable = el('table');
+    configTable.appendChild(tableHead(['key', 'value']));
+    var configBody = el('tbody');
+    Object.keys(info.config).forEach(function (key) {
+      configBody.appendChild(tableRow([key, info.config[key]]));
+    });
+    configTable.appendChild(configBody);
+    configPanel.appendChild(configTable);
+    body.appendChild(configPanel);
+  }).catch(handleError);
+}
+</script>
