@@ -117,6 +117,55 @@ function updateObjectRow_(tabName, rowIndex, obj) {
   sheet.getRange(rowIndex, 1, 1, headers.length).setValues([row]);
 }
 
+/**
+ * _ASSIGN rows for one delivery date only.
+ *
+ * This tab is append-only and never pruned, so it grows by roughly a hundred
+ * rows every working day — reading all of it on every request would get
+ * slower for the rest of the app's life. Same two-pass trick the order read
+ * uses: scan the one date column, then read a single block spanning only the
+ * matching rows (they cluster, because rows are appended on the day they
+ * happen).
+ */
+function readAssignRowsForDate_(dateKey) {
+  var sheet = ownSheet_(TAB.assign);
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  var headers = HEADERS._ASSIGN;
+  var dateCol = headers.indexOf('delivery_date') + 1;
+  var dates = sheet.getRange(2, dateCol, lastRow - 1, 1).getValues();
+
+  var first = -1;
+  var last = -1;
+  for (var i = 0; i < dates.length; i++) {
+    if (assignDateKey_(dates[i][0]) !== dateKey) continue;
+    if (first === -1) first = i + 2;
+    last = i + 2;
+  }
+  if (first === -1) return [];
+
+  var values = sheet.getRange(first, 1, last - first + 1, headers.length).getValues();
+  var out = [];
+  for (var r = 0; r < values.length; r++) {
+    if (assignDateKey_(values[r][dateCol - 1]) !== dateKey) continue;
+    var obj = { _row: first + r };
+    for (var c = 0; c < headers.length; c++) obj[headers[c]] = values[r][c];
+    out.push(obj);
+  }
+  return out;
+}
+
+/** This app always writes delivery_date as 'yyyy-MM-dd' text, but a human
+ * editing the tab can leave a real date cell behind — both must compare
+ * equal or a hand-corrected row would silently stop counting. */
+function assignDateKey_(value) {
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return isNaN(value.getTime()) ? '' : Utilities.formatDate(value, tz_(), 'yyyy-MM-dd');
+  }
+  return safeText_(value);
+}
+
 // ---------- _CONFIG ----------
 
 function configMap_() {

@@ -49,6 +49,7 @@ function renderAdminTab() {
   body.appendChild(el('div', 'muted', 'กำลังโหลด…'));
   if (adminTab === 'overview') renderOverview();
   else if (adminTab === 'clear') renderClearList();
+  else if (adminTab === 'stops') renderAdminStops();
   else if (adminTab === 'drivers') renderDrivers();
   else if (adminTab === 'zones') renderZones();
   else if (adminTab === 'pins') renderPins();
@@ -176,6 +177,176 @@ function exceptionPanel(body, title, subtitle, items, danger) {
     panel.appendChild(table);
   }
   body.appendChild(panel);
+}
+
+/* ---------- per-stop control ---------- */
+
+var ADMIN_STATE_LABEL = { available: 'ยังไม่มีคนจอง', claimed: 'จองแล้ว', done: 'ส่งแล้ว', failed: 'ส่งไม่สำเร็จ' };
+
+function renderAdminStops() {
+  call('api_adminDay', App.token, adminDate).then(function (day) {
+    var body = $('adminBody');
+    clear(body);
+    body.appendChild(adminDateBar(renderAdminStops));
+
+    var panel = el('div', 'panel');
+    panel.appendChild(el('h3', null, 'จุดส่งทั้งหมด (' + day.stops.length + ')'));
+    panel.appendChild(el('div', 'small muted', 'มอบหมายให้คนขับคนไหนก็ได้ ไม่ติดเรื่องโซน · "ปล่อยข้ามโซน" คือเปิดให้คนขับทุกคนหยิบเองได้'));
+
+    if (!day.stops.length) {
+      panel.appendChild(el('div', 'list-empty', 'ไม่มีจุดส่งในวันนี้'));
+      body.appendChild(panel);
+      return;
+    }
+
+    day.stops.forEach(function (stop) {
+      panel.appendChild(adminStopCard(stop, day));
+    });
+    body.appendChild(panel);
+  }).catch(handleError);
+}
+
+function adminStopCard(stop, day) {
+  var card = el('div');
+  card.style.cssText = 'border:1px solid var(--line);border-radius:12px;padding:10px;margin-bottom:10px';
+
+  var head = el('div', 'row');
+  var title = el('div');
+  title.style.minWidth = '0';
+  title.appendChild(el('div', null, stop.customer || '(ไม่มีชื่อ)'));
+  title.appendChild(el('div', 'small muted',
+    stop.orderCount + ' ออเดอร์ · ' + baht(stop.amount) + ' บาท · โซน ' + (stop.zoneName || stop.zoneId)));
+  head.appendChild(title);
+  var stateBadge = el('span', 'badge ' + (stop.state === 'done' ? 'done' : stop.state === 'failed' ? 'failed' : stop.state === 'claimed' ? 'mine' : 'available'),
+    ADMIN_STATE_LABEL[stop.state] + (stop.driverName ? ' · ' + stop.driverName : ''));
+  stateBadge.style.marginLeft = 'auto';
+  head.appendChild(stateBadge);
+  card.appendChild(head);
+
+  var flags = el('div');
+  flags.style.marginTop = '4px';
+  if (stop.crossZone) flags.appendChild(el('span', 'badge flag', 'ข้ามโซนได้'));
+  if (stop.coordSource === 'pinfix') flags.appendChild(el('span', 'badge flag', 'หมุดถูกแก้'));
+  (stop.flags || []).forEach(function (flag) {
+    var text = flag === 'no_coord' ? 'ไม่มีพิกัด' : flag === 'out_of_bounds' ? 'พิกัดน่าสงสัย' : 'ยังไม่มีโซน';
+    flags.appendChild(el('span', 'badge failed', text));
+  });
+  if (flags.childNodes.length) card.appendChild(flags);
+
+  var controls = el('div', 'row');
+  controls.style.cssText = 'margin-top:8px;flex-wrap:wrap;gap:6px';
+
+  var picker = el('select');
+  picker.style.cssText = 'flex:1;min-width:140px';
+  picker.appendChild(new Option('— มอบหมายให้ —', ''));
+  day.drivers.forEach(function (driver) {
+    var option = new Option(driver.displayName, driver.driverId);
+    if (driver.driverId === stop.driverId) option.selected = true;
+    picker.appendChild(option);
+  });
+  picker.onchange = function () {
+    if (!picker.value) return;
+    call('api_adminAssign', App.token, adminDate, stop.stopKey, picker.value)
+      .then(function () { toast('มอบหมายแล้ว'); renderAdminStops(); })
+      .catch(handleError);
+  };
+  controls.appendChild(picker);
+
+  if (stop.driverId) {
+    var pull = el('button', 'btn-ghost small', 'ดึงคืน');
+    pull.style.minHeight = '38px';
+    pull.onclick = function () {
+      call('api_adminReleaseStop', App.token, adminDate, stop.stopKey)
+        .then(function () { toast('ดึงคืนแล้ว'); renderAdminStops(); })
+        .catch(handleError);
+    };
+    controls.appendChild(pull);
+  } else {
+    var cross = el('button', stop.crossZone ? 'btn-quiet small' : 'btn-ghost small', stop.crossZone ? 'ปิดข้ามโซน' : 'ปล่อยข้ามโซน');
+    cross.style.minHeight = '38px';
+    cross.onclick = function () {
+      call('api_adminCrossZone', App.token, adminDate, stop.stopKey, !stop.crossZone)
+        .then(function () { toast(stop.crossZone ? 'ปิดการข้ามโซนแล้ว' : 'เปิดให้ข้ามโซนแล้ว'); renderAdminStops(); })
+        .catch(handleError);
+    };
+    controls.appendChild(cross);
+  }
+
+  if (stop.phone) {
+    var movePin = el('button', 'btn-ghost small', 'ย้ายหมุด');
+    movePin.style.minHeight = '38px';
+    movePin.onclick = function () { openPinMover(stop); };
+    controls.appendChild(movePin);
+  }
+
+  card.appendChild(controls);
+  return card;
+}
+
+/** Drag-a-marker pin fix — the retroactive counterpart to the driver's "use my
+   location". Writes the same _PINFIX record with method drag_marker. */
+function openPinMover(stop) {
+  var back = el('div', 'modal-back');
+  var modal = el('div', 'modal');
+  modal.appendChild(el('h2', null, 'ย้ายหมุด'));
+  modal.appendChild(el('div', 'muted', stop.customer || '(ไม่มีชื่อ)'));
+  modal.appendChild(el('div', 'small muted', 'ลากหมุดไปตำแหน่งที่ถูกต้อง แล้วกดบันทึก'));
+
+  var mapWrap = el('div');
+  mapWrap.style.cssText = 'height:48vh;min-height:260px;margin-top:10px;border-radius:12px;overflow:hidden;border:1px solid var(--line);position:relative';
+  var mapNode = el('div');
+  mapNode.id = 'pinMoverMap';
+  mapNode.style.cssText = 'position:absolute;inset:0';
+  mapWrap.appendChild(mapNode);
+  modal.appendChild(mapWrap);
+
+  var readout = el('div', 'small muted center');
+  readout.style.marginTop = '8px';
+  modal.appendChild(readout);
+
+  var save = el('button', 'btn-lg', 'บันทึกพิกัดใหม่');
+  save.style.marginTop = '10px';
+  modal.appendChild(save);
+  var close = el('button', 'btn-ghost btn-lg', 'ยกเลิก');
+  close.style.marginTop = '8px';
+  close.onclick = function () { closeModal(back); };
+  modal.appendChild(close);
+
+  back.appendChild(modal);
+  back.onclick = function (e) { if (e.target === back) closeModal(back); };
+  document.body.appendChild(back);
+
+  // A stop with no coordinate at all still needs somewhere to start from, so
+  // it opens on the warehouse rather than refusing to open.
+  var startLat = stop.lat === null ? 18.5622345 : stop.lat;
+  var startLng = stop.lng === null ? 99.0413487 : stop.lng;
+  var moverMap = L.map('pinMoverMap').setView([startLat, startLng], stop.lat === null ? 11 : 16);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(moverMap);
+  var marker = L.marker([startLat, startLng], { draggable: true }).addTo(moverMap);
+  setTimeout(function () { moverMap.invalidateSize(); }, 80);
+
+  function showPosition() {
+    var pos = marker.getLatLng();
+    readout.textContent = pos.lat.toFixed(6) + ', ' + pos.lng.toFixed(6);
+  }
+  marker.on('drag', showPosition);
+  showPosition();
+
+  save.onclick = function () {
+    var pos = marker.getLatLng();
+    call('api_adminMovePin', App.token, {
+      phone: stop.phoneDial || stop.phone,
+      customerName: stop.customer,
+      lat: pos.lat,
+      lng: pos.lng,
+      latOld: stop.sheetLat,
+      lngOld: stop.sheetLng,
+    }).then(function () {
+      closeModal(back);
+      toast('ย้ายหมุดแล้ว');
+      renderAdminStops();
+    }).catch(handleError);
+  };
 }
 
 /* ---------- drivers ---------- */

@@ -208,6 +208,35 @@ function renderStopList() {
     card.onclick = function () { openStopDetail(stop); };
     list.appendChild(card);
   });
+
+  list.appendChild(dayWrapUp(stops));
+}
+
+/** End-of-day tally at the bottom of the list: what's left, and how much cash
+   the driver should be carrying. Same numbers the manager sees, so a handover
+   at the warehouse doesn't need a phone call to reconcile. */
+function dayWrapUp(stops) {
+  var done = 0;
+  var failed = 0;
+  var remaining = 0;
+  var collected = 0;
+  stops.forEach(function (stop) {
+    var state = stopState(stop);
+    if (state === 'done') { done++; collected += stop.amount; }
+    else if (state === 'failed') failed++;
+    else if (state === 'mine' || state === 'available') remaining++;
+  });
+
+  var panel = el('div', 'panel');
+  panel.style.marginTop = '4px';
+  panel.appendChild(el('h3', null, 'สรุปวันนี้'));
+  var stats = el('div', 'summary');
+  stats.appendChild(statBox(done, 'ส่งแล้ว'));
+  stats.appendChild(statBox(failed, 'ไม่สำเร็จ'));
+  stats.appendChild(statBox(remaining, 'เหลือ'));
+  stats.appendChild(statBox(baht(collected), 'เก็บเงินได้'));
+  panel.appendChild(stats);
+  return panel;
 }
 
 /* ---------- stop detail ---------- */
@@ -254,8 +283,35 @@ function openStopDetail(stop) {
   });
   modal.appendChild(orders);
 
+  // Primary action first and full width: the one thing the driver came here
+  // to press should be under the thumb without aiming.
+  var primary = el('div', 'section');
+  if (state === 'available') {
+    var claimButton = el('button', 'btn-lg', 'จองจุดนี้');
+    claimButton.onclick = function () { closeModal(back); claimStop(stop); };
+    primary.appendChild(claimButton);
+    if (stop.crossZone) primary.appendChild(el('div', 'small muted center', 'แอดมินเปิดให้จองข้ามโซนได้'));
+  } else if (state === 'mine') {
+    var finishButton = el('button', 'btn-lg btn-done', 'ปิดงาน');
+    finishButton.onclick = function () { closeModal(back); openCompleteSheet(stop); };
+    primary.appendChild(finishButton);
+    var releaseButton = el('button', 'btn-ghost btn-lg', 'ปล่อยคืน');
+    releaseButton.style.marginTop = '8px';
+    releaseButton.onclick = function () { closeModal(back); releaseStop(stop); };
+    primary.appendChild(releaseButton);
+  } else if (state === 'taken') {
+    primary.appendChild(el('div', 'banner warn', (stop.driverName || 'คนขับอีกคน') + ' จองจุดนี้ไปแล้ว'));
+  } else if (state === 'done') {
+    primary.appendChild(el('div', 'banner', 'ส่งเรียบร้อยแล้ว'));
+  } else if (state === 'failed') {
+    var reason = '';
+    stop.orders.forEach(function (order) { if (!reason && order.failReason) reason = order.failReason; });
+    primary.appendChild(el('div', 'banner danger', 'ส่งไม่สำเร็จ' + (reason ? ' — ' + reason : '')));
+  }
+  modal.appendChild(primary);
+
   var actions = el('div', 'section btn-row');
-  var navButton = el('button', 'btn-lg', 'นำทาง');
+  var navButton = el('button', 'btn-lg btn-quiet', 'นำทาง');
   navButton.onclick = function () {
     window.open('https://www.google.com/maps/dir/?api=1&destination=' + stop.lat + ',' + stop.lng, '_blank');
   };
@@ -267,14 +323,217 @@ function openStopDetail(stop) {
   }
   modal.appendChild(actions);
 
+  if (stop.phone) {
+    var fixButton = el('button', 'btn-ghost btn-lg', '📍 หมุดผิด — ใช้ตำแหน่งฉันตอนนี้');
+    fixButton.style.marginTop = '8px';
+    fixButton.onclick = function () { closeModal(back); fixPinHere(stop); };
+    modal.appendChild(fixButton);
+    modal.appendChild(el('div', 'small muted center', 'ยืนหน้าร้านแล้วกด — แก้ครั้งเดียวมีผลกับออเดอร์ของร้านนี้ตลอดไป'));
+  }
+
   var close = el('button', 'btn-ghost btn-lg', 'ปิด');
   close.style.marginTop = '10px';
-  close.onclick = function () { document.body.removeChild(back); };
+  close.onclick = function () { closeModal(back); };
   modal.appendChild(close);
 
   back.appendChild(modal);
-  back.onclick = function (e) { if (e.target === back) document.body.removeChild(back); };
+  back.onclick = function (e) { if (e.target === back) closeModal(back); };
   document.body.appendChild(back);
+}
+
+function closeModal(back) {
+  if (back && back.parentNode) back.parentNode.removeChild(back);
+}
+
+/* ---------- claim / release ---------- */
+
+/** Optimistic: the pin turns dark the instant it's tapped, because waiting a
+   second on 4G to find out whether a tap registered is what makes drivers tap
+   twice. If the server says someone else got there first, the change is
+   rolled back and the day reloaded so the map shows the truth. */
+function claimStop(stop) {
+  var before = { state: stop.state, mine: stop.mine, driverName: stop.driverName };
+  stop.state = 'claimed';
+  stop.mine = true;
+  stop.driverName = App.driver.displayName;
+  renderStops();
+  renderSummaryOptimistic(1);
+
+  call('api_driverClaim', App.token, App.dateKey, stop.stopKey).then(function (result) {
+    toast(result.alreadyMine ? 'จุดนี้เป็นของคุณอยู่แล้ว' : 'จองแล้ว — ' + (stop.customer || 'จุดส่ง'));
+    loadDay();
+  }).catch(function (err) {
+    stop.state = before.state;
+    stop.mine = before.mine;
+    stop.driverName = before.driverName;
+    renderStops();
+    toast(err.message, true);
+    loadDay();
+  });
+}
+
+function releaseStop(stop) {
+  if (!window.confirm('ปล่อยจุดนี้คืนให้คนอื่นหยิบต่อ?')) return;
+  var before = { state: stop.state, mine: stop.mine, driverName: stop.driverName };
+  stop.state = 'available';
+  stop.mine = false;
+  stop.driverName = '';
+  renderStops();
+
+  call('api_driverRelease', App.token, App.dateKey, stop.stopKey).then(function () {
+    toast('ปล่อยคืนแล้ว');
+    loadDay();
+  }).catch(function (err) {
+    stop.state = before.state;
+    stop.mine = before.mine;
+    stop.driverName = before.driverName;
+    renderStops();
+    toast(err.message, true);
+    loadDay();
+  });
+}
+
+/** Keeps the counters honest between an optimistic change and the next load. */
+function renderSummaryOptimistic(claimDelta) {
+  App.day.summary.mineClaimed = Math.max(0, App.day.summary.mineClaimed + claimDelta);
+  renderSummary();
+}
+
+/* ---------- closing the job ---------- */
+
+function openCompleteSheet(stop) {
+  var back = el('div', 'modal-back');
+  var modal = el('div', 'modal');
+  modal.appendChild(el('h2', null, 'ปิดงาน'));
+  modal.appendChild(el('div', 'muted', stop.customer || 'จุดส่ง'));
+  modal.appendChild(el('div', 'banner warn', 'ระบบจะเก็บตำแหน่งของคุณเฉพาะตอนกดปุ่มนี้ เพื่อยืนยันว่าไปถึงจริง — ไม่มีการติดตามต่อเนื่อง'));
+
+  var successButton = el('button', 'btn-lg btn-done', '✓ ส่งสำเร็จ · เก็บ ' + baht(stop.amount) + ' บาท');
+  successButton.style.minHeight = '64px';
+  successButton.onclick = function () { closeModal(back); submitCompletion(stop, 'done', '', ''); };
+  modal.appendChild(successButton);
+
+  var failButton = el('button', 'btn-lg btn-danger', '✕ ส่งไม่สำเร็จ');
+  failButton.style.marginTop = '10px';
+  failButton.onclick = function () { closeModal(back); openFailSheet(stop); };
+  modal.appendChild(failButton);
+
+  var close = el('button', 'btn-ghost btn-lg', 'ยกเลิก');
+  close.style.marginTop = '10px';
+  close.onclick = function () { closeModal(back); };
+  modal.appendChild(close);
+
+  back.appendChild(modal);
+  back.onclick = function (e) { if (e.target === back) closeModal(back); };
+  document.body.appendChild(back);
+}
+
+function openFailSheet(stop) {
+  var back = el('div', 'modal-back');
+  var modal = el('div', 'modal');
+  modal.appendChild(el('h2', null, 'ส่งไม่สำเร็จเพราะ'));
+
+  var chosen = null;
+  var noteField = el('input');
+  noteField.type = 'text';
+  noteField.placeholder = 'รายละเอียดเพิ่มเติม (ไม่บังคับ)';
+
+  var reasons = (App.day && App.day.failReasons) || [];
+  var buttons = [];
+  reasons.forEach(function (reason) {
+    var button = el('button', 'btn-ghost btn-lg', reason);
+    button.style.marginTop = '8px';
+    button.onclick = function () {
+      chosen = reason;
+      buttons.forEach(function (other) { other.className = other === button ? 'btn-lg' : 'btn-ghost btn-lg'; });
+      submit.disabled = false;
+    };
+    buttons.push(button);
+    modal.appendChild(button);
+  });
+
+  modal.appendChild(el('label', null, 'หมายเหตุ'));
+  modal.appendChild(noteField);
+
+  var submit = el('button', 'btn-lg btn-danger', 'บันทึกว่าส่งไม่สำเร็จ');
+  submit.style.marginTop = '12px';
+  submit.disabled = true;
+  submit.onclick = function () {
+    closeModal(back);
+    submitCompletion(stop, 'failed', chosen, noteField.value);
+  };
+  modal.appendChild(submit);
+
+  var close = el('button', 'btn-ghost btn-lg', 'ยกเลิก');
+  close.style.marginTop = '8px';
+  close.onclick = function () { closeModal(back); };
+  modal.appendChild(close);
+
+  back.appendChild(modal);
+  back.onclick = function (e) { if (e.target === back) closeModal(back); };
+  document.body.appendChild(back);
+}
+
+function submitCompletion(stop, outcome, failReason, note) {
+  toast('กำลังบันทึกตำแหน่ง…');
+  captureGps().then(function (gps) {
+    return call('api_driverComplete', App.token, App.dateKey, stop.stopKey, {
+      outcome: outcome,
+      failReason: failReason,
+      note: note,
+      gps: gps,
+    });
+  }).then(function (result) {
+    if (result.gpsFlag === 'far') {
+      toast('บันทึกแล้ว — แต่ตำแหน่งห่างจากหมุด ' + formatDistance(result.distance) + ' แอดมินจะเห็นไว้ตรวจ');
+    } else if (result.gpsFlag === 'denied') {
+      toast('บันทึกแล้ว (ไม่ได้รับสิทธิ์ตำแหน่ง)');
+    } else {
+      toast(outcome === 'done' ? 'ส่งสำเร็จแล้ว' : 'บันทึกว่าส่งไม่สำเร็จแล้ว');
+    }
+    loadDay();
+  }).catch(function (err) {
+    toast(err.message, true);
+    loadDay();
+  });
+}
+
+/** Resolves rather than rejects on every failure path: a driver standing at
+   the shop must always be able to close the job, whatever the phone's GPS
+   decided to do. The outcome is recorded as a flag instead. */
+function captureGps() {
+  return new Promise(function (resolve) {
+    if (!navigator.geolocation) { resolve({ status: 'unavailable' }); return; }
+    navigator.geolocation.getCurrentPosition(function (pos) {
+      resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: Math.round(pos.coords.accuracy || 0) });
+    }, function (err) {
+      resolve({ status: err && err.code === 1 ? 'denied' : 'unavailable' });
+    }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 });
+  });
+}
+
+/* ---------- fixing a wrong pin ---------- */
+
+function fixPinHere(stop) {
+  toast('กำลังหาตำแหน่งของคุณ…');
+  captureGps().then(function (gps) {
+    if (!gps || !gps.lat) {
+      toast('ไม่ได้รับตำแหน่ง — เปิดสิทธิ์ตำแหน่งในเบราว์เซอร์แล้วลองใหม่', true);
+      return null;
+    }
+    var away = stop.lat === null ? null : distanceMeters(stop.lat, stop.lng, gps.lat, gps.lng);
+    var message = away === null
+      ? 'บันทึกพิกัดร้านนี้เป็นตำแหน่งปัจจุบันของคุณ?'
+      : 'ย้ายหมุดร้านนี้มาที่ตำแหน่งคุณ (ห่างจากหมุดเดิม ' + formatDistance(away) + ')?';
+    if (!window.confirm(message)) return null;
+    return call('api_driverFixPin', App.token, App.dateKey, stop.stopKey, gps.lat, gps.lng);
+  }).then(function (saved) {
+    if (!saved) return;
+    toast('แก้หมุดแล้ว — ออเดอร์ของร้านนี้ครั้งต่อไปจะใช้พิกัดใหม่');
+    loadDay();
+  }).catch(function (err) {
+    toast(err.message, true);
+  });
 }
 
 function statBox(value, label) {

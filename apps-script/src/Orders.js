@@ -192,6 +192,7 @@ function groupIntoStops_(orders) {
         state: 'available',
         driverId: '',
         driverName: '',
+        crossZone: false,
       };
       stops.push(byKey[key]);
     }
@@ -271,9 +272,9 @@ function applyZones_(stops, zones) {
  * mid-day never pulls a job out of the hands of whoever already took it,
  * while unclaimed stops re-zone immediately.
  */
-function applyAssignments_(stops, dateKey) {
-  var rows = readObjects_(TAB.assign);
+function resolveAssignmentLog_(rows, dateKey) {
   var byOrder = {};
+  var crossZone = {};
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
     if (safeText_(row.delivery_date) !== dateKey) continue;
@@ -281,7 +282,13 @@ function applyAssignments_(stops, dateKey) {
     if (!orderNo) continue;
     var status = safeText_(row.status) || 'available';
     var driverId = safeText_(row.driver_id);
+    var note = safeText_(row.note);
     var current = byOrder[orderNo];
+
+    // The cross-zone grant rides on the note column and is sticky: a driver
+    // releasing the stop afterwards must not quietly re-close it to its zone.
+    if (note.indexOf(CROSS_ZONE_OFF) !== -1) crossZone[orderNo] = false;
+    else if (note.indexOf(CROSS_ZONE_ON) !== -1) crossZone[orderNo] = true;
 
     if (status === 'available') { delete byOrder[orderNo]; continue; } // released
     if (current && current.driverId !== driverId) continue; // someone else already holds it
@@ -294,6 +301,13 @@ function applyAssignments_(stops, dateKey) {
       failReason: safeText_(row.fail_reason),
     };
   }
+  return { byOrder: byOrder, crossZone: crossZone };
+}
+
+function applyAssignments_(stops, dateKey) {
+  var resolved = resolveAssignmentLog_(readAssignRowsForDate_(dateKey), dateKey);
+  var byOrder = resolved.byOrder;
+  var crossZone = resolved.crossZone;
 
   var driverNames = {};
   var drivers = listDrivers_();
@@ -305,12 +319,22 @@ function applyAssignments_(stops, dateKey) {
     var states = [];
     var lockedZone = '';
     for (var o = 0; o < stop.orders.length; o++) {
+      if (crossZone[stop.orders[o].orderNo]) stop.crossZone = true;
       var assignment = byOrder[stop.orders[o].orderNo];
-      if (!assignment) { states.push('available'); continue; }
+      if (!assignment) {
+        // An order added after the stop was claimed has no row of its own
+        // yet. It stays part of the stop and gets one when the driver closes
+        // the job — that's what keeps a late order from becoming a second,
+        // duplicate pin at the same shop.
+        states.push('available');
+        stop.orders[o].assignStatus = 'available';
+        continue;
+      }
       holder = holder || assignment.driverId;
       if (!lockedZone && assignment.zoneLocked) lockedZone = assignment.zoneLocked;
       states.push(assignment.status);
       stop.orders[o].assignStatus = assignment.status;
+      stop.orders[o].failReason = assignment.failReason;
     }
     if (!holder) continue;
 

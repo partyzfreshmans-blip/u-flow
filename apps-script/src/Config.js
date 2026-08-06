@@ -50,6 +50,28 @@ var DONE_STATUSES = ['ยกเลิก', 'ส่งสำเร็จ', 'ไ�
 var ZONE_UNASSIGNED = 'UNASSIGNED';
 var UNASSIGNED_COLOR = '#9397ab';
 
+/** Reasons a driver picks from when a delivery fails. Free text is never
+ * required at the roadside — the list is what makes failures countable
+ * later. "อื่นๆ" exists so nothing gets forced into a wrong bucket; the note
+ * field carries the detail. */
+var FAIL_REASONS = [
+  'ร้านปิด',
+  'ติดต่อลูกค้าไม่ได้',
+  'ลูกค้าขอเลื่อนวันส่ง',
+  'ลูกค้าปฏิเสธรับของ',
+  'ที่อยู่/พิกัดผิด หาไม่เจอ',
+  'ของไม่ครบ / ของเสียหาย',
+  'ลูกค้าไม่มีเงินจ่าย',
+  'อื่นๆ',
+];
+
+/** Marks a stop claimable by any driver regardless of zone ("ปล่อยข้ามโซน").
+ * Written into the note column of an _ASSIGN row — the agreed schema has no
+ * column of its own for it, and adding one would change a layout the manager
+ * already signed off on. */
+var CROSS_ZONE_ON = 'cross_zone';
+var CROSS_ZONE_OFF = 'cross_zone_off';
+
 /** Defaults seeded into _CONFIG on setup. Edit the values in the sheet, not
  * here — cfg_() always prefers the sheet. */
 var CONFIG_DEFAULTS = [

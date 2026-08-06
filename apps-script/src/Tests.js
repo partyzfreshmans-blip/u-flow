@@ -97,9 +97,80 @@ function runTests() {
   check('มีออเดอร์ล้มเหลว = จุดล้มเหลว', rollUpState_(['done', 'failed']), 'failed');
   check('ยังส่งไม่ครบ = จองอยู่', rollUpState_(['done', 'claimed']), 'claimed');
 
+  // ---- the claim log: two drivers racing, releases, cross-zone ----
+  var D = '2026-08-06';
+  var race = resolveAssignmentLog_([
+    logRow_('UM-1', D, 'somchai', 'claimed'),
+    logRow_('UM-1', D, 'somsak', 'claimed'), // arrived second — must lose
+  ], D);
+  check('สองคนจองพร้อมกัน คนแรกชนะ', race.byOrder['UM-1'].driverId, 'somchai');
+
+  var released = resolveAssignmentLog_([
+    logRow_('UM-1', D, 'somchai', 'claimed'),
+    logRow_('UM-1', D, 'somchai', 'available'),
+    logRow_('UM-1', D, 'somsak', 'claimed'),
+  ], D);
+  check('ปล่อยคืนแล้วคนอื่นจองต่อได้', released.byOrder['UM-1'].driverId, 'somsak');
+
+  var closed = resolveAssignmentLog_([
+    logRow_('UM-1', D, 'somchai', 'claimed'),
+    logRow_('UM-1', D, 'somchai', 'done'),
+  ], D);
+  check('เจ้าของปิดงานได้', closed.byOrder['UM-1'].status, 'done');
+
+  var hijack = resolveAssignmentLog_([
+    logRow_('UM-1', D, 'somchai', 'claimed'),
+    logRow_('UM-1', D, 'somsak', 'done'), // not the holder — must be ignored
+  ], D);
+  check('คนที่ไม่ได้จองปิดงานแทนไม่ได้', hijack.byOrder['UM-1'].status, 'claimed');
+
+  var otherDay = resolveAssignmentLog_([logRow_('UM-1', '2026-08-05', 'somchai', 'claimed')], D);
+  check('แถวของวันอื่นไม่ปนเข้ามา', otherDay.byOrder['UM-1'], undefined);
+
+  var crossOn = resolveAssignmentLog_([
+    logRow_('UM-1', D, '', 'available', CROSS_ZONE_ON),
+    logRow_('UM-1', D, 'somsak', 'claimed'),
+    logRow_('UM-1', D, 'somsak', 'available', 'released_by_driver'),
+  ], D);
+  check('ปล่อยข้ามโซนยังอยู่หลังคนขับปล่อยคืน', crossOn.crossZone['UM-1'], true);
+  var crossOff = resolveAssignmentLog_([
+    logRow_('UM-1', D, '', 'available', CROSS_ZONE_ON),
+    logRow_('UM-1', D, '', 'available', CROSS_ZONE_OFF),
+  ], D);
+  check('ปิดข้ามโซนแล้วกลับเป็นปกติ', crossOff.crossZone['UM-1'], false);
+
+  // ---- GPS at close ----
+  var pin = { lat: 18.5, lng: 99.0 };
+  check('ไม่ให้สิทธิ์ตำแหน่ง = denied', evaluateGps_(pin, { status: 'denied' }).flag, 'denied');
+  check('ไม่มีค่าตำแหน่ง = unavailable', evaluateGps_(pin, { status: 'unavailable' }).flag, 'unavailable');
+  check('ยืนตรงหมุด = ok', evaluateGps_(pin, { lat: 18.5, lng: 99.0, accuracy: 10 }).flag, 'ok');
+  // ~1.1km away with a tight reading: genuinely far.
+  check('ห่างจากหมุดมาก = far', evaluateGps_(pin, { lat: 18.51, lng: 99.0, accuracy: 10 }).flag, 'far');
+  // Same distance, but the phone itself admits ±2km of error — flagging this
+  // would bury the real cases in noise.
+  check('ห่างเท่ากันแต่ความแม่นยำแย่ = ok', evaluateGps_(pin, { lat: 18.51, lng: 99.0, accuracy: 2000 }).flag, 'ok');
+  check('บันทึกระยะห่างเป็นเมตร', evaluateGps_(pin, { lat: 18.51, lng: 99.0, accuracy: 10 }).distance > 1000, true);
+  check('จุดที่ไม่มีพิกัดไม่คำนวณระยะ', evaluateGps_({ lat: null, lng: null }, { lat: 18.5, lng: 99.0, accuracy: 5 }).distance, '');
+
   var failed = results.filter(function (r) { return r.indexOf('FAIL') === 0; }).length;
   var summary = (failed ? failed + ' ข้อไม่ผ่าน' : 'ผ่านทั้งหมด') + ' (' + results.length + ' ข้อ)';
   return { summary: summary, failed: failed, lines: results };
+}
+
+/** One _ASSIGN row as readObjects_ hands it over. */
+function logRow_(orderNo, dateKey, driverId, status, note) {
+  return {
+    order_no: orderNo,
+    delivery_date: dateKey,
+    stop_key: 'p:823848337',
+    driver_id: driverId,
+    zone_id_locked: 'Z1',
+    status: status,
+    claimed_at: '',
+    done_at: '',
+    fail_reason: '',
+    note: note || '',
+  };
 }
 
 /** Minimal order shaped exactly like computeDay_ builds them. */

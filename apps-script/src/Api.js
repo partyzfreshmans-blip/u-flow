@@ -106,14 +106,23 @@ function api_driverDay(token, dateKey) {
 
     var mine = [];
     var others = [];
-    var summary = { mineTotal: 0, mineClaimed: 0, mineDone: 0, mineAmount: 0 };
+    var summary = { mineTotal: 0, mineClaimed: 0, mineDone: 0, mineAmount: 0, mineCollected: 0 };
 
     for (var s = 0; s < day.stops.length; s++) {
       var stop = day.stops[s];
-      if (stop.lat === null || stop.lng === null) continue;
-      if (stop.zoneId === ZONE_UNASSIGNED) continue;
+      if (stop.lat === null || stop.lng === null) continue; // can't be put on a map at all
 
-      if (myZones[stop.zoneId]) {
+      // A stop already assigned to this driver is always visible to them,
+      // even when it sits outside their zones or has no zone at all — that's
+      // how an admin hand-assignment reaches the person it was given to.
+      // Without this, "ปล่อยข้ามโซน" and manual assignment would both drop
+      // the stop into a hole nobody sees.
+      var isMine = stop.driverId && stop.driverId === driver.driverId;
+      if (!isMine && !stop.crossZone && stop.zoneId === ZONE_UNASSIGNED) continue; // admin's to clear
+
+      // crossZone is the admin's per-stop override: the stop behaves as if it
+      // were in this driver's zone, for every driver, until it's claimed.
+      if (isMine || myZones[stop.zoneId] || stop.crossZone) {
         var copy = cloneStop_(stop);
         copy.mine = stop.driverId === driver.driverId;
         copy.canInteract = true;
@@ -122,6 +131,7 @@ function api_driverDay(token, dateKey) {
         summary.mineAmount += stop.amount;
         if (stop.state === 'claimed' && copy.mine) summary.mineClaimed++;
         if (stop.state === 'done') summary.mineDone++;
+        if (stop.state === 'done' && copy.mine) summary.mineCollected += stop.amount;
       } else {
         others.push({
           stopKey: stop.stopKey,
@@ -144,8 +154,77 @@ function api_driverDay(token, dateKey) {
       summary: summary,
       warehouse: day.warehouse,
       refreshSeconds: cfgNum_('REFRESH_SECONDS', 20),
+      failReasons: FAIL_REASONS,
       generatedAt: day.generatedAt,
     };
+  });
+}
+
+// ---------- driver actions (claim / release / close / fix pin) ----------
+
+function api_driverClaim(token, dateKey, stopKey) {
+  return guard_(function () {
+    var auth = requireDriver_(token);
+    if (!auth.driver) throw new Error('บัญชีนี้ไม่ใช่คนขับ');
+    var result = claimStop_(auth.driver, normalizeRequestedDate_(dateKey), safeText_(stopKey));
+    return { alreadyMine: result.alreadyMine, stop: result.stop };
+  });
+}
+
+function api_driverRelease(token, dateKey, stopKey) {
+  return guard_(function () {
+    var auth = requireDriver_(token);
+    if (!auth.driver) throw new Error('บัญชีนี้ไม่ใช่คนขับ');
+    return releaseStop_(auth.driver, normalizeRequestedDate_(dateKey), safeText_(stopKey));
+  });
+}
+
+/** `payload.gps` is whatever the phone managed to produce at the moment the
+ * button was pressed — including { status: 'denied' } when the driver refused.
+ * None of those outcomes blocks the close. */
+function api_driverComplete(token, dateKey, stopKey, payload) {
+  return guard_(function () {
+    var auth = requireDriver_(token);
+    if (!auth.driver) throw new Error('บัญชีนี้ไม่ใช่คนขับ');
+    var body = payload || {};
+    return completeStop_(
+      auth.driver,
+      normalizeRequestedDate_(dateKey),
+      safeText_(stopKey),
+      safeText_(body.outcome),
+      body.gps,
+      body.failReason,
+      body.note
+    );
+  });
+}
+
+/** "ใช้ตำแหน่งฉันตอนนี้" — the driver is standing at the shop, which is the
+ * most accurate fix this data will ever get. Keyed by phone, so it applies to
+ * every future order from the same shop. */
+function api_driverFixPin(token, dateKey, stopKey, lat, lng) {
+  return guard_(function () {
+    var auth = requireDriver_(token);
+    if (!auth.driver) throw new Error('บัญชีนี้ไม่ใช่คนขับ');
+    var date = normalizeRequestedDate_(dateKey);
+    var day = buildDay_(date);
+    var stop = null;
+    for (var i = 0; i < day.stops.length; i++) {
+      if (day.stops[i].stopKey === safeText_(stopKey)) stop = day.stops[i];
+    }
+    if (!stop) throw new Error('ไม่พบจุดส่งนี้');
+    if (!stop.phone) throw new Error('จุดนี้ไม่มีเบอร์โทร แก้หมุดถาวรไม่ได้ — แจ้งแอดมิน');
+
+    savePinFix_({
+      phone: stop.phoneDial || stop.phone,
+      customerName: stop.customer,
+      latNew: lat,
+      lngNew: lng,
+      latOld: stop.sheetLat,
+      lngOld: stop.sheetLng,
+      method: 'current_location',
+    }, auth.driver.displayName);
+    return true;
   });
 }
 
@@ -241,9 +320,54 @@ function api_adminDay(token, dateKey) {
       exceptions: exceptions,
       workload: workload,
       zoneOwners: zoneOwners,
+      drivers: drivers.filter(function (d) { return d.active; }).map(function (d) {
+        return { driverId: d.driverId, displayName: d.displayName, zoneIds: d.zoneIds };
+      }),
       warehouse: day.warehouse,
       generatedAt: day.generatedAt,
     };
+  });
+}
+
+// ---------- admin actions on a single stop ----------
+
+function api_adminAssign(token, dateKey, stopKey, driverId) {
+  return guard_(function () {
+    requireAdmin_(token);
+    return adminAssignStop_(normalizeRequestedDate_(dateKey), safeText_(stopKey), safeText_(driverId));
+  });
+}
+
+function api_adminReleaseStop(token, dateKey, stopKey) {
+  return guard_(function () {
+    requireAdmin_(token);
+    return adminReleaseStop_(normalizeRequestedDate_(dateKey), safeText_(stopKey));
+  });
+}
+
+function api_adminCrossZone(token, dateKey, stopKey, allow) {
+  return guard_(function () {
+    requireAdmin_(token);
+    return adminSetCrossZone_(normalizeRequestedDate_(dateKey), safeText_(stopKey), !!allow);
+  });
+}
+
+/** Dragging a pin on the admin map — the retroactive counterpart to a
+ * driver's "use my location". Same _PINFIX record, different method. */
+function api_adminMovePin(token, payload) {
+  return guard_(function () {
+    requireAdmin_(token);
+    var body = payload || {};
+    savePinFix_({
+      phone: body.phone,
+      customerName: body.customerName,
+      latNew: body.lat,
+      lngNew: body.lng,
+      latOld: body.latOld,
+      lngOld: body.lngOld,
+      method: 'drag_marker',
+    }, 'admin');
+    return true;
   });
 }
 
