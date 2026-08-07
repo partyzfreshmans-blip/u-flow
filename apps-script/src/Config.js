@@ -6,16 +6,21 @@
  * file only holds its default.
  */
 
-/** The spreadsheet this script is meant to be bound to. The script uses
- * SpreadsheetApp.getActive() (so it needs only the narrow
- * `spreadsheets.currentonly` OAuth scope), and checks the active file's id
- * against this constant — a script accidentally bound to a copy of the sheet
- * fails loudly here instead of silently reading the wrong data. */
-var EXPECTED_SPREADSHEET_ID = '1m1Cb_BEwPjqF3CgXNssGgjyewIgPNw_BU4EkduuV59U';
+/**
+ * Two spreadsheets, and the whole safety model rests on the split:
+ *
+ *   - This script is BOUND to its own file ("Unii Routes 584"), which holds
+ *     every "_" tab it writes. SpreadsheetApp.getActive() is that file.
+ *   - The warehouse ops file below is opened separately and only ever read.
+ *     No write path in this project can address it — see SheetIO.js.
+ *
+ * Keeping them apart means the ops file gains no new tabs, no menu, and no
+ * way for a bug here to touch the API-synced data or the ARRAYFORMULAs.
+ */
+var ORDERS_SHEET_ID = '1m1Cb_BEwPjqF3CgXNssGgjyewIgPNw_BU4EkduuV59U';
 
-/** Source tab — READ ONLY. Never written to by any code in this project:
- * it is synced from the Unii API and carries the admin's own ARRAYFORMULAs.
- * Resolved by name first, then by gid 0 if the name ever changes. */
+/** Source tab inside ORDERS_SHEET_ID — READ ONLY. Resolved by name first,
+ * then by gid 0 if the name ever changes. */
 var ORDERS_TAB_NAME = 'คำสั่งซื้อ';
 var ORDERS_TAB_GID = 0;
 

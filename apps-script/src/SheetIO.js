@@ -8,36 +8,84 @@
  *   2. Reads are batched. Never call getValue()/setValue() in a loop.
  */
 
+/**
+ * This project's OWN file — the only spreadsheet anything here writes to.
+ *
+ * It is whatever file the script is bound to, deliberately not a hardcoded
+ * id: that way the manager can duplicate the file, or rebuild it from
+ * scratch, without touching code. The one thing that IS checked is that it
+ * isn't the ops file — binding this script there would put the "_" tabs and
+ * the menu right back into the file this design exists to keep clean.
+ */
 function ss_() {
   var ss = SpreadsheetApp.getActive();
-  if (!ss) throw new Error('สคริปต์นี้ต้องผูกกับสเปรดชีต (bound script) เท่านั้น');
-  if (ss.getId() !== EXPECTED_SPREADSHEET_ID) {
+  if (!ss) {
+    throw new Error('สคริปต์นี้ต้องผูกกับสเปรดชีตของ Routes (bound script) — สร้างไฟล์ใหม่แล้วเปิด Extensions > Apps Script จากไฟล์นั้น');
+  }
+  if (ss.getId() === ORDERS_SHEET_ID) {
     throw new Error(
-      'สคริปต์ผูกอยู่กับไฟล์ผิด (' + ss.getId() + ') — ต้องเป็น ' + EXPECTED_SPREADSHEET_ID +
-      ' หรือแก้ EXPECTED_SPREADSHEET_ID ใน Config.js ถ้าย้ายไฟล์จริง'
+      'สคริปต์ผูกอยู่กับไฟล์ระบบ OPS ซึ่งห้ามเขียนลงไป — ต้องสร้างสเปรดชีตใหม่สำหรับ Routes แล้วผูกสคริปต์กับไฟล์นั้นแทน'
     );
   }
   return ss;
 }
 
-/** Spreadsheet timezone — every date this app formats or compares uses it,
- * never the script's or the browser's, so "วันนี้" means the same thing on a
- * driver's phone as in the sheet. */
-function tz_() {
-  return ss_().getSpreadsheetTimeZone() || 'Asia/Bangkok';
+/**
+ * The ops file, opened read-only by convention and by construction: this is
+ * the only function that returns a handle to it, every caller of it only
+ * reads, and no write helper in this file accepts a sheet object — they all
+ * resolve their target through ownSheet_(), which can only ever return a tab
+ * from ss_(). There is no code path from here to a write on the ops file.
+ */
+function ordersSpreadsheet_() {
+  try {
+    return SpreadsheetApp.openById(ORDERS_SHEET_ID);
+  } catch (e) {
+    throw new Error(
+      'เปิดไฟล์ออเดอร์ของระบบ OPS ไม่ได้ — ให้บัญชีที่กด Deploy มีสิทธิ์อย่างน้อย "ผู้อ่าน" ในไฟล์นั้น (' + ORDERS_SHEET_ID + ')'
+    );
+  }
 }
 
-/** True when the sheet displays dates month-first. Only consulted for text
- * dates — real Date cells carry no ambiguity. See toDateKey_(). */
+/**
+ * Timezone and date format both come from the OPS file, not this one.
+ *
+ * The delivery dates being parsed live there, and "8/7/2026" means different
+ * days depending on that file's locale — reading it from the wrong
+ * spreadsheet would silently shift a whole day's work. "วันนี้" is likewise
+ * the business day as the ops file reckons it, so a driver's phone, the
+ * manager's screen and the sheet always agree.
+ *
+ * Cached because it costs a cross-file metadata call.
+ */
+function ordersMeta_() {
+  var cached = cacheGet_('ordersmeta');
+  if (cached) return cached;
+  var ss = ordersSpreadsheet_();
+  var meta = {
+    tz: ss.getSpreadsheetTimeZone() || 'Asia/Bangkok',
+    locale: ss.getSpreadsheetLocale() || '',
+    name: ss.getName(),
+  };
+  cachePut_('ordersmeta', meta, 21600);
+  return meta;
+}
+
+function tz_() {
+  return ordersMeta_().tz;
+}
+
+/** True when the source sheet displays dates month-first. Only consulted for
+ * text dates — real Date cells carry no ambiguity. See toDateKey_(). */
 function localeIsUS_() {
-  var locale = ss_().getSpreadsheetLocale() || '';
+  var locale = ordersMeta_().locale;
   return locale.indexOf('en_US') === 0 || locale === 'en';
 }
 
 /** Resolves the read-only source tab by name, falling back to its gid so a
  * rename doesn't break the app (and vice versa). */
 function ordersSheet_() {
-  var ss = ss_();
+  var ss = ordersSpreadsheet_();
   var byName = ss.getSheetByName(ORDERS_TAB_NAME);
   if (byName) return byName;
   var sheets = ss.getSheets();

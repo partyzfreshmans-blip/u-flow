@@ -703,6 +703,13 @@ function renderDiagnostics() {
     var body = $('adminBody');
     clear(body);
 
+    var files = el('div', 'panel');
+    files.appendChild(el('h3', null, 'ไฟล์ที่ใช้'));
+    files.appendChild(el('div', null, '📝 เขียนลง: ' + info.routesFile));
+    files.appendChild(el('div', null, '👁 อ่านอย่างเดียว: ' + info.ordersFile + ' → แท็บ ' + info.ordersTab));
+    files.appendChild(el('div', 'small muted', 'ไฟล์ระบบ OPS ถูกเปิดแบบอ่านอย่างเดียว ไม่มีเส้นทางไหนในโค้ดเขียนลงไปได้'));
+    body.appendChild(files);
+
     var panel = el('div', 'panel');
     panel.appendChild(el('h3', null, 'คอลัมน์ที่แอพอ่านจากแท็บ "' + info.ordersTab + '"'));
     panel.appendChild(el('div', 'small muted', 'ถ้าแถวไหนขึ้น "เดาจากตำแหน่งเดิม" แปลว่าหาชื่อหัวตารางไม่เจอ — ตรวจว่าหัวตารางถูกเปลี่ยนชื่อหรือไม่'));

@@ -486,6 +486,8 @@ function api_adminDiagnostics(token) {
     requireAdmin_(token);
     var resolved = orderColumns_();
     return {
+      routesFile: ss_().getName(),
+      ordersFile: ordersMeta_().name,
       ordersTab: ordersSheet_().getName(),
       report: resolved.report,
       zones: listZones_().map(function (z) { return { zoneId: z.zoneId, active: z.active, broken: z.broken, points: z.rings ? z.rings[0].length : 0 }; }),

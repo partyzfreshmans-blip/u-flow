@@ -34,7 +34,9 @@ function setupAll() {
   bumpDataVersion_();
 
   var lines = [];
+  lines.push('ไฟล์ของ Routes: ' + ss_().getName());
   lines.push(created.length ? 'สร้างแท็บใหม่: ' + created.join(', ') : 'แท็บครบแล้ว ไม่ได้สร้างใหม่');
+  lines.push('\n' + checkOrdersConnection_());
   if (adminPin) lines.push('\nPIN แอดมินเริ่มต้นคือ  ' + adminPin + '\nจดไว้แล้วเปลี่ยนได้จากเมนู "ตั้ง PIN แอดมินใหม่"');
   lines.push('\nขั้นถัดไป: Deploy > New deployment > Web app แล้วเปิดลิงก์บนมือถือ');
 
@@ -170,6 +172,27 @@ function seedStarterZones_() {
 /** GeoJSON ring for an axis-aligned box, closed (first point repeated). */
 function boxRing_(lngMin, latMin, lngMax, latMax) {
   return [[lngMin, latMin], [lngMax, latMin], [lngMax, latMax], [lngMin, latMax], [lngMin, latMin]];
+}
+
+/**
+ * Proves the link to the ops file works, at the moment someone is standing
+ * there able to fix it. Everything else in setup touches only this project's
+ * own file, so without this check the first sign of a permissions problem
+ * would be a driver seeing an empty map.
+ */
+function checkOrdersConnection_() {
+  try {
+    var meta = ordersMeta_();
+    var sheet = ordersSheet_();
+    var rows = Math.max(sheet.getLastRow() - 1, 0);
+    var resolved = orderColumns_();
+    var guessed = resolved.report.filter(function (item) { return item.how !== 'header'; }).length;
+    return 'เชื่อมกับไฟล์ออเดอร์แล้ว: "' + meta.name + '"\n' +
+      '  แท็บ "' + sheet.getName() + '" · ' + rows + ' แถว · เขตเวลา ' + meta.tz +
+      (guessed ? '\n  ⚠ มี ' + guessed + ' คอลัมน์ที่หาจากชื่อหัวตารางไม่เจอ ดูเมนู "ตรวจหัวตารางแท็บคำสั่งซื้อ"' : '\n  คอลัมน์ครบทุกช่อง');
+  } catch (e) {
+    return '⚠ ยังเชื่อมกับไฟล์ออเดอร์ไม่ได้:\n  ' + (e && e.message ? e.message : e);
+  }
 }
 
 function clearCaches() {
