@@ -3,10 +3,11 @@
 Warehouse / delivery operations UI for Uniimart LPN. All operational data is
 read from Google Sheets; customer coordinates can be written back.
 
-> **`apps-script/`** is a *separate* application, not part of this Vite app:
-> the driver-facing route picker for branch 584, built as a bound Google Apps
-> Script project on the same spreadsheet. It has its own deploy, its own PIN
-> login, and its own `_`-prefixed tabs. See `apps-script/README.md`.
+> The driver-facing route picker for branch 584 used to live here under
+> `apps-script/`. It now has its own repository,
+> [`unii-routes-584`](https://github.com/partyzfreshmans-blip/unii-routes-584),
+> and its own spreadsheet — it reads this app's order data read-only and
+> writes nothing back, so nothing in this repo depends on it.
 
 ## Running
 
