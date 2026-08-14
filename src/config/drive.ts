@@ -35,6 +35,20 @@ export function sanitizeSegment(s: string): string {
   return (s || 'ไม่ระบุ').replace(/[/\\]/g, '-').trim().slice(0, 120);
 }
 
+/** GOOGLE_DRIVE_ROOT_FOLDER_ID is meant to hold just the folder ID, but the
+ * easiest thing to copy from a browser is the full "share" URL Drive shows
+ * (.../drive/folders/<id>?usp=sharing, or .../open?id=<id>) — pull the ID out
+ * of either shape instead of sending the whole URL to the Drive API as if it
+ * were an ID, which fails with a confusing "File not found". */
+export function extractDriveFolderId(raw: string): string {
+  const trimmed = raw.trim();
+  const folderPath = trimmed.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+  if (folderPath) return folderPath[1];
+  const idParam = trimmed.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (idParam) return idParam[1];
+  return trimmed;
+}
+
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10MB per file
 
 export const ALLOWED_MIME_TYPES = ['application/pdf', 'image/jpeg', 'image/png'] as const;

@@ -3186,7 +3186,8 @@ export function computeReceiving(state: AppState, actions: AppActions) {
   });
 
   const discrepancyCount = lines.filter((l) => l.hasDiff).length;
-  const grandTotal = lines.reduce((a, l) => a + l.netTotal, 0);
+  const shippingCost = Number(state.recvShippingCost.replace(/[^0-9.]/g, '')) || 0;
+  const grandTotal = lines.reduce((a, l) => a + l.netTotal, 0) + shippingCost;
   const canSave = state.recvSupplier.trim() !== '' && state.recvBillNo.trim() !== '' && lines.length > 0 && lines.every((l) => l.uniiName.trim() !== '' || l.billName.trim() !== '');
 
   const folderKey = receivingFolderKey(state.recvDate, state.recvSupplier);
@@ -3215,6 +3216,8 @@ export function computeReceiving(state: AppState, actions: AppActions) {
       receivedDate: r.receivedDate,
       note: r.note,
       lineCount: r.lines.length,
+      shippingCost: r.shippingCost || 0,
+      shippingCostText: fmt(r.shippingCost || 0),
       totalText: fmt(recordTotal(r)),
       hasDiscrepancy: recordHasDiscrepancy(r),
       discrepancyCount: r.lines.filter((l) => lineDiff(l) !== 0).length,
@@ -3237,10 +3240,12 @@ export function computeReceiving(state: AppState, actions: AppActions) {
     billNo: state.recvBillNo,
     date: state.recvDate,
     note: state.recvNote,
+    shippingCost: state.recvShippingCost,
     onSupplier: (v: string) => actions.patch({ recvSupplier: v, recvSaved: null }),
     onBillNo: (v: string) => actions.patch({ recvBillNo: v }),
     onDate: (v: string) => actions.patch({ recvDate: v, recvSaved: null }),
     onNote: (v: string) => actions.patch({ recvNote: v }),
+    onShippingCost: (v: string) => actions.patch({ recvShippingCost: v.replace(/[^0-9.]/g, '') }),
     knownSuppliers: Array.from(new Set([...suppliers, ...suppliers])),
     skuOptions,
     skusLoading: state.skusLoading,
@@ -3264,6 +3269,7 @@ export function computeReceiving(state: AppState, actions: AppActions) {
         recordedBy: 'admin.warehouse',
         note: state.recvNote.trim(),
         lines: state.recvLines,
+        shippingCost,
         createdAt: new Date().toISOString(),
       };
       actions.saveReceiving(record, state.receivingLog);

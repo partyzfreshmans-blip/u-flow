@@ -1,7 +1,7 @@
 import { google } from 'googleapis';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
-import { DRIVE_ROOT_FOLDER_ENV, driveFolderPath, isAllowedFile, type AttachmentScope } from '../src/config/drive.js';
+import { DRIVE_ROOT_FOLDER_ENV, driveFolderPath, extractDriveFolderId, isAllowedFile, type AttachmentScope } from '../src/config/drive.js';
 import { GEOCODE_MIN_INTERVAL_MS, NOMINATIM_REVERSE_URL, NOMINATIM_USER_AGENT } from '../src/config/geocoding.js';
 import { isRouteOrdersTabConfigured, MAIN_SHEET_ID, ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE, SHEET_TABS, SKU_SHEET_ID, STAFF_ORDER_INFO_HEADERS, STAFF_READONLY_HEADERS } from '../src/config/sheets.js';
 import type { RouteOrder } from '../src/data/types.js';
@@ -2750,7 +2750,11 @@ export async function handleDriveUpload(token: string | null, files: UploadFile[
     return { status: 415, body: { error: `"${rejected.originalname}" ไม่ใช่ไฟล์ PDF/JPG/PNG` } };
   }
 
-  const rootFolderId = process.env[DRIVE_ROOT_FOLDER_ENV]?.trim();
+  const rootFolderIdRaw = process.env[DRIVE_ROOT_FOLDER_ENV]?.trim();
+  // Tolerate a full Drive "share" URL being pasted into the env var instead
+  // of the bare folder ID — a very easy mistake, and one the raw Drive API
+  // error ("File not found") gives no hint about.
+  const rootFolderId = rootFolderIdRaw ? extractDriveFolderId(rootFolderIdRaw) : rootFolderIdRaw;
   const hasCredentials = !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY?.trim();
 
   // Mock mode: keeps the whole attach → list → open flow testable before the
@@ -2797,6 +2801,25 @@ export async function handleDriveUpload(token: string | null, files: UploadFile[
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'อัปโหลดไฟล์ไม่สำเร็จ';
     console.error('[drive/upload]', message);
+    // A Service Account has no My Drive of its own — Drive answers "File not
+    // found" both when the folder ID is simply wrong *and* when the ID is
+    // right but the folder was never shared with the account, which is by
+    // far the more common cause. Google's raw message doesn't say which, so
+    // spell out the fix instead of surfacing it verbatim.
+    if (/file not found/i.test(message)) {
+      let hint = `โฟลเดอร์ ID "${rootFolderId}"`;
+      try {
+        hint += ` ให้กับ ${getServiceAccountCredentials().client_email} (Editor)`;
+      } catch {
+        // credentials unreadable — still give the folder-ID half of the hint
+      }
+      return {
+        status: 502,
+        body: {
+          error: `อัปโหลดขึ้น Google Drive ไม่สำเร็จ: ไม่พบโฟลเดอร์ปลายทางใน Drive — ตรวจสอบว่าได้แชร์${hint} แล้ว และ GOOGLE_DRIVE_ROOT_FOLDER_ID เป็น ID โฟลเดอร์ล้วนๆ ไม่ใช่ลิงก์เต็ม`,
+        },
+      };
+    }
     return { status: 502, body: { error: `อัปโหลดขึ้น Google Drive ไม่สำเร็จ: ${message}` } };
   }
 }

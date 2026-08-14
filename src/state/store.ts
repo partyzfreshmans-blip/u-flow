@@ -338,6 +338,10 @@ export interface AppState {
   recvBillNo: string;
   recvDate: string;
   recvNote: string;
+  /** ค่าขนส่งค่าแรง — shipping/labor cost for the whole bill. Kept as the raw
+   * text-input string (same pattern as recvBillNo) rather than a number, so
+   * an operator can clear the field mid-edit without it snapping to "0". */
+  recvShippingCost: string;
   recvLines: ReceivingLine[];
   recvSaved: string | null;
   recvFilterSupplier: string;
@@ -591,6 +595,7 @@ export const initialState: AppState = {
   recvBillNo: '',
   recvDate: new Date().toISOString().slice(0, 10),
   recvNote: '',
+  recvShippingCost: '',
   recvLines: [],
   recvSaved: null,
   recvFilterSupplier: 'all',
@@ -1535,6 +1540,7 @@ export function useAppStore() {
             recvLines: [],
             recvBillNo: '',
             recvNote: '',
+            recvShippingCost: '',
             recvSaved: receivingFolderKey(record.receivedDate, record.supplier),
           },
         });

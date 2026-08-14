@@ -1,4 +1,5 @@
 import { AttachmentPanel } from '../components/AttachmentPanel';
+import { BarcodeScanButton } from '../components/BarcodeScanButton';
 import { DISCOUNT_MODES, RECEIVING_TYPES, type DiscountMode, type ReceivingType } from '../data/receiving';
 import { computeReceiving } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
@@ -15,7 +16,7 @@ export function ReceivingPage({ state, actions }: { state: AppState; actions: Ap
         <div style={{ fontWeight: 600, fontSize: 15 }}>
           <i className="ph ph-truck" style={{ marginRight: 6, color: 'var(--color-accent-300)' }} />ข้อมูลบิล / ซัพพลายเออร์
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr 1fr', gap: 12 }}>
+        <div className="recv-header-grid">
           <div className="field">
             <label>ชื่อซัพพลายเออร์ *</label>
             <input className="input" list="known-suppliers" placeholder="พิมพ์ชื่อ หรือเลือกจากที่เคยบันทึก" value={v.supplier} onChange={(e) => v.onSupplier(e.target.value)} />
@@ -26,7 +27,13 @@ export function ReceivingPage({ state, actions }: { state: AppState; actions: Ap
           <div className="field"><label>เลขบิล / ใบส่งของ *</label><input className="input" placeholder="เช่น SP-2209" value={v.billNo} onChange={(e) => v.onBillNo(e.target.value)} /></div>
           <div className="field"><label>วันที่รับเข้า</label><input className="input" type="date" value={v.date} onChange={(e) => v.onDate(e.target.value)} /></div>
         </div>
-        <div className="field"><label>หมายเหตุรวมของบิลนี้</label><input className="input" placeholder="เช่น ของครบ แต่กล่องบุบ 2 ใบ" value={v.note} onChange={(e) => v.onNote(e.target.value)} /></div>
+        <div className="recv-note-grid">
+          <div className="field"><label>หมายเหตุรวมของบิลนี้</label><input className="input" placeholder="เช่น ของครบ แต่กล่องบุบ 2 ใบ" value={v.note} onChange={(e) => v.onNote(e.target.value)} /></div>
+          <div className="field">
+            <label>ค่าขนส่งค่าแรง (฿)</label>
+            <input className="input" style={{ textAlign: 'right' }} inputMode="decimal" placeholder="0" value={v.shippingCost} onChange={(e) => v.onShippingCost(e.target.value)} />
+          </div>
+        </div>
 
         <div className="hr" style={{ margin: '2px 0' }} />
         <AttachmentPanel
@@ -78,7 +85,7 @@ export function ReceivingPage({ state, actions }: { state: AppState; actions: Ap
                   <button className="btn btn-icon btn-ghost" onClick={l.remove} title="ลบรายการนี้"><i className="ph ph-trash" style={{ fontSize: 14 }} /></button>
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 1.4fr 1fr', gap: 10, marginBottom: 10 }}>
+                <div className="recv-top-grid" style={{ marginBottom: 10 }}>
                   <div className="field">
                     <label>สินค้าใน Unii (SKU master)</label>
                     <select className="input" style={{ minHeight: 32 }} value={l.skuId} onChange={(e) => l.onSku(e.target.value)}>
@@ -92,11 +99,14 @@ export function ReceivingPage({ state, actions }: { state: AppState; actions: Ap
                   </div>
                   <div className="field">
                     <label>บาร์โค้ดจากบิล</label>
-                    <input className="input" style={{ minHeight: 32 }} value={l.billBarcode} onChange={(e) => l.set({ billBarcode: e.target.value.replace(/[^0-9]/g, '') })} inputMode="numeric" />
+                    <div style={{ display: 'flex', gap: 5 }}>
+                      <input className="input" style={{ minHeight: 32, flex: 1 }} value={l.billBarcode} onChange={(e) => l.set({ billBarcode: e.target.value.replace(/[^0-9]/g, '') })} inputMode="numeric" />
+                      <BarcodeScanButton onDetect={(value) => l.set({ billBarcode: value })} title="แสกนบาร์โค้ดด้วยกล้อง" />
+                    </div>
                   </div>
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 10, marginBottom: 10 }}>
+                <div className="recv-detail-grid" style={{ marginBottom: 10 }}>
                   <div className="field"><label>หน่วยนับ</label>
                     <select className="input" style={{ minHeight: 32 }} value={l.unit} onChange={(e) => l.set({ unit: e.target.value })}>
                       {UNITS.map((u) => <option key={u}>{u}</option>)}
@@ -190,6 +200,7 @@ export function ReceivingPage({ state, actions }: { state: AppState; actions: Ap
                   <button className="btn btn-icon btn-ghost" onClick={r.remove} title="ลบบันทึกนี้"><i className="ph ph-trash" style={{ fontSize: 13 }} /></button>
                 </div>
                 {r.note && <div style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', marginBottom: 8 }}>หมายเหตุ: {r.note}</div>}
+                {r.shippingCost > 0 && <div style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', marginBottom: 8 }}>ค่าขนส่งค่าแรง: {r.shippingCostText}</div>}
                 <table className="table">
                   <thead>
                     <tr>

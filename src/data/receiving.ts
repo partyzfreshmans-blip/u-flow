@@ -36,6 +36,9 @@ export interface ReceivingRecord {
   recordedBy: string;
   note: string;
   lines: ReceivingLine[];
+  /** ค่าขนส่งค่าแรง — shipping/labor cost for the whole bill, not tied to any
+   * one line item. Defaults to 0 for records saved before this field existed. */
+  shippingCost: number;
   createdAt: string;
 }
 
@@ -51,7 +54,7 @@ export function lineNetTotal(line: ReceivingLine): number {
 }
 
 export function recordTotal(record: ReceivingRecord): number {
-  return record.lines.reduce((a, l) => a + lineNetTotal(l), 0);
+  return record.lines.reduce((a, l) => a + lineNetTotal(l), 0) + (record.shippingCost || 0);
 }
 
 export function recordHasDiscrepancy(record: ReceivingRecord): boolean {
@@ -70,7 +73,10 @@ export function loadReceivingLog(): ReceivingRecord[] {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as ReceivingRecord[]) : [];
+    if (!Array.isArray(parsed)) return [];
+    // Records saved before shippingCost existed have no such field — default
+    // it to 0 rather than letting it flow into totals as undefined/NaN.
+    return (parsed as ReceivingRecord[]).map((r) => ({ ...r, shippingCost: r.shippingCost || 0 }));
   } catch {
     return [];
   }

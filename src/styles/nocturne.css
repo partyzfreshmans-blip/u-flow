@@ -265,6 +265,50 @@ textarea.input { min-height: 90px; resize: vertical; font-family: inherit; }
   .no-print { display: none !important; }
 }
 
+/* — goods receiving: bill header + per-line field grids —
+   Fixed column counts (6 numeric fields across one row, etc.) work fine at
+   desktop width but leave each column too narrow for its own label once the
+   viewport drops to phone width — "หน่วยนับ" and "ราคา/หน่วย (฿)" wrap onto
+   2-3 lines and the form reads as broken. Step the column count down at the
+   same 900px breakpoint the rest of the app collapses at, then again for
+   phones, instead of letting the grid pick arbitrarily narrow columns. */
+.recv-header-grid {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 1fr;
+  gap: 12px;
+}
+.recv-top-grid {
+  display: grid;
+  grid-template-columns: 1.6fr 1.4fr 1fr;
+  gap: 10px;
+}
+.recv-note-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 12px;
+}
+.recv-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 10px;
+}
+@media (max-width: 900px) {
+  .recv-header-grid, .recv-top-grid, .recv-note-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .recv-detail-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+@media (max-width: 560px) {
+  .recv-header-grid, .recv-top-grid, .recv-note-grid {
+    grid-template-columns: 1fr;
+  }
+  .recv-detail-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
 /* — planner: vehicle list (left) + map (right, sticky while scrolling) —
    align-items isn't set on the grid itself, so both columns stretch to the
    row's full height (matching whichever side is taller); the map column
