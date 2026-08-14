@@ -845,6 +845,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
     .map((o) => ({
       orderNo: o.orderNo,
       customer: o.customer,
+      phone: o.phone,
       route: resolveZone(state.zoneRules, o, state.geocodeCache).route,
       amtText: fmt(o.totalAmount),
       itemCountText: o.itemCount.toLocaleString('en-US'),
@@ -885,6 +886,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
       route: resolveZone(state.zoneRules, o, state.geocodeCache).route,
       districtProvince: districtProvinceLabel(o, state.geocodeCache),
       orderNo: o.orderNo,
+      phone: o.phone,
       archived: o.archived,
       selected: state.routeSelectedOrderNos.includes(o.orderNo),
       toggleSelect: () => actions.toggleRouteSelect(o.orderNo, state.routeSelectedOrderNos),
@@ -948,6 +950,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
       return {
         orderNo: o.orderNo,
         customer: o.customer,
+        phone: o.phone,
         plannedDeliveryDate: o.plannedDeliveryDate,
         daysLate: Math.abs(daysBetweenKeys(key, today)),
         stLabel: o.status || '—',

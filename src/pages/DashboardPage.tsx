@@ -1,4 +1,5 @@
 import { Fragment, useState } from 'react';
+import { CopyButton } from '../components/CopyButton';
 import { OrderDetailModal } from '../components/OrderDetailModal';
 import { computeDashboard } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
@@ -28,11 +29,17 @@ function DashboardTable({ rows, canViewRawDebug }: { rows: DashboardRow[]; canVi
           {visible.map((o) => (
             <Fragment key={o.orderUid}>
               <tr>
-                <td style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 500, fontSize: 12.5 }}>{o.orderUid}</td>
+                <td style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 500, fontSize: 12.5, whiteSpace: 'nowrap' }}>
+                  {o.orderUid}<CopyButton value={o.orderUid} label="เลขคำสั่งซื้อ" />
+                </td>
                 <td>
-                  {o.cust}
+                  {o.cust}<CopyButton value={o.cust} label="ชื่อลูกค้า" />
                   <div style={{ fontSize: 11, color: 'var(--color-neutral-500)' }}>{o.addr}</div>
-                  {o.phone && <div style={{ fontSize: 10.5, color: 'var(--color-neutral-600)', fontVariantNumeric: 'tabular-nums' }}>{o.phone}</div>}
+                  {o.phone && (
+                    <div style={{ fontSize: 10.5, color: 'var(--color-neutral-600)', fontVariantNumeric: 'tabular-nums' }}>
+                      {o.phone}<CopyButton value={o.phone} label="เบอร์โทร" />
+                    </div>
+                  )}
                 </td>
                 <td style={{ textAlign: 'center' }}>{o.items}</td>
                 <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>{o.qtyText}</td>
@@ -273,8 +280,10 @@ export function DashboardPage({ state, actions }: { state: AppState; actions: Ap
               <tbody>
                 {v.incompleteOrders.slice(0, 10).map((o) => (
                   <tr key={o.orderNo}>
-                    <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12.5 }}>{o.orderNo}</td>
-                    <td>{o.customer}</td>
+                    <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12.5, whiteSpace: 'nowrap' }}>
+                      {o.orderNo}<CopyButton value={o.orderNo} label="เลขคำสั่งซื้อ" />
+                    </td>
+                    <td>{o.customer}<CopyButton value={o.customer} label="ชื่อลูกค้า" /></td>
                     <td style={{ textAlign: 'center', fontSize: 12, color: 'var(--st-bad-fg)', fontWeight: 600 }}>{o.daysLate} วัน</td>
                     <td><span style={o.stStyle}>{o.stLabel}</span></td>
                     <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={o.viewItems}>ดูรายการสินค้า</button></td>

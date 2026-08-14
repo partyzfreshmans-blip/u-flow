@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { CopyButton } from '../components/CopyButton';
 import { canBookStop } from '../config/permissions';
 import { addDays, dayKey } from '../data/dateUtils';
 import { DELIVERY_FAILURE_REASONS } from '../data/deliveryFailures';
@@ -203,6 +204,7 @@ export function DriverPage({ state, actions }: { state: AppState; actions: AppAc
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                   <span style={{ fontWeight: 700, fontSize: 16 }}>{r.customer}</span>
+                  <CopyButton value={r.customer} label="ชื่อลูกค้า" />
                   {r.bookedByLabel && (
                     <span
                       style={{
@@ -216,7 +218,7 @@ export function DriverPage({ state, actions }: { state: AppState; actions: AppAc
                   )}
                 </div>
                 <div style={{ fontSize: 13.5, color: 'var(--color-neutral-400)' }}>{r.address}</div>
-                <div style={{ fontSize: 12.5, color: 'var(--color-neutral-500)', marginTop: 2 }}>{r.orderNo} · {r.distanceText} · {r.amtText}</div>
+                <div style={{ fontSize: 12.5, color: 'var(--color-neutral-500)', marginTop: 2 }}>{r.orderNo}<CopyButton value={r.orderNo} label="เลขคำสั่งซื้อ" /> · {r.distanceText} · {r.amtText}</div>
               </div>
             </label>
           ))}
@@ -446,7 +448,11 @@ function RouteDetail({
                 <div style={{ flex: 1, minWidth: 0 }}>
                   {/* Shop name is the biggest thing on the card — it's what a
                       driver matches against the shopfront at a glance. */}
-                  <div style={{ fontWeight: 800, fontSize: 19, lineHeight: 1.25 }}>{s.customer}</div>
+                  <div style={{ fontWeight: 800, fontSize: 19, lineHeight: 1.25 }}>{s.customer}<CopyButton value={s.customer} label="ชื่อลูกค้า" /></div>
+                  <div style={{ fontSize: 12.5, color: 'var(--color-neutral-500)', marginTop: 1 }}>
+                    {s.orderNo}<CopyButton value={s.orderNo} label="เลขคำสั่งซื้อ" />
+                    {s.phone && <>{' · '}{s.phone}<CopyButton value={s.phone} label="เบอร์โทร" /></>}
+                  </div>
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 5 }}>
                     {s.isNewCustomer && (
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, fontWeight: 700, padding: '3px 9px', borderRadius: 7, background: 'var(--st-ok-bg)', color: 'var(--st-ok-fg)' }} title={`ลูกค้าใหม่ (จากชีต: ${s.newCustomerText})`}>
@@ -574,8 +580,8 @@ function OutcomeSheet({
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontWeight: 800, fontSize: 18 }}>{stop.customer}</div>
-            <div style={{ fontSize: 13, color: 'var(--color-neutral-500)' }}>จุดที่ {stop.seq} · {stop.orderNo}</div>
+            <div style={{ fontWeight: 800, fontSize: 18 }}>{stop.customer}<CopyButton value={stop.customer} label="ชื่อลูกค้า" /></div>
+            <div style={{ fontSize: 13, color: 'var(--color-neutral-500)' }}>จุดที่ {stop.seq} · {stop.orderNo}<CopyButton value={stop.orderNo} label="เลขคำสั่งซื้อ" /></div>
           </div>
           <button className="btn btn-icon btn-secondary" style={{ minHeight: MIN_TOUCH, minWidth: MIN_TOUCH }} onClick={onClose} title="ปิด">
             <i className="ph ph-x" />

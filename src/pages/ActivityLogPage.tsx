@@ -1,3 +1,4 @@
+import { CopyButton } from '../components/CopyButton';
 import { computeActivityLog } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 
@@ -28,7 +29,9 @@ export function ActivityLogPage({ state, actions }: { state: AppState; actions: 
                 <td style={{ fontSize: 12.5 }}>{r.user}</td>
                 <td style={{ fontSize: 12.5, fontWeight: 500 }}>{r.action}</td>
                 <td style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{r.detail}</td>
-                <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>{r.orderNo}</td>
+                <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, whiteSpace: 'nowrap' }}>
+                  {r.orderNo}<CopyButton value={r.orderNo} label="เลขคำสั่งซื้อ" />
+                </td>
               </tr>
             ))}
           </tbody>

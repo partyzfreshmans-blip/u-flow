@@ -3,6 +3,7 @@ import { exportOrderLineItemsXlsx } from '../data/sources/exportXlsx';
 import { computeOrderDetail } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 import { AttachmentPanel } from './AttachmentPanel';
+import { CopyButton } from './CopyButton';
 
 const STOCK_TONE = {
   ok: { bg: 'var(--st-ok-bg)', fg: 'var(--st-ok-fg)', icon: 'ph ph-check-circle-fill' },
@@ -57,7 +58,7 @@ export function OrderDetailModal({ state, actions }: { state: AppState; actions:
         {/* ---- header (stays put; outside the scrolling body) ---- */}
         <div>
           <div className="dialog-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            รายการสินค้า · {v.orderNo}
+            รายการสินค้า · {v.orderNo}<CopyButton value={v.orderNo} label="เลขคำสั่งซื้อ" />
             <button className="btn btn-ghost no-print" style={{ marginLeft: 'auto', fontSize: 11.5 }} onClick={v.viewHistory}>
               <i className="ph ph-clock-counter-clockwise" />ดูประวัติการแก้ไข
             </button>
@@ -65,12 +66,12 @@ export function OrderDetailModal({ state, actions }: { state: AppState; actions:
               <i className="ph ph-x" />
             </button>
           </div>
-          <div style={{ fontSize: 12.5, color: 'var(--color-neutral-400)', marginTop: 2 }}>{v.customer}</div>
+          <div style={{ fontSize: 12.5, color: 'var(--color-neutral-400)', marginTop: 2 }}>{v.customer}<CopyButton value={v.customer} label="ชื่อลูกค้า" /></div>
           {(v.phone || v.districtProvince) && (
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 11.5, color: 'var(--color-neutral-500)', marginTop: 2 }}>
               {v.phone && (
                 <span style={{ fontVariantNumeric: 'tabular-nums' }}>
-                  <i className="ph ph-phone" style={{ marginRight: 4 }} />{v.phone}
+                  <i className="ph ph-phone" style={{ marginRight: 4 }} />{v.phone}<CopyButton value={v.phone} label="เบอร์โทร" />
                 </span>
               )}
               {v.districtProvince && (

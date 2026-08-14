@@ -1,3 +1,4 @@
+import { CopyButton } from '../components/CopyButton';
 import { canEditPage } from '../config/permissions';
 import { computePromo, computePromoUsage } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
@@ -264,8 +265,10 @@ export function PromoPage({ state, actions }: { state: AppState; actions: AppAct
                         <tbody>
                           {u.orderRows.map((o, i) => (
                             <tr key={i}>
-                              <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12.5 }}>{o.orderNo}</td>
-                              <td>{o.customer}</td>
+                              <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12.5, whiteSpace: 'nowrap' }}>
+                                {o.orderNo}<CopyButton value={o.orderNo} label="เลขคำสั่งซื้อ" />
+                              </td>
+                              <td>{o.customer}<CopyButton value={o.customer} label="ชื่อลูกค้า" /></td>
                               <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)' }}>{o.orderedAtText}</td>
                               <td style={{ textAlign: 'right' }}>{o.qtyText}</td>
                               <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{o.totalText}</td>
@@ -282,7 +285,7 @@ export function PromoPage({ state, actions }: { state: AppState; actions: AppAct
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                       {u.customerRows.map((c, i) => (
                         <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, padding: '4px 2px' }}>
-                          <span>{c.customer}</span>
+                          <span>{c.customer}<CopyButton value={c.customer} label="ชื่อลูกค้า" /></span>
                           <b>{c.count} ครั้ง</b>
                         </div>
                       ))}

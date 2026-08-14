@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { CopyButton } from '../components/CopyButton';
 import { OrderDetailModal } from '../components/OrderDetailModal';
 import { computePick } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
@@ -216,8 +217,10 @@ export function PickPage({ state, actions }: { state: AppState; actions: AppActi
                   <td onClick={(e) => e.stopPropagation()}>
                     {v.canWork && <input type="checkbox" checked={r.checked} onChange={r.toggle} style={{ width: 17, height: 17, cursor: 'pointer' }} />}
                   </td>
-                  <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 500 }}>{r.orderNo}</td>
-                  <td>{r.customer}</td>
+                  <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap' }}>
+                    {r.orderNo}<CopyButton value={r.orderNo} label="เลขคำสั่งซื้อ" />
+                  </td>
+                  <td>{r.customer}<CopyButton value={r.customer} label="ชื่อลูกค้า" /></td>
                   <td style={{ textAlign: 'center', fontVariantNumeric: 'tabular-nums' }}>{r.itemCountText}</td>
                   <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{r.amtText}</td>
                   <td style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{r.orderedDate}</td>

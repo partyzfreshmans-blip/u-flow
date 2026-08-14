@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { CopyButton } from '../components/CopyButton';
 import { OrderDetailModal } from '../components/OrderDetailModal';
 import { canEditOrder } from '../config/permissions';
 import { addDays, dayKey } from '../data/dateUtils';
@@ -142,9 +143,12 @@ function OrderTable({
               {canEdit && <td><input type="checkbox" checked={r.selected} onChange={r.toggleSelect} /></td>}
               <td><span style={{ display: 'inline-flex', fontSize: 11, padding: '2px 8px', borderRadius: 5, background: 'var(--color-neutral-800)', color: 'var(--color-neutral-200)' }}>{r.route}</span></td>
               <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>{r.districtProvince}</td>
-              <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 500 }}>{r.orderNo}</td>
+              <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap' }}>
+                {r.orderNo}<CopyButton value={r.orderNo} label="เลขคำสั่งซื้อ" />
+              </td>
               <td>
-                {r.customer}
+                {r.customer}<CopyButton value={r.customer} label="ชื่อลูกค้า" />
+                {r.phone && <CopyButton value={r.phone} label="เบอร์โทร" />}
                 <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', maxWidth: 200, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.address}</div>
               </td>
               <td style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
@@ -388,8 +392,13 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
                   {v.pendingBatchOrders.map((o) => (
                     <tr key={o.orderNo}>
                       <td><span style={{ display: 'inline-flex', fontSize: 11, padding: '2px 8px', borderRadius: 5, background: 'var(--color-neutral-800)', color: 'var(--color-neutral-200)' }}>{o.route}</span></td>
-                      <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 500 }}>{o.orderNo}</td>
-                      <td>{o.customer}</td>
+                      <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap' }}>
+                        {o.orderNo}<CopyButton value={o.orderNo} label="เลขคำสั่งซื้อ" />
+                      </td>
+                      <td>
+                        {o.customer}<CopyButton value={o.customer} label="ชื่อลูกค้า" />
+                        {o.phone && <CopyButton value={o.phone} label="เบอร์โทร" />}
+                      </td>
                       <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{o.amtText}</td>
                       <td style={{ textAlign: 'center' }}>{o.itemCountText}</td>
                       <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.orderedAtText}</td>
@@ -638,8 +647,13 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
                 {v.stuckOrders.map((o) => (
                   <tr key={o.orderNo}>
                     {canEdit && <td><input type="checkbox" checked={o.selected} onChange={o.toggleSelect} /></td>}
-                    <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12.5 }}>{o.orderNo}</td>
-                    <td>{o.customer}</td>
+                    <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12.5, whiteSpace: 'nowrap' }}>
+                      {o.orderNo}<CopyButton value={o.orderNo} label="เลขคำสั่งซื้อ" />
+                    </td>
+                    <td>
+                      {o.customer}<CopyButton value={o.customer} label="ชื่อลูกค้า" />
+                      {o.phone && <CopyButton value={o.phone} label="เบอร์โทร" />}
+                    </td>
                     <td style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{o.plannedDeliveryDate}</td>
                     <td style={{ textAlign: 'center', fontSize: 12, color: 'var(--st-bad-fg)', fontWeight: 600 }}>{o.daysLate} วัน</td>
                     <td><span style={o.stStyle}>{o.stLabel}</span></td>

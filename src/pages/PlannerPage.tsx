@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { CopyButton } from '../components/CopyButton';
 import { computePlanner } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
 import { BatchRouteHistoryPanel } from './BatchRouteHistoryPanel';
@@ -423,7 +424,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                         <td style={{ textAlign: 'center', fontFamily: 'ui-monospace, monospace', fontSize: 12, color: 'var(--color-accent-200)' }}>{s.loadCode}</td>
                         <td>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                            {s.customer}
+                            {s.customer}<CopyButton value={s.customer} label="ชื่อลูกค้า" />
                             {s.isNewCustomer && (
                               <span
                                 style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, padding: '1px 6px', borderRadius: 5, background: 'var(--st-ok-bg)', color: 'var(--st-ok-fg)', fontWeight: 600, whiteSpace: 'nowrap' }}
@@ -445,7 +446,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                               when sequencing, and it was always the part cut off. */}
                           <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', lineHeight: 1.45 }}>
                             {s.locationSource === 'override' && <i className="ph ph-map-pin-fill" style={{ color: 'var(--st-ok-fg)', marginRight: 3 }} title="พิกัดถูกแก้ไขแล้ว" />}
-                            {s.orderNo} · {s.address}
+                            {s.orderNo}<CopyButton value={s.orderNo} label="เลขคำสั่งซื้อ" /> · {s.address}
                           </div>
                           {s.districtProvince !== '-' && (
                             <div style={{ fontSize: 10.5, color: 'var(--color-neutral-400)' }}>
@@ -586,6 +587,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                           ) : (
                             o.customer
                           )}
+                          <CopyButton value={o.customer} label="ชื่อลูกค้า" />
                           {o.isNewCustomer && (
                             <span
                               style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, padding: '2px 7px', borderRadius: 6, background: 'var(--st-ok-bg)', color: 'var(--st-ok-fg)', fontWeight: 600, whiteSpace: 'nowrap' }}
@@ -608,7 +610,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                             </span>
                           )}
                         </div>
-                        <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', marginTop: 1 }}>{o.orderNo}</div>
+                        <div style={{ fontSize: 10.5, color: 'var(--color-neutral-500)', marginTop: 1 }}>{o.orderNo}<CopyButton value={o.orderNo} label="เลขคำสั่งซื้อ" /></div>
                         {/* Wraps rather than clipping — the ตำบล/อำเภอ tail is
                             the part that matters for routing and was exactly
                             what the old ellipsis cut off. */}
@@ -621,7 +623,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                         </div>
                       </td>
                       <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', lineHeight: 1.45 }} title={o.districtProvince}>{o.districtProvince}</td>
-                      <td style={{ fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.phone}</td>
+                      <td style={{ fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.phone}<CopyButton value={o.phone} label="เบอร์โทร" /></td>
                       <td style={{ fontSize: 11.5, color: o.packedBy === 'ยังไม่จัด' ? 'var(--color-neutral-600)' : 'var(--color-neutral-300)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 80 }} title={o.packedBy}>{o.packedBy}</td>
                       <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>{o.plannedDeliveryDateText}</td>
                       <td style={{ fontSize: 11.5, color: o.hasNote ? 'var(--color-neutral-200)' : 'var(--color-neutral-600)', maxWidth: 130, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={o.hasNote ? o.note : undefined}>

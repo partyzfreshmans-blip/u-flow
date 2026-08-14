@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { CopyButton } from '../components/CopyButton';
 import { exportBatchRouteHistoryXlsx } from '../data/sources/exportXlsx';
 import { computeBatchRouteHistory } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
@@ -119,8 +120,10 @@ export function BatchRouteHistoryPanel({ state, actions }: { state: AppState; ac
                       <tbody>
                         {b.stops.map((s) => (
                           <tr key={s.orderNo}>
-                            <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 500 }}>{s.orderNo}</td>
-                            <td>{s.customer}</td>
+                            <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap' }}>
+                              {s.orderNo}<CopyButton value={s.orderNo} label="เลขคำสั่งซื้อ" />
+                            </td>
+                            <td>{s.customer}<CopyButton value={s.customer} label="ชื่อลูกค้า" /></td>
                             <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{s.amtText}</td>
                             <td><span style={s.stStyle}>{s.status || '—'}</span></td>
                           </tr>

@@ -1,3 +1,4 @@
+import { CopyButton } from '../components/CopyButton';
 import { canEditCustomerLatLng } from '../config/permissions';
 import { computeCustomer } from '../state/derive';
 import type { AppActions, AppState } from '../state/store';
@@ -37,8 +38,8 @@ export function CustomerPage({ state, actions }: { state: AppState; actions: App
           <tbody>
             {v.custRows.map((c) => (
               <tr key={c.rowIndex}>
-                <td style={{ fontWeight: 500 }}>{c.name}</td>
-                <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12.5, color: 'var(--color-neutral-400)' }}>{c.phone}</td>
+                <td style={{ fontWeight: 500 }}>{c.name}<CopyButton value={c.name} label="ชื่อลูกค้า" /></td>
+                <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12.5, color: 'var(--color-neutral-400)' }}>{c.phone}<CopyButton value={c.phone} label="เบอร์โทร" /></td>
                 <td style={{ fontSize: 12, maxWidth: 260 }}>{c.address}</td>
                 <td style={{ fontSize: 11.5, fontVariantNumeric: 'tabular-nums', color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>
                   {c.locText}
