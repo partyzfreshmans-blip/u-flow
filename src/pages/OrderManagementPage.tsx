@@ -640,7 +640,7 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
               <thead>
                 <tr>
                   {canEdit && <th style={{ width: 26 }}><input type="checkbox" checked={stuckAllSelected} onChange={toggleStuckSelectAll} /></th>}
-                  <th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th>วันที่จะจัดส่ง</th><th style={{ textAlign: 'center' }}>ล่าช้า</th><th>สถานะ</th><th></th>
+                  <th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th>วันที่จะจัดส่ง</th><th style={{ textAlign: 'center' }}>ล่าช้า</th><th>สถานะ</th><th>หมายเหตุ</th><th></th>
                 </tr>
               </thead>
               <tbody>
@@ -657,7 +657,17 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
                     <td style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>{o.plannedDeliveryDate}</td>
                     <td style={{ textAlign: 'center', fontSize: 12, color: 'var(--st-bad-fg)', fontWeight: 600 }}>{o.daysLate} วัน</td>
                     <td><span style={o.stStyle}>{o.stLabel}</span></td>
-                    <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={o.viewItems}>ดูสินค้า</button></td>
+                    <td style={{ fontSize: 11.5, color: o.hasNote ? 'var(--color-neutral-200)' : 'var(--color-neutral-600)', maxWidth: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={o.hasNote ? o.note : undefined}>
+                      {o.hasNote ? o.note : '—'}
+                    </td>
+                    <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                      {canEdit && (
+                        <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={o.viewItems} title="เพิ่ม/แก้ไขหมายเหตุ">
+                          <i className="ph ph-note-pencil" />{o.hasNote ? 'แก้ไขโน๊ต' : 'เพิ่มโน๊ต'}
+                        </button>
+                      )}
+                      <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={o.viewItems}>ดูสินค้า</button>
+                    </td>
                   </tr>
                 ))}
               </tbody>

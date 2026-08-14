@@ -955,6 +955,11 @@ export function computeRoute(state: AppState, actions: AppActions) {
         daysLate: Math.abs(daysBetweenKeys(key, today)),
         stLabel: o.status || '—',
         stStyle: sheetStatusStyle(o.status),
+        note: o.note,
+        hasNote: o.note.trim() !== '',
+        // Opens the same order-detail modal the main table's "แก้ไข" uses —
+        // its "หมายเหตุ" textarea is where a note actually gets added/edited
+        // and saved back to the sheet, so this button doubles as "เพิ่มโน๊ต".
         viewItems: () => actions.openOrderDetail(o.orderNo, o.customer, o),
         // Same shared selection pool the main table's rows use (see below) —
         // the archive feature is one selection set / one toolbar / one
@@ -1594,11 +1599,17 @@ export function computePlanner(state: AppState, actions: AppActions) {
             lng: o.lng as number,
             label: s.customer,
             status: '',
-            color: s.zoneColor,
+            // Vehicle colour, not zone colour — matches this stop's own
+            // route line and the "แสดงบนแผนที่" toggle chip so a pin is
+            // never a different colour than the line it's plotted on (which
+            // zone colour could be, whenever one vehicle's route crosses
+            // more than one zone).
+            color: vehicleColorFor(v.id),
             zoneName: s.zoneName,
             vehicleId: v.id,
-            // Short on-pin text: vehicle code + delivery sequence, e.g. "A-3".
-            pinLabel: `${v.loadPrefix}-${s.seq}`,
+            // Short on-pin text: just the delivery sequence — colour alone
+            // (see above) already says which vehicle/route it belongs to.
+            pinLabel: String(s.seq),
             // Reuses the same moveUp/moveDown closures the table's own
             // "เลื่อนขึ้น/ลง" buttons call — already batch-lock-aware and
             // already logs to Activity Log, so the map's popup needs no
