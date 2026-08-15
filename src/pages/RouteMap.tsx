@@ -1,17 +1,5 @@
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-// Side-effect only — attaches L.markerClusterGroup()/L.MarkerClusterGroup via
-// ambient module augmentation (see @types/leaflet.markercluster). Nearby pins
-// collapse into a numbered bubble at low zoom and split apart (auto-spiderfy
-// at max zoom for exact-same-spot pins) on click, instead of the old
-// overlapping-marker-spiderfier-leaflet approach of always spreading every
-// overlap into a tiny fan — the "18 unassigned pins stacked in one spot"
-// case reads as one bubble now instead of an unreadable pile.
-import 'leaflet.markercluster';
-// Only the base plugin CSS (spiderfy legs, cluster fade/zoom animation) —
-// MarkerCluster.Default.css's own circle-colour theme is skipped since every
-// cluster bubble here is custom-drawn via iconCreateFunction below.
-import 'leaflet.markercluster/dist/MarkerCluster.css';
 import { useEffect, useRef } from 'react';
 
 interface Stop {
@@ -87,29 +75,70 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-/** Pin sizing/weight step up a little past ~10 and ~30 markers so a big
- * cluster still reads as "clearly more" at a glance, not just a bigger
- * number in the same size bubble. */
-function clusterIcon(count: number): L.DivIcon {
-  const size = count < 10 ? 30 : count < 30 ? 37 : 45;
-  const fontSize = count < 100 ? 12.5 : 10.5;
+/** Every pin stays plotted individually at every zoom level (a province-wide
+ * overview must still show where the real spread of drops is, not a clump of
+ * cluster bubbles) — only its *size* responds to zoom: small and unobtrusive
+ * zoomed all the way out, growing past its "native" size once zoomed in close
+ * enough that a bigger tap target actually helps. Piecewise-linear between a
+ * few hand-picked (zoom, scale) anchors rather than a single formula, so the
+ * curve can be tuned at either end independently. */
+function pinScaleForZoom(zoom: number): number {
+  const anchors: [number, number][] = [
+    [6, 0.4],
+    [10, 0.55],
+    [13, 0.8],
+    [15, 1],
+    [18, 1.3],
+  ];
+  if (zoom <= anchors[0][0]) return anchors[0][1];
+  if (zoom >= anchors[anchors.length - 1][0]) return anchors[anchors.length - 1][1];
+  for (let i = 0; i < anchors.length - 1; i++) {
+    const [z0, s0] = anchors[i];
+    const [z1, s1] = anchors[i + 1];
+    if (zoom >= z0 && zoom <= z1) return s0 + (s1 - s0) * ((zoom - z0) / (z1 - z0));
+  }
+  return 1;
+}
+
+/** Flat solid colour, no heavy outline — a soft drop shadow alone gives
+ * enough separation from the tiles underneath. Labeled pins carry the
+ * delivery sequence, but only once zoomed in enough to read it; zoomed out
+ * they collapse to the same plain dot shape unlabeled (unassigned) stops
+ * always use, since a number too small to read is just visual noise. */
+function pinIcon(color: string, pinLabel: string | null, zoom: number): L.DivIcon {
+  const scale = pinScaleForZoom(zoom);
+  const showLabel = pinLabel != null && zoom >= 12;
+  if (showLabel) {
+    const height = Math.max(13, Math.round(22 * scale));
+    const padX = Math.max(3, Math.round(7 * scale));
+    const minWidth = Math.max(15, Math.round(26 * scale));
+    const fontSize = Math.max(8, Math.round(11 * scale * 10) / 10);
+    const width = minWidth + padX * 2;
+    return L.divIcon({
+      className: '',
+      html: `<div style="min-width:${minWidth}px;height:${height}px;padding:0 ${padX}px;border-radius:${Math.round(height / 2)}px;background:${escapeHtml(color)};color:#161826;display:grid;place-items:center;font-weight:700;font-size:${fontSize}px;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,.35)">${escapeHtml(pinLabel)}</div>`,
+      iconSize: [width, height],
+      iconAnchor: [width / 2, height / 2],
+    });
+  }
+  const size = Math.max(5, Math.round((pinLabel != null ? 15 : 13) * scale));
   return L.divIcon({
     className: '',
-    html: `<div style="width:${size}px;height:${size}px;border-radius:50%;background:var(--color-accent);color:#fff;display:grid;place-items:center;font-weight:700;font-size:${fontSize}px;box-shadow:0 2px 7px rgba(0,0,0,.45)">${count}</div>`,
-    iconSize: L.point(size, size),
+    html: `<div style="width:${size}px;height:${size}px;border-radius:50%;background:${escapeHtml(color)};box-shadow:0 1px 3px rgba(0,0,0,.35)"></div>`,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
   });
 }
 
 export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMoveToVehicle, zones }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
-  // WH marker, route polylines, and zone polygons — none of these cluster,
-  // so they live in a plain layer group separate from the pins below.
   const layerRef = useRef<L.LayerGroup | null>(null);
-  // Delivery-stop pins only. Nearby pins collapse into a numbered bubble;
-  // clicking one zooms in, and clicking a bubble that's already at max zoom
-  // (i.e. pins genuinely on top of each other) spiderfies it apart instead.
-  const clusterRef = useRef<L.MarkerClusterGroup | null>(null);
+  // Every pin's marker + the (colour, label) it was last drawn with, so a
+  // zoom change can restyle every pin's icon in place via setIcon — no need
+  // to tear down and rebuild markers (and lose any open popup) just because
+  // the zoom level moved.
+  const pinMetaRef = useRef(new Map<string, { marker: L.Marker; color: string; pinLabel: string | null }>());
   // Always-current callback ref so marker popups (built once per stops
   // change) never close over a stale onMoveToVehicle from an earlier render.
   const onMoveRef = useRef(onMoveToVehicle);
@@ -118,6 +147,7 @@ export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMo
   // Create the map once; markers are re-drawn separately as filters change.
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
+    const pinMeta = pinMetaRef.current;
     const map = L.map(containerRef.current, { zoomControl: true, attributionControl: true });
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
@@ -125,30 +155,31 @@ export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMo
     }).addTo(map);
     map.setView([18.56, 99.04], 10); // Lamphun / Chiang Mai, until data arrives
     layerRef.current = L.layerGroup().addTo(map);
-    clusterRef.current = L.markerClusterGroup({
-      iconCreateFunction: (cluster) => clusterIcon(cluster.getChildCount()),
-      maxClusterRadius: 50,
-      spiderfyOnMaxZoom: true,
-      showCoverageOnHover: false,
-    }).addTo(map);
     mapRef.current = map;
+
+    map.on('zoomend', () => {
+      const zoom = map.getZoom();
+      for (const { marker, color, pinLabel } of pinMetaRef.current.values()) {
+        marker.setIcon(pinIcon(color, pinLabel, zoom));
+      }
+    });
 
     return () => {
       map.remove();
       mapRef.current = null;
       layerRef.current = null;
-      clusterRef.current = null;
+      pinMeta.clear();
     };
   }, []);
 
   useEffect(() => {
     const map = mapRef.current;
     const layer = layerRef.current;
-    const cluster = clusterRef.current;
-    if (!map || !layer || !cluster) return;
+    if (!map || !layer) return;
 
     layer.clearLayers();
-    cluster.clearLayers();
+    pinMetaRef.current.clear();
+    const zoom = map.getZoom();
 
     // Zone polygons first, purely decorative — non-interactive so they never
     // steal a click or hover meant for a pin sitting on top of them (Leaflet
@@ -175,8 +206,7 @@ export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMo
     }
 
     // Route lines: warehouse -> stop 1 -> stop 2 -> ... per vehicle, in that
-    // vehicle's own colour — drawn under the pins, always visible (never
-    // clustered or otherwise touched by the pin-grouping below).
+    // vehicle's own colour — drawn under the pins, always visible.
     for (const r of vehicleRoutes ?? []) {
       if (r.points.length === 0) continue;
       const latlngs: L.LatLngExpression[] = [
@@ -189,20 +219,8 @@ export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMo
 
     for (const s of stops) {
       const tooltipText = `${escapeHtml(s.label)} · ${escapeHtml(s.zoneName)}${s.status ? ` · ${escapeHtml(s.status)}` : ''}`;
-      // Flat solid colour, no heavy outline — a soft drop shadow alone gives
-      // enough separation from the tiles underneath. Labeled pins carry the
-      // sequence number; unlabeled ones (not yet assigned to a vehicle) are
-      // a small plain dot, same shape family as the labeled pin.
-      const marker = L.marker([s.lat, s.lng], {
-        icon: L.divIcon({
-          className: '',
-          html: s.pinLabel
-            ? `<div style="min-width:26px;height:22px;padding:0 7px;border-radius:11px;background:${escapeHtml(s.color)};color:#161826;display:grid;place-items:center;font-weight:700;font-size:11px;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,.35)">${escapeHtml(s.pinLabel)}</div>`
-            : `<div style="width:14px;height:14px;border-radius:50%;background:${escapeHtml(s.color)};box-shadow:0 1px 3px rgba(0,0,0,.35)"></div>`,
-          iconSize: s.pinLabel ? [42, 22] : [14, 14],
-          iconAnchor: s.pinLabel ? [21, 11] : [7, 7],
-        }),
-      });
+      const marker = L.marker([s.lat, s.lng], { icon: pinIcon(s.color, s.pinLabel, zoom) });
+      pinMetaRef.current.set(s.id, { marker, color: s.color, pinLabel: s.pinLabel });
 
       marker.bindTooltip(s.pinLabel ? tooltipText : `${tooltipText} (ยังไม่จัดลงรถ)`);
 
@@ -279,7 +297,7 @@ export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMo
         marker.bindPopup(wrap);
       }
 
-      cluster.addLayer(marker);
+      marker.addTo(layer);
     }
 
     const points: L.LatLngExpression[] = stops.map((s) => [s.lat, s.lng]);
