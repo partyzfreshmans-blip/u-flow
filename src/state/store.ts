@@ -18,7 +18,8 @@ import {
   type ReceivingRecord,
 } from '../data/receiving';
 import { DEFAULT_VEHICLES, loadRoutePlan, loadVehicles, saveRoutePlan, saveVehicles, type RoutePlan, type Vehicle } from '../data/vehicles';
-import { DEFAULT_ZONE_RULES, loadZoneRules, saveZoneRules, type ZoneRule } from '../data/zoneConfig';
+import { fetchZones, saveZones as apiSaveZones } from '../data/sources/zonesApi';
+import { pointZone, type Zone } from '../data/zones';
 import { coordKey, loadGeocodeCache, saveGeocodeCache, type GeocodeCache } from '../data/geocodeCache';
 import { reverseGeocode } from '../data/sources/geocoding';
 import { resolveRouteOrderLocations } from '../data/customerLocation';
@@ -58,6 +59,23 @@ export interface OrderEditDraft {
 export interface OrderSaveStatus {
   state: 'saving' | 'saved' | 'error';
   message?: string;
+}
+
+export interface ZoneChangeAlert {
+  orderNo: string;
+  customer: string;
+  oldZoneName: string;
+  newZoneName: string;
+}
+
+export interface PendingZoneOverride {
+  orderNo: string;
+  customer: string;
+  fromVehicleId: string | null;
+  toVehicleId: string;
+  toIndex: number | null;
+  orderZoneName: string;
+  vehicleZoneName: string;
 }
 
 export interface SkuForm {
@@ -148,8 +166,22 @@ export interface AppState {
    * number that didn't make it, with a reason, per the bulk-actions spec. */
   bulkResult: { label: string; succeeded: number; failed: BulkUpdateFailure[] } | null;
 
-  // route planner (zones + vehicles are user-editable and persisted locally)
-  zoneRules: ZoneRule[];
+  // route planner (vehicles are user-editable and persisted locally; zones
+  // are now real polygons stored server-side — see src/data/zones.ts and
+  // the Zone Management page)
+  zones: Zone[];
+  zonesLoading: boolean;
+  zonesError: string | null;
+  zonesSaveStatus: OrderSaveStatus | null;
+  /** Set after a zone save whenever an order currently assigned to a
+   * vehicle (in routePlan or an active batch) resolves to a different zone
+   * under the new polygons than it did under the old ones. Purely
+   * informational — saving zones never moves anything on its own; staff
+   * decide whether/how to re-route each flagged stop from the Planner. */
+  zoneChangeAlerts: ZoneChangeAlert[];
+  /** A cross-zone assign an administrator is being asked to confirm (see
+   * computePlanner's attemptAssign) — null when nothing is pending. */
+  pendingZoneOverride: PendingZoneOverride | null;
   /** Reverse-geocoded ตำบล/อำเภอ/จังหวัด per unique coordinate — see
    * src/data/geocodeCache.ts. Persisted so a coordinate is only ever looked
    * up once, across reloads. */
@@ -511,7 +543,12 @@ export const initialState: AppState = {
   bulkError: null,
   bulkResult: null,
 
-  zoneRules: DEFAULT_ZONE_RULES,
+  zones: [],
+  zonesLoading: true,
+  zonesError: null,
+  zonesSaveStatus: null,
+  zoneChangeAlerts: [],
+  pendingZoneOverride: null,
   geocodeCache: {},
   geocodeProgress: null,
   vehicles: DEFAULT_VEHICLES,
@@ -1167,6 +1204,33 @@ export function useAppStore() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.session?.username]);
 
+  // Delivery zones (polygons): read through this app's own authenticated
+  // backend (see src/data/sources/zonesApi.ts) — needed by the Planner map
+  // (colouring/matching pins) as much as by the Zone Management page itself,
+  // so this loads for every session, not just when that page is open.
+  useEffect(() => {
+    if (!state.session) return;
+    let cancelled = false;
+    fetchZones(loadSession())
+      .then((zones) => {
+        if (!cancelled) {
+          dispatch({ type: 'patch', patch: { zones, zonesLoading: false, zonesError: null } });
+          recordSyncSuccess();
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          const message = err instanceof Error ? err.message : 'โหลดข้อมูลโซนไม่สำเร็จ';
+          dispatch({ type: 'patch', patch: { zonesLoading: false, zonesError: message } });
+          recordSyncFailure('โซนจัดส่ง', message);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.session?.username]);
+
   // SKU Detail (order line items): read through this app's own
   // authenticated backend (see src/data/sources/skuDetail.ts) — needs a
   // session, same gating as every other Sheets-backed effect here.
@@ -1227,7 +1291,6 @@ export function useAppStore() {
     dispatch({
       type: 'patch',
       patch: {
-        zoneRules: loadZoneRules(),
         geocodeCache: loadGeocodeCache(),
         vehicles: loadVehicles(),
         routePlan: loadRoutePlan(),
@@ -1397,10 +1460,56 @@ export function useAppStore() {
   const actions = useMemo(
     () => ({
       patch: (patch: Partial<AppState>) => dispatch({ type: 'patch', patch }),
-      setZoneRules: (rules: ZoneRule[]) => {
-        dispatch({ type: 'patch', patch: { zoneRules: rules } });
-        saveZoneRules(rules);
+      /** Whole-list replace, administrator-only (server enforces this too).
+       * previousZones/routeOrders/routePlan/batchRoutes are passed explicitly
+       * rather than read off `state` — this actions object is created once
+       * and frozen, so anything it needs from current state has to come in
+       * as a parameter from whichever always-fresh view-model called it. */
+      saveZones: (params: {
+        zones: Zone[];
+        previousZones: Zone[];
+        routeOrders: RouteOrder[];
+        routePlan: RoutePlan;
+        batchRoutes: BatchRoute[];
+      }) => {
+        const { zones, previousZones, routeOrders, routePlan, batchRoutes } = params;
+        const session = loadSession();
+        if (!session) return;
+        dispatch({ type: 'patch', patch: { zonesSaveStatus: { state: 'saving' } } });
+        apiSaveZones(session, zones)
+          .then((saved) => {
+            // Only orders actually sitting on a vehicle right now are worth
+            // flagging — an order that's still unassigned just resolves to
+            // whatever zone it resolves to next time someone looks at it.
+            const assignedOrderNos = new Set<string>();
+            for (const list of Object.values(routePlan)) for (const no of list) assignedOrderNos.add(no);
+            for (const b of batchRoutes) {
+              if (b.cancelled) continue;
+              for (const no of b.orderNos) assignedOrderNos.add(no);
+            }
+            const byOrderNo = new Map(routeOrders.map((o) => [o.orderNo, o]));
+            const alerts: ZoneChangeAlert[] = [];
+            for (const orderNo of assignedOrderNos) {
+              const o = byOrderNo.get(orderNo);
+              if (!o) continue;
+              const before = pointZone(previousZones, o.lat, o.lng);
+              const after = pointZone(saved, o.lat, o.lng);
+              if (before.zoneId !== after.zoneId) {
+                alerts.push({ orderNo, customer: o.customer, oldZoneName: before.zoneName, newZoneName: after.zoneName });
+              }
+            }
+            dispatch({ type: 'patch', patch: { zones: saved, zonesSaveStatus: { state: 'saved' }, zoneChangeAlerts: alerts } });
+            setTimeout(() => dispatch({ type: 'patch', patch: { zonesSaveStatus: null } }), 2500);
+            logActivity('บันทึกโซนจัดส่ง', `${saved.length} โซน`);
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'บันทึกโซนไม่สำเร็จ';
+            dispatch({ type: 'patch', patch: { zonesSaveStatus: { state: 'error', message } } });
+          });
       },
+      dismissZoneChangeAlerts: () => dispatch({ type: 'patch', patch: { zoneChangeAlerts: [] } }),
+      requestZoneOverride: (override: PendingZoneOverride) => dispatch({ type: 'patch', patch: { pendingZoneOverride: override } }),
+      cancelZoneOverride: () => dispatch({ type: 'patch', patch: { pendingZoneOverride: null } }),
       setVehicles: (vehicles: Vehicle[]) => {
         dispatch({ type: 'patch', patch: { vehicles } });
         saveVehicles(vehicles);

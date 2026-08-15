@@ -8,6 +8,7 @@ import { canAccessPage, defaultRouteFor } from './config/permissions';
 import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { PlannerPage } from './pages/PlannerPage';
+import { ZoneManagementPage } from './pages/ZoneManagementPage';
 import { DriverPage } from './pages/DriverPage';
 import { OrderManagementPage } from './pages/OrderManagementPage';
 import { PickPage } from './pages/PickPage';
@@ -97,6 +98,7 @@ function App() {
             {state.route === 'dashboard' && <DashboardPage state={state} actions={actions} />}
             {state.route === 'route' && <OrderManagementPage state={state} actions={actions} />}
             {state.route === 'planner' && <PlannerPage state={state} actions={actions} />}
+            {state.route === 'zones' && <ZoneManagementPage state={state} actions={actions} />}
             {state.route === 'pick' && <PickPage state={state} actions={actions} />}
             {state.route === 'cod' && <CodPage state={state} actions={actions} />}
             {state.route === 'promo' && <PromoPage state={state} actions={actions} />}

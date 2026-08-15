@@ -12,7 +12,11 @@
   },
   "dependencies": {
     "@fontsource/inter": "^5.3.0",
+    "@geoman-io/leaflet-geoman-free": "^2.20.0",
     "@phosphor-icons/web": "^2.1.2",
+    "@turf/boolean-point-in-polygon": "^7.4.0",
+    "@turf/helpers": "^7.4.0",
+    "@turf/simplify": "^7.4.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "exceljs": "^4.4.0",

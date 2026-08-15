@@ -276,4 +276,4 @@ export interface CsMasterCustomer {
   note: string;
 }
 
-export type RouteKey = 'dashboard' | 'route' | 'planner' | 'driver' | 'pick' | 'cod' | 'promo' | 'grn' | 'sku' | 'customer' | 'activity' | 'settings' | 'users';
+export type RouteKey = 'dashboard' | 'route' | 'planner' | 'zones' | 'driver' | 'pick' | 'cod' | 'promo' | 'grn' | 'sku' | 'customer' | 'activity' | 'settings' | 'users';

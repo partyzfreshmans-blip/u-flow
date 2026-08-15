@@ -1,4 +1,4 @@
-import { handleExportBatchRouteHistory, handleListBatchRoutes, handleUpsertBatchRoutes } from '../../server/lib.js';
+import { handleExportBatchRouteHistory, handleFetchZones, handleListBatchRoutes, handleSaveZones, handleUpsertBatchRoutes } from '../../server/lib.js';
 import { bearerToken } from '../../server/session.js';
 import { logUnmatchedRoute, routeSlug } from '../_routing.js';
 import { sendResult } from '../_send.js';
@@ -29,6 +29,19 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   }
   if (slug === 'export' && req.method === 'GET') {
     sendResult(res, await handleExportBatchRouteHistory(token));
+    return;
+  }
+  // Zone Management (delivery-area polygons) folded into this same function
+  // rather than a new api/zones/... file, for the same Hobby-plan
+  // function-count reason as the consolidation above.
+  if (slug === 'zones-list' && req.method === 'GET') {
+    const { status, body } = await handleFetchZones(token);
+    res.status(status).json(body);
+    return;
+  }
+  if (slug === 'zones-save' && req.method === 'POST') {
+    const { status, body } = await handleSaveZones(token, req.body);
+    res.status(status).json(body);
     return;
   }
   logUnmatchedRoute('batch-routes', req, slug);

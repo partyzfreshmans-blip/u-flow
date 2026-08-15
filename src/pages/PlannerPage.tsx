@@ -41,9 +41,6 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
   const updateVehicle = (id: string, patch: Partial<(typeof state.vehicles)[number]>) =>
     actions.setVehicles(state.vehicles.map((x) => (x.id === id ? { ...x, ...patch } : x)));
 
-  const updateZone = (id: string, patch: Partial<(typeof state.zoneRules)[number]>) =>
-    actions.setZoneRules(state.zoneRules.map((z) => (z.id === id ? { ...z, ...patch } : z)));
-
   const readDragPayload = (e: React.DragEvent): DragPayload | null => {
     try {
       const raw = e.dataTransfer.getData(DRAG_MIME);
@@ -100,6 +97,29 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
         <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: 13, marginBottom: 16, borderRadius: 10, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 13 }}>
           <i className="ph ph-calendar-x" style={{ flex: 'none' }} />{v.plannerAssignSkippedMessage}
           <button className="btn btn-ghost" style={{ fontSize: 12, marginLeft: 'auto' }} onClick={v.dismissPlannerAssignSkippedMessage}>ปิด</button>
+        </div>
+      )}
+      {v.zoneChangeAlerts.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: 13, marginBottom: 16, borderRadius: 10, background: 'var(--st-warn-bg)', color: 'var(--st-warn-fg)', fontSize: 13 }}>
+          <i className="ph ph-warning-fill" style={{ flex: 'none' }} />
+          <span>มี {v.zoneChangeAlerts.length} จุดที่โซนเปลี่ยนไปหลังแก้ขอบเขตล่าสุด — ไม่ได้ย้ายออเดอร์ให้อัตโนมัติ ตรวจสอบและจัดใหม่เองได้ในตารางด้านล่าง</span>
+          <button className="btn btn-ghost" style={{ fontSize: 12, marginLeft: 'auto' }} onClick={v.dismissZoneChangeAlerts}>ปิด</button>
+        </div>
+      )}
+      {v.pendingZoneOverride && (
+        <div className="dialog-backdrop" onClick={v.cancelZoneOverride}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
+            <div className="dialog-title"><i className="ph ph-warning-fill" style={{ color: 'var(--st-warn-fg)', marginRight: 8 }} />ยืนยันข้ามโซน</div>
+            <div className="dialog-body" style={{ fontSize: 13.5, lineHeight: 1.6 }}>
+              <b>{v.pendingZoneOverride.orderNo}</b> ({v.pendingZoneOverride.customer}) อยู่โซน "<b>{v.pendingZoneOverride.orderZoneName}</b>"
+              <br />แต่กำลังจะจัดลงรถของโซน "<b>{v.pendingZoneOverride.vehicleZoneName}</b>"
+              <br /><br />ยืนยันเพื่อจัดข้ามโซนต่อไป — การยืนยันนี้จะถูกบันทึกลง Activity Log
+            </div>
+            <div className="dialog-actions">
+              <button className="btn btn-secondary" onClick={v.cancelZoneOverride}>ยกเลิก</button>
+              <button className="btn btn-primary" onClick={v.confirmZoneOverride}><i className="ph ph-check" />ยืนยันข้ามโซน</button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -199,55 +219,6 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
             {v.unzonedUnassignedCount} จาก {v.unassignedCount} ออเดอร์ที่ยังไม่จัด ยังระบุโซนไม่ได้ — "จัดอัตโนมัติตามโซน" จะข้ามรายการเหล่านี้
             {state.geocodeProgress ? ' (กำลังระบุพื้นที่จากพิกัดอยู่ รอสักครู่แล้วลองใหม่)' : ' — ตรวจว่าที่อยู่มีชื่อจังหวัด/อำเภอ หรือเพิ่มคำในตำบล/อำเภอที่ "ตั้งค่าโซน"'}
           </span>
-        </div>
-      )}
-
-      {/* zone editor */}
-      {v.canEdit && v.configTab === 'zones' && (
-        <div className="card elev-sm" style={{ marginBottom: 16, gap: 10 }}>
-          <div style={{ fontWeight: 600, fontSize: 14 }}>โซนจัดส่ง — แก้ไข เพิ่ม หรือลบได้</div>
-          <div style={{ fontSize: 11, color: 'var(--color-neutral-500)', lineHeight: 1.5 }}>
-            <i className="ph ph-info" style={{ marginRight: 4 }} />ตรวจจากบนลงล่าง เจอข้อแรกที่ตรงถือเป็นโซนนั้น — วางโซนที่เจาะจงที่สุดไว้บนสุด · "จังหวัด" อ่านจากคอลัมน์ อำเภอ,จังหวัด เท่านั้น (กันที่อยู่ที่ชื่อถนนมีคำว่าเชียงใหม่-ลำพูน) · เว้นว่าง = ไม่จำกัด
-          </div>
-          <div className="table-scroll">
-          <table className="table">
-            <thead>
-              <tr><th style={{ width: 40 }}>สี</th><th>ชื่อโซน</th><th>คำในตำบล/อำเภอ (คั่นด้วย ,)</th><th>จังหวัด (คั่นด้วย ,)</th><th style={{ width: 70 }}>รถ</th><th style={{ width: 90 }}>ลำดับ</th><th></th></tr>
-            </thead>
-            <tbody>
-              {state.zoneRules.map((z, i) => (
-                <tr key={z.id}>
-                  <td><input type="color" value={z.color} onChange={(e) => updateZone(z.id, { color: e.target.value })} style={{ width: 34, height: 28, background: 'none', border: 0, padding: 0, cursor: 'pointer' }} /></td>
-                  <td><input className="input" style={{ minHeight: 30 }} value={z.name} onChange={(e) => updateZone(z.id, { name: e.target.value })} /></td>
-                  <td><input className="input" style={{ minHeight: 30, fontSize: 12 }} value={z.areaTerms.join(',')} placeholder="เว้นว่าง = ทุกพื้นที่" onChange={(e) => updateZone(z.id, { areaTerms: e.target.value.split(',') })} onBlur={(e) => updateZone(z.id, { areaTerms: e.target.value.split(',').map((t) => t.trim()).filter(Boolean) })} /></td>
-                  <td><input className="input" style={{ minHeight: 30, fontSize: 12 }} value={z.provinceTerms.join(',')} placeholder="เว้นว่าง = ทุกจังหวัด" onChange={(e) => updateZone(z.id, { provinceTerms: e.target.value.split(',') })} onBlur={(e) => updateZone(z.id, { provinceTerms: e.target.value.split(',').map((t) => t.trim()).filter(Boolean) })} /></td>
-                  <td><input className="input" style={{ minHeight: 30, textAlign: 'center' }} value={z.route} onChange={(e) => updateZone(z.id, { route: e.target.value.toUpperCase() })} /></td>
-                  <td style={{ whiteSpace: 'nowrap' }}>
-                    <button className="btn btn-icon btn-ghost" disabled={i === 0} title="เลื่อนขึ้น" onClick={() => {
-                      const a = [...state.zoneRules]; [a[i - 1], a[i]] = [a[i], a[i - 1]]; actions.setZoneRules(a);
-                    }}><i className="ph ph-caret-up" /></button>
-                    <button className="btn btn-icon btn-ghost" disabled={i === state.zoneRules.length - 1} title="เลื่อนลง" onClick={() => {
-                      const a = [...state.zoneRules]; [a[i + 1], a[i]] = [a[i], a[i + 1]]; actions.setZoneRules(a);
-                    }}><i className="ph ph-caret-down" /></button>
-                  </td>
-                  <td style={{ textAlign: 'right' }}>
-                    <button className="btn btn-icon btn-ghost" title="ลบโซนนี้" onClick={() => actions.setZoneRules(state.zoneRules.filter((x) => x.id !== z.id))}>
-                      <i className="ph ph-trash" style={{ fontSize: 14 }} />
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn btn-secondary" onClick={() => actions.setZoneRules([...state.zoneRules, { id: `zone-${Date.now()}`, name: 'โซนใหม่', color: '#b5abfc', route: 'A', areaTerms: [], provinceTerms: [] }])}>
-              <i className="ph ph-plus" />เพิ่มโซน
-            </button>
-            <button className="btn btn-primary" style={{ marginLeft: 'auto' }} onClick={() => actions.patch({ plannerConfigTab: null })}>
-              <i className="ph ph-check" />บันทึก
-            </button>
-          </div>
         </div>
       )}
 

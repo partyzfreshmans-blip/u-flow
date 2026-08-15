@@ -1,10 +1,12 @@
 import { google } from 'googleapis';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
+import { simplify } from '@turf/simplify';
 import { DRIVE_ROOT_FOLDER_ENV, driveFolderPath, extractDriveFolderId, isAllowedFile, type AttachmentScope } from '../src/config/drive.js';
 import { GEOCODE_MIN_INTERVAL_MS, NOMINATIM_REVERSE_URL, NOMINATIM_USER_AGENT } from '../src/config/geocoding.js';
 import { isRouteOrdersTabConfigured, MAIN_SHEET_ID, ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE, SHEET_TABS, SKU_SHEET_ID, STAFF_ORDER_INFO_HEADERS, STAFF_READONLY_HEADERS } from '../src/config/sheets.js';
 import type { RouteOrder } from '../src/data/types.js';
+import { MIGRATION_SEED_ZONES, type Zone } from '../src/data/zones.js';
 import { DELIVERY_DONE_STATUSES } from '../src/state/helpers.js';
 import { createSessionToken, verifySessionToken } from './session.js';
 
@@ -1632,6 +1634,185 @@ async function appendAuditLog(sheets: SheetsClient, actor: { username: string; r
     });
   } catch (err: unknown) {
     console.error('[audit-log/append]', err instanceof Error ? err.message : err);
+  }
+}
+
+// ---------- Delivery zones: polygons drawn on the map (Zone Management page,
+// administrator/"หัวหน้าคลัง" only), replacing the old areaTerms/provinceTerms
+// text-matching rules that used to live entirely in the browser's
+// localStorage (src/data/zoneConfig.ts, now deleted). A single Sheets cell
+// caps out well under 50,000 characters, so a hand-drawn polygon's GeoJSON
+// gets simplified down to fit before it's ever written — see
+// simplifyPolygonToFit. ----------
+const ZONES_TAB_TITLE = 'Zones';
+const ZONES_HEADER = ['zone_id', 'zone_name', 'color', 'vehicle', 'priority', 'active', 'polygon_geojson'];
+const ZONES_CELL_CHAR_CAP = 50_000;
+
+async function ensureZonesSheet(sheets: SheetsClient): Promise<void> {
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: MAIN_SHEET_ID });
+  const exists = meta.data.sheets?.some((s) => s.properties?.title === ZONES_TAB_TITLE);
+  if (exists) return;
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: MAIN_SHEET_ID,
+    requestBody: { requests: [{ addSheet: { properties: { title: ZONES_TAB_TITLE } } }] },
+  });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: MAIN_SHEET_ID,
+    range: `${ZONES_TAB_TITLE}!A1:G1`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [ZONES_HEADER] },
+  });
+  // First-ever creation only — seed the team's real four zones as coarse
+  // starting polygons (see MIGRATION_SEED_ZONES's own comment) so the page
+  // isn't a blank map on day one. Never re-applied once the tab exists.
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: MAIN_SHEET_ID,
+    range: `${ZONES_TAB_TITLE}!A2:G${1 + MIGRATION_SEED_ZONES.length}`,
+    valueInputOption: 'RAW',
+    requestBody: { values: MIGRATION_SEED_ZONES.map((z, i) => zoneRowValues(z, i)) },
+  });
+}
+
+function zoneRowValues(z: Zone, priority: number): unknown[] {
+  return [z.id, z.name, z.color, z.vehicleId, priority, z.active ? 'TRUE' : 'FALSE', JSON.stringify(z.polygon)];
+}
+
+function parseZoneRow(r: unknown[]): Zone | null {
+  const id = String(r[0] ?? '').trim();
+  if (!id) return null;
+  let polygon: Zone['polygon'] | null = null;
+  try {
+    polygon = JSON.parse(String(r[6] ?? '')) as Zone['polygon'];
+  } catch {
+    return null; // a corrupted/hand-edited cell — drop the zone rather than crash every reader
+  }
+  if (!polygon) return null;
+  return {
+    id,
+    name: String(r[1] ?? '').trim() || id,
+    color: String(r[2] ?? '').trim() || '#b5abfc',
+    vehicleId: String(r[3] ?? '').trim(),
+    active: String(r[5] ?? '').trim().toUpperCase() === 'TRUE',
+    polygon,
+  };
+}
+
+const zonesCache = makeSheetCache<Zone[]>();
+
+async function readZones(sheets: SheetsClient): Promise<Zone[]> {
+  await ensureZonesSheet(sheets);
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${ZONES_TAB_TITLE}!A:G` });
+  const rows = res.data.values ?? [];
+  // priority column (index 4) is the intended sort key — list order IS
+  // "first match wins", so a row written out of order (e.g. a manual sheet
+  // edit) still resolves the way its priority number says, not the way it
+  // happens to sit in the sheet.
+  const withPriority = rows
+    .slice(1)
+    .map((r) => ({ zone: parseZoneRow(r), priority: Number(r[4] ?? 0) || 0 }))
+    .filter((x): x is { zone: Zone; priority: number } => x.zone !== null);
+  withPriority.sort((a, b) => a.priority - b.priority);
+  return withPriority.map((x) => x.zone);
+}
+
+/** Any authenticated user can read zones — the Planner map and every page
+ * that colours a pin by zone needs this, and none of it is more sensitive
+ * than what those pages already show. */
+export async function handleFetchZones(token: string | null): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  try {
+    const sheets = await getSheetsClient();
+    const { data, stale, error } = await zonesCache.read(() => readZones(sheets));
+    return { status: 200, body: { zones: data, stale, error } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'โหลดข้อมูลโซนไม่สำเร็จ';
+    console.error('[zones/list]', message);
+    return { status: 500, body: { error: message } };
+  }
+}
+
+/** Escalating-tolerance simplify until the polygon's GeoJSON fits one Sheets
+ * cell. 0.0001° is already sub-11m precision, so this only ever visibly
+ * coarsens a zone that was drawn with far more vertices than a delivery-area
+ * boundary needs (e.g. traced very tightly, or accidentally double-clicked a
+ * lot while drawing). */
+function simplifyPolygonToFit(polygon: Zone['polygon'], maxChars: number): Zone['polygon'] {
+  if (JSON.stringify(polygon).length <= maxChars) return polygon;
+  for (const tolerance of [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]) {
+    const simplified = simplify(polygon, { tolerance, highQuality: false }) as Zone['polygon'];
+    if (JSON.stringify(simplified).length <= maxChars) return simplified;
+  }
+  return simplify(polygon, { tolerance: 0.5, highQuality: false }) as Zone['polygon'];
+}
+
+function isValidZone(z: unknown): z is Zone {
+  if (!z || typeof z !== 'object') return false;
+  const r = z as Record<string, unknown>;
+  if (typeof r.id !== 'string' || r.id.trim() === '') return false;
+  if (typeof r.name !== 'string' || r.name.trim() === '') return false;
+  if (typeof r.color !== 'string') return false;
+  if (typeof r.vehicleId !== 'string') return false;
+  if (typeof r.active !== 'boolean') return false;
+  const poly = r.polygon as { type?: unknown; coordinates?: unknown } | undefined;
+  if (!poly || (poly.type !== 'Polygon' && poly.type !== 'MultiPolygon') || !Array.isArray(poly.coordinates)) return false;
+  return true;
+}
+
+/** Whole-list replace — every zone edit (draw, drag a vertex, reorder,
+ * rename, delete) happens client-side against a local draft, and "บันทึก"
+ * commits the entire list in one write. Simplest correct option given
+ * reordering + polygon edits + add/delete can all happen together in one
+ * save; there's no per-zone merge complexity worth the code for a list this
+ * small (a handful of zones, never hundreds of rows). */
+export async function handleSaveZones(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (payload.role !== 'administrator') {
+    return { status: 403, body: { error: 'จัดการโซนได้เฉพาะ Administrator (หัวหน้าคลัง)' } };
+  }
+  const { zones } = (body ?? {}) as Record<string, unknown>;
+  if (!Array.isArray(zones) || !zones.every(isValidZone)) {
+    return { status: 400, body: { error: 'ข้อมูลโซนไม่ถูกต้อง — ต้องมี id, name, color, vehicleId, active, polygon ครบทุกโซน' } };
+  }
+  const list = zones as Zone[];
+
+  try {
+    const sheets = await getSheetsClient();
+    const before = await readZones(sheets); // for the audit-log diff below
+    await ensureZonesSheet(sheets);
+
+    const rows = list.map((z, i) => zoneRowValues({ ...z, polygon: simplifyPolygonToFit(z.polygon, ZONES_CELL_CHAR_CAP) }, i));
+    // Clear the whole data range first so a save with fewer zones than
+    // before doesn't leave stale trailing rows behind.
+    await sheets.spreadsheets.values.clear({ spreadsheetId: MAIN_SHEET_ID, range: `${ZONES_TAB_TITLE}!A2:G` });
+    if (rows.length > 0) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: MAIN_SHEET_ID,
+        range: `${ZONES_TAB_TITLE}!A2:G${1 + rows.length}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: rows },
+      });
+    }
+    zonesCache.invalidate();
+
+    const beforeById = new Map(before.map((z) => [z.id, z]));
+    const entries: AuditLogEntry[] = [];
+    for (const z of list) {
+      const prev = beforeById.get(z.id);
+      const summary = (x: Zone) => `${x.name} · ${x.color} · รถ:${x.vehicleId || '—'} · ${x.active ? 'เปิด' : 'ปิด'} · ${JSON.stringify(x.polygon).length} ตัวอักษร`;
+      entries.push({ orderId: z.id, field: 'zone', oldValue: prev ? summary(prev) : '(ใหม่)', newValue: summary(z) });
+    }
+    for (const prev of before) {
+      if (!list.some((z) => z.id === prev.id)) entries.push({ orderId: prev.id, field: 'zone', oldValue: prev.name, newValue: '(ลบแล้ว)' });
+    }
+    await appendAuditLog(sheets, payload, entries);
+
+    return { status: 200, body: { ok: true, zones: list } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'บันทึกโซนไม่สำเร็จ';
+    console.error('[zones/save]', message);
+    return { status: 500, body: { error: message } };
   }
 }
 

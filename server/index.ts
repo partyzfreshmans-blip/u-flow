@@ -18,6 +18,7 @@ import {
   handleFetchSkuDetailList,
   handleFetchSkuMasterList,
   handleFetchStaffOrderInfoList,
+  handleFetchZones,
   handleHealth,
   handleListBatchRoutes,
   handleListBookings,
@@ -26,6 +27,7 @@ import {
   handleMe,
   handleReverseGeocode,
   handleLinkLineItemPromo,
+  handleSaveZones,
   handleUpdateCsMasterLocation,
   handleUpdateRouteOrder,
   handleUpdateUser,
@@ -210,6 +212,16 @@ app.post('/api/batch-routes/upsert', async (req, res) => {
 
 app.get('/api/batch-routes/export', async (req, res) => {
   sendResult(res, await handleExportBatchRouteHistory(bearerToken(req.headers.authorization)));
+});
+
+app.get('/api/batch-routes/zones-list', async (req, res) => {
+  const { status, body } = await handleFetchZones(bearerToken(req.headers.authorization));
+  res.status(status).json(body);
+});
+
+app.post('/api/batch-routes/zones-save', async (req, res) => {
+  const { status, body } = await handleSaveZones(bearerToken(req.headers.authorization), req.body);
+  res.status(status).json(body);
 });
 
 app.listen(PORT, () => {

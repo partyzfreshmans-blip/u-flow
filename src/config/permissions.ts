@@ -26,6 +26,10 @@ const PAGE_ACCESS: Record<RouteKey, Record<Role, PageAccess>> = {
   dashboard: { administrator: 'edit', manager: 'edit', admin_staff: 'edit', checker: 'view', picker: 'none', driver: 'none' },
   route: { administrator: 'edit', manager: 'edit', admin_staff: 'edit', checker: 'view', picker: 'none', driver: 'none' },
   planner: { administrator: 'edit', manager: 'edit', admin_staff: 'edit', checker: 'none', picker: 'none', driver: 'view' },
+  // Zone Management (drawing delivery-area polygons) is a "หัวหน้าคลัง"
+  // action — same admin-only treatment as settings/users below, not the
+  // broader canEditPlan set the rest of the Planner uses.
+  zones: { administrator: 'edit', manager: 'none', admin_staff: 'none', checker: 'none', picker: 'none', driver: 'none' },
   driver: { administrator: 'edit', manager: 'edit', admin_staff: 'none', checker: 'none', picker: 'none', driver: 'edit' },
   pick: { administrator: 'edit', manager: 'edit', admin_staff: 'view', checker: 'edit', picker: 'edit', driver: 'none' },
   cod: { administrator: 'edit', manager: 'edit', admin_staff: 'edit', checker: 'none', picker: 'none', driver: 'view' },
@@ -52,7 +56,7 @@ export function canEditPage(role: Role, page: RouteKey): boolean {
 
 /** First page (in nav order) a role lands on after login / whenever their
  * current route becomes inaccessible (role changed, direct URL, etc). */
-const NAV_ORDER: RouteKey[] = ['dashboard', 'route', 'planner', 'driver', 'pick', 'cod', 'promo', 'grn', 'sku', 'customer', 'activity', 'settings', 'users'];
+const NAV_ORDER: RouteKey[] = ['dashboard', 'route', 'planner', 'zones', 'driver', 'pick', 'cod', 'promo', 'grn', 'sku', 'customer', 'activity', 'settings', 'users'];
 export function defaultRouteFor(role: Role): RouteKey {
   if (role === 'driver') return 'driver';
   return NAV_ORDER.find((p) => canAccessPage(role, p)) ?? 'dashboard';
@@ -112,6 +116,13 @@ export function seesAllActivityLog(role: Role): boolean {
 /** User Management: only administrator can create/edit; manager can view
  * the roster read-only; everyone else has no access at all (page hidden). */
 export function canManageUsers(role: Role): boolean {
+  return role === 'administrator';
+}
+
+/** Zone Management: drawing/editing delivery-area polygons, and confirming
+ * a cross-zone assign override, are both "หัวหน้าคลัง" actions —
+ * administrator only, same treatment as canManageUsers above. */
+export function canManageZones(role: Role): boolean {
   return role === 'administrator';
 }
 

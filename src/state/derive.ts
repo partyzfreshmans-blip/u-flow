@@ -5,7 +5,7 @@ import { PROMO_UNITS, type ApiImportOrder, type Order, type OrderLineItem, type 
 import { lineDiff, lineNetTotal, receivingFolderKey, recordHasDiscrepancy, recordTotal, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { loadCode } from '../data/vehicles';
 import { nextBatchId, type BatchRoute } from '../data/batchRoutes';
-import { resolveZone, UNASSIGNED_COLOR } from '../data/zoneConfig';
+import { pointZone, UNASSIGNED_COLOR, type ZoneMatch } from '../data/zones';
 import { coordKey, type GeocodeCache } from '../data/geocodeCache';
 import { resolveRouteOrderLocations } from '../data/customerLocation';
 import { avgPricePerPiece, detectUnit } from '../data/sources/promotionsSheet';
@@ -43,6 +43,17 @@ export function filterOutBatchedOrderNos(orderNos: string[], batchRoutes: BatchR
 /** Per-vehicle distinguishing colour (route lines, name swatch) — separate
  * from zone colour, since one vehicle's stops can span several zones. */
 const VEHICLE_PALETTE = ['#5b8ff9', '#61ddaa', '#f6bd16', '#e8684a', '#6dc8ec', '#9270ca', '#ff9d4d', '#269a99', '#ff99c3', '#daaa53'];
+
+/** Short route-code label for a resolved zone (e.g. a vehicle's loadPrefix,
+ * "A"/"TO"/"CH") — what the old text-rule system's ZoneMatch.route used to
+ * carry directly; now derived by looking up the zone's linked vehicle,
+ * since a zone (polygon) and a vehicle are two separate things that just
+ * happen to be linked by id. "—" whenever the zone has no vehicle linked
+ * yet, same as the old "no route" case. */
+function zoneRouteLabel(zone: ZoneMatch, vehicles: { id: string; loadPrefix: string }[]): string {
+  if (!zone.zoneId || !zone.vehicleId) return '—';
+  return vehicles.find((v) => v.id === zone.vehicleId)?.loadPrefix ?? '—';
+}
 
 /** Per-order quantity broken down into the three units warehouse staff
  * actually load by (ชิ้น/แพ็ค/ลัง) — หีบ and คู่ fold into ลัง/ชิ้น
@@ -193,6 +204,7 @@ export const pageTitles: Record<AppState['route'], [string, string]> = {
   dashboard: ['แดชบอร์ด / ออเดอร์ใหม่', 'ออเดอร์ล่าสุดที่ยังไม่ได้จัดเส้นทาง · ข้อมูลสดจาก Unii API'],
   route: ['จัดการออเดอร์', 'ข้อมูลจริงจาก Unii API · แก้ไขวันที่จัดส่ง/หมายเหตุ/ใบกำกับภาษีแล้วบันทึกลงฐานข้อมูลได้'],
   planner: ['วางแผนจัดรูท', 'จัดออเดอร์ลงรถ · เรียงลำดับส่งจากไกลไปใกล้คลัง · ออกลำดับโหลด'],
+  zones: ['จัดการโซน', 'วาดขอบเขตโซนจัดส่งบนแผนที่ · ผูกรถประจำโซน · เฉพาะ Administrator'],
   // App.tsx renders DriverPage full-screen before this map is ever read for
   // 'driver' — this entry only exists to satisfy the Record type.
   driver: ['มุมมองคนขับ', 'ใบจัดรูทมือถือรายคัน'],
@@ -846,7 +858,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
       orderNo: o.orderNo,
       customer: o.customer,
       phone: o.phone,
-      route: resolveZone(state.zoneRules, o, state.geocodeCache).route,
+      route: zoneRouteLabel(pointZone(state.zones, o.lat, o.lng), state.vehicles),
       amtText: fmt(o.totalAmount),
       itemCountText: o.itemCount.toLocaleString('en-US'),
       orderedAtText: formatOrderedAt(o.orderedAtText),
@@ -883,7 +895,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
         { plannedDeliveryDate: sheetDateToDayKey(o.plannedDeliveryDate) ?? '', note: o.note, wantsTaxInvoice: o.wantsTaxInvoice },
       );
     return {
-      route: resolveZone(state.zoneRules, o, state.geocodeCache).route,
+      route: zoneRouteLabel(pointZone(state.zones, o.lat, o.lng), state.vehicles),
       districtProvince: districtProvinceLabel(o, state.geocodeCache),
       orderNo: o.orderNo,
       phone: o.phone,
@@ -1221,7 +1233,11 @@ export function computePlanner(state: AppState, actions: AppActions) {
    * when null). Powers both drag-and-drop and the "ย้ายไปรถคันอื่น" dropdown —
    * stop sequence/load-code numbers fall out for free since they're derived
    * directly from routePlan's array order. */
-  const moveOrderToVehicle = (orderNo: string, fromVehicleId: string, toVehicleId: string, toIndex: number | null) => {
+  /** The actual routePlan mutation — no zone check. Called directly by
+   * confirmZoneOverride (which has already gotten its confirmation) and by
+   * the guarded `moveOrderToVehicle` below once a move turns out to need no
+   * confirmation at all. Nothing else should call this one directly. */
+  const moveOrderToVehicleRaw = (orderNo: string, fromVehicleId: string, toVehicleId: string, toIndex: number | null) => {
     if (isVehicleLocked(fromVehicleId) || isVehicleLocked(toVehicleId)) return;
     const fromList = [...currentOrderNos(fromVehicleId)];
     const srcIdx = fromList.indexOf(orderNo);
@@ -1249,6 +1265,84 @@ export function computePlanner(state: AppState, actions: AppActions) {
     actions.logActivity('ย้ายออเดอร์ (วางแผนจัดรูท)', `จาก ${vehicleNameById.get(fromVehicleId) ?? fromVehicleId} → ${vehicleNameById.get(toVehicleId) ?? toVehicleId}`, orderNo);
     syncBatchAfterEdit(fromVehicleId, fromList, `ย้าย ${orderNo} ออกไป ${vehicleNameById.get(toVehicleId) ?? toVehicleId}`);
     syncBatchAfterEdit(toVehicleId, toList, `ย้าย ${orderNo} เข้าจาก ${vehicleNameById.get(fromVehicleId) ?? fromVehicleId}`);
+  };
+
+  /** Directly puts a not-yet-assigned order on a vehicle for the first time
+   * — the shared body behind both the unassigned table's guarded `assignTo`
+   * and confirmZoneOverride's fromVehicleId === null case. */
+  const directAssignNew = (orderNo: string, vehicleId: string) => {
+    if (isVehicleLocked(vehicleId)) return;
+    const next = [...currentOrderNos(vehicleId), orderNo];
+    applyVehicleOrderNos(vehicleId, next);
+    actions.logActivity('จัดออเดอร์ลงรถ (วางแผนจัดรูท)', `${vehicleNameById.get(vehicleId) ?? vehicleId}`, orderNo);
+    syncBatchAfterEdit(vehicleId, next, `เพิ่ม ${orderNo}`);
+  };
+
+  /** True (with names to show) when `orderNo`'s resolved zone is linked to
+   * a DIFFERENT vehicle than `toVehicleId` — the cross-zone-assign signal.
+   * Silent whenever there isn't enough zone data to compare confidently: no
+   * coordinate yet, the order's zone has no vehicle of its own, or the
+   * target vehicle isn't linked to any zone at all (a spare truck, BigLot)
+   * — those are uninformative cases, not mistakes worth flagging. */
+  const zoneMismatch = (orderNo: string, toVehicleId: string): { orderZoneName: string; vehicleZoneName: string } | null => {
+    const order = byOrderNo.get(orderNo);
+    if (!order) return null;
+    const orderZone = pointZone(state.zones, order.lat, order.lng);
+    if (!orderZone.zoneId || !orderZone.vehicleId || orderZone.vehicleId === toVehicleId) return null;
+    const vehicleZone = state.zones.find((z) => z.active && z.vehicleId === toVehicleId);
+    if (!vehicleZone) return null;
+    return { orderZoneName: orderZone.zoneName, vehicleZoneName: vehicleZone.name };
+  };
+
+  const isAdmin = role === 'administrator';
+
+  /** Cross-zone guard shared by every assign/move entry point below. A
+   * mismatch either blocks outright (anyone but an administrator — see the
+   * TO-18/D3-onto-D2-truck example that prompted this) or opens a confirm
+   * dialog for an administrator to explicitly sign off on (confirming IS
+   * the approval — see confirmZoneOverride, which logs it as an override).
+   * Returns true when the caller should stop here (blocked, or handed off
+   * to the dialog); false means "no mismatch, go ahead normally". */
+  const guardZoneMove = (orderNo: string, customer: string, fromVehicleId: string | null, toVehicleId: string, toIndex: number | null): boolean => {
+    const mismatch = zoneMismatch(orderNo, toVehicleId);
+    if (!mismatch) return false;
+    if (!isAdmin) {
+      actions.patch({
+        plannerAssignSkippedMessage: `${orderNo} อยู่โซน "${mismatch.orderZoneName}" แต่รถคันนี้เป็นของโซน "${mismatch.vehicleZoneName}" — ข้ามโซนได้เฉพาะ Administrator (หัวหน้าคลัง) เท่านั้น`,
+      });
+      return true;
+    }
+    actions.requestZoneOverride({
+      orderNo, customer, fromVehicleId, toVehicleId, toIndex,
+      orderZoneName: mismatch.orderZoneName, vehicleZoneName: mismatch.vehicleZoneName,
+    });
+    return true;
+  };
+
+  const confirmZoneOverride = () => {
+    const pending = state.pendingZoneOverride;
+    if (!pending) return;
+    if (pending.fromVehicleId) {
+      moveOrderToVehicleRaw(pending.orderNo, pending.fromVehicleId, pending.toVehicleId, pending.toIndex);
+    } else {
+      directAssignNew(pending.orderNo, pending.toVehicleId);
+    }
+    actions.logActivity('ข้ามโซน (ยืนยันโดยหัวหน้าคลัง)', `${pending.orderNo}: ${pending.orderZoneName} → ${pending.vehicleZoneName}`, pending.orderNo);
+    actions.cancelZoneOverride();
+  };
+
+  /** Public move entry point — every existing caller (drag-and-drop, the
+   * "ย้ายไปรถคันอื่น" dropdown, onMapMoveToVehicle) keeps calling this exact
+   * name, so the zone guard applies everywhere a cross-vehicle move can
+   * happen without having to touch every call site individually. Reordering
+   * within the same vehicle never needs a zone check — nothing about the
+   * assignment actually changed. */
+  const moveOrderToVehicle = (orderNo: string, fromVehicleId: string, toVehicleId: string, toIndex: number | null) => {
+    if (fromVehicleId !== toVehicleId) {
+      const customer = byOrderNo.get(orderNo)?.customer ?? '';
+      if (guardZoneMove(orderNo, customer, fromVehicleId, toVehicleId, toIndex)) return;
+    }
+    moveOrderToVehicleRaw(orderNo, fromVehicleId, toVehicleId, toIndex);
   };
 
   const orderUnitQty = buildOrderUnitQtyMap(state.orderLineItems);
@@ -1311,7 +1405,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
 
   const unassigned = unassignedCandidates
     .map((o) => {
-      const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
+      const zone = pointZone(state.zones, o.lat, o.lng);
       const booking = activeBookingByOrderNo.get(o.orderNo) ?? null;
       // Gate: no delivery date yet — never assignable to a vehicle. Kept
       // visible in this table (with a badge) rather than hidden, so staff
@@ -1347,7 +1441,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
         zoneName: zone.zoneName,
         zoneColor: zone.color,
         hasZone: zone.zoneId !== null,
-        suggestedRoute: zone.route,
+        suggestedRoute: zoneRouteLabel(zone, state.vehicles),
         distanceKm: distanceKmOf(o),
         distanceText: distanceKmOf(o) != null ? `${distanceKmOf(o)!.toFixed(1)} กม.` : '—',
         isNewCustomer: isNewCustomerFlag(o.isNewCustomer),
@@ -1365,11 +1459,8 @@ export function computePlanner(state: AppState, actions: AppActions) {
         assignTo: noDeliveryDate
           ? undefined
           : (vehicleId: string) => {
-              if (isVehicleLocked(vehicleId)) return;
-              const next = [...currentOrderNos(vehicleId), o.orderNo];
-              applyVehicleOrderNos(vehicleId, next);
-              actions.logActivity('จัดออเดอร์ลงรถ (วางแผนจัดรูท)', `${vehicleNameById.get(vehicleId) ?? vehicleId}`, o.orderNo);
-              syncBatchAfterEdit(vehicleId, next, `เพิ่ม ${o.orderNo}`);
+              if (guardZoneMove(o.orderNo, o.customer, null, vehicleId, null)) return;
+              directAssignNew(o.orderNo, vehicleId);
             },
         bookedByDriver: booking?.driverUsername ?? null,
         canDecideBooking: canDecide,
@@ -1435,7 +1526,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
       .map((no) => byOrderNo.get(no))
       .filter((o): o is NonNullable<typeof o> => o != null)
       .map((o, i, arr) => {
-        const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
+        const zone = pointZone(state.zones, o.lat, o.lng);
         // Leg distance — how far this stop is from the one before it (from
         // the warehouse for the first stop), which is what actually matters
         // when sequencing a route. The previous column showed distance from
@@ -1672,15 +1763,12 @@ export function computePlanner(state: AppState, actions: AppActions) {
     let assignedCount = 0;
     const touchedVehicleIds = new Set<string>();
     for (const o of candidates.filter((x) => !assignedTo.has(x.orderNo))) {
-      const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
-      if (zone.route === '—') continue;
-      // Prefer the vehicle explicitly assigned this zone; only fall back to
-      // matching the load prefix against the zone's route letter, since two
-      // zones can share a route letter and would otherwise pile onto one truck.
-      const target =
-        state.vehicles.find((v) => v.zoneNote.trim() !== '' && zone.zoneName.includes(v.zoneNote.trim())) ??
-        state.vehicles.find((v) => v.zoneNote.trim() !== '' && v.zoneNote.includes(zone.zoneName)) ??
-        state.vehicles.find((v) => v.loadPrefix.toUpperCase() === zone.route.toUpperCase());
+      const zone = pointZone(state.zones, o.lat, o.lng);
+      if (!zone.zoneId || !zone.vehicleId) continue;
+      // The zone IS the assignment now — it's linked to exactly one vehicle
+      // (set on the Zone Management page), no more guessing from zoneNote
+      // text or a route-letter match against loadPrefix.
+      const target = state.vehicles.find((v) => v.id === zone.vehicleId);
       if (!target || isVehicleLocked(target.id)) continue;
       plan[target.id] = [...(plan[target.id] ?? []), o.orderNo];
       assignedCount++;
@@ -1817,12 +1905,25 @@ export function computePlanner(state: AppState, actions: AppActions) {
       }
       actions.setRoutePlan(plan);
     },
-    zoneLegend: state.zoneRules.map((z) => ({ id: z.id, name: z.name, color: z.color })),
+    zoneLegend: state.zones.filter((z) => z.active).map((z) => ({ id: z.id, name: z.name, color: z.color })),
     unassignedColor: UNASSIGNED_COLOR,
     configTab: state.plannerConfigTab,
-    openZones: () => actions.patch({ plannerConfigTab: state.plannerConfigTab === 'zones' ? null : 'zones' }),
+    // Zone editing moved off this page entirely — drawing polygons needs a
+    // real map-drawing UI, not an inline text-rule table. See
+    // ZoneManagementPage.tsx.
+    openZones: () => actions.patch({ route: 'zones' }),
     openVehicles: () => actions.patch({ plannerConfigTab: state.plannerConfigTab === 'vehicles' ? null : 'vehicles' }),
     moveOrderToVehicle,
+
+    // Cross-zone assign guard — see guardZoneMove/confirmZoneOverride above.
+    pendingZoneOverride: state.pendingZoneOverride,
+    confirmZoneOverride,
+    cancelZoneOverride: () => actions.cancelZoneOverride(),
+
+    // "มี N จุดที่โซนเปลี่ยนไป" — set by a zone save, never auto-applied; see
+    // saveZones in store.ts and ZoneChangeAlert's own comment on AppState.
+    zoneChangeAlerts: state.zoneChangeAlerts,
+    dismissZoneChangeAlerts: () => actions.dismissZoneChangeAlerts(),
 
     // Batch Route — "Assign"/"ยืนยันรูท" confirmation step
     plannerTab: state.plannerTab,
@@ -2030,7 +2131,7 @@ export function computeDriverRouteDetail(state: AppState, actions: AppActions, b
     .map((no) => byOrderNo.get(no))
     .filter((o): o is NonNullable<typeof o> => o != null)
     .map((o, i, arr) => {
-      const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
+      const zone = pointZone(state.zones, o.lat, o.lng);
       const distanceKm =
         o.locationSource === 'override'
           ? warehouse && o.lat != null && o.lng != null
