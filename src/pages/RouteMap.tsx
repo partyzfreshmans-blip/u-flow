@@ -1,27 +1,18 @@
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-// Side-effect only — attaches window.OverlappingMarkerSpiderfier once
-// window.L exists (Leaflet always sets that global itself; see its own
-// dist/leaflet-src.js). No ESM export, so it's imported purely for effect.
-import 'overlapping-marker-spiderfier-leaflet';
+// Side-effect only — attaches L.markerClusterGroup()/L.MarkerClusterGroup via
+// ambient module augmentation (see @types/leaflet.markercluster). Nearby pins
+// collapse into a numbered bubble at low zoom and split apart (auto-spiderfy
+// at max zoom for exact-same-spot pins) on click, instead of the old
+// overlapping-marker-spiderfier-leaflet approach of always spreading every
+// overlap into a tiny fan — the "18 unassigned pins stacked in one spot"
+// case reads as one bubble now instead of an unreadable pile.
+import 'leaflet.markercluster';
+// Only the base plugin CSS (spiderfy legs, cluster fade/zoom animation) —
+// MarkerCluster.Default.css's own circle-colour theme is skipped since every
+// cluster bubble here is custom-drawn via iconCreateFunction below.
+import 'leaflet.markercluster/dist/MarkerCluster.css';
 import { useEffect, useRef } from 'react';
-
-// This plugin ships no TypeScript types and attaches itself to the global
-// scope rather than exporting anything — declare just the surface used here.
-interface OverlappingMarkerSpiderfier {
-  addMarker(marker: L.Marker | L.CircleMarker): OverlappingMarkerSpiderfier;
-  clearMarkers(): OverlappingMarkerSpiderfier;
-  addListener(event: 'click', cb: (marker: L.Marker | L.CircleMarker) => void): OverlappingMarkerSpiderfier;
-  addListener(event: 'spiderfy' | 'unspiderfy', cb: (markers: (L.Marker | L.CircleMarker)[]) => void): OverlappingMarkerSpiderfier;
-}
-interface OverlappingMarkerSpiderfierCtor {
-  new (map: L.Map, options?: { keepSpiderfied?: boolean; nearbyDistance?: number }): OverlappingMarkerSpiderfier;
-}
-declare global {
-  interface Window {
-    OverlappingMarkerSpiderfier?: OverlappingMarkerSpiderfierCtor;
-  }
-}
 
 interface Stop {
   id: string;
@@ -62,6 +53,17 @@ interface VehicleOption {
   name: string;
 }
 
+/** A delivery zone's colour/name + the same polygon it's drawn with on the
+ * Zone Management page — drawn here as a read-only translucent overlay so
+ * planners can see the zone boundaries their auto-assign decisions are
+ * actually based on, right next to the pins themselves. */
+interface ZoneOverlay {
+  id: string;
+  name: string;
+  color: string;
+  polygon: GeoJSON.Polygon | GeoJSON.MultiPolygon;
+}
+
 interface Props {
   stops: Stop[];
   warehouse: { lat: number; lng: number } | null;
@@ -72,6 +74,9 @@ interface Props {
    * in the location-edit dialog has no use for it). */
   vehicleOptions?: VehicleOption[];
   onMoveToVehicle?: (orderNo: string, fromVehicleId: string | null, toVehicleId: string) => void;
+  /** Active zone polygons to draw underneath the pins — omit to skip the
+   * overlay entirely (e.g. the location-edit preview map has no zones). */
+  zones?: ZoneOverlay[];
 }
 
 /** Leaflet inserts divIcon/tooltip content via innerHTML with no escaping of
@@ -82,16 +87,29 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMoveToVehicle }: Props) {
+/** Pin sizing/weight step up a little past ~10 and ~30 markers so a big
+ * cluster still reads as "clearly more" at a glance, not just a bigger
+ * number in the same size bubble. */
+function clusterIcon(count: number): L.DivIcon {
+  const size = count < 10 ? 30 : count < 30 ? 37 : 45;
+  const fontSize = count < 100 ? 12.5 : 10.5;
+  return L.divIcon({
+    className: '',
+    html: `<div style="width:${size}px;height:${size}px;border-radius:50%;background:var(--color-accent);color:#fff;display:grid;place-items:center;font-weight:700;font-size:${fontSize}px;box-shadow:0 2px 7px rgba(0,0,0,.45)">${count}</div>`,
+    iconSize: L.point(size, size),
+  });
+}
+
+export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMoveToVehicle, zones }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
+  // WH marker, route polylines, and zone polygons — none of these cluster,
+  // so they live in a plain layer group separate from the pins below.
   const layerRef = useRef<L.LayerGroup | null>(null);
-  // Spreads overlapping/near-identical pins apart into a small circle (with
-  // thin "leg" lines back to the real point) on click, instead of merging
-  // them into a numbered cluster bubble — every stop stays individually
-  // labeled and colored no matter how many share a spot or what zoom level
-  // is active.
-  const omsRef = useRef<OverlappingMarkerSpiderfier | null>(null);
+  // Delivery-stop pins only. Nearby pins collapse into a numbered bubble;
+  // clicking one zooms in, and clicking a bubble that's already at max zoom
+  // (i.e. pins genuinely on top of each other) spiderfies it apart instead.
+  const clusterRef = useRef<L.MarkerClusterGroup | null>(null);
   // Always-current callback ref so marker popups (built once per stops
   // change) never close over a stale onMoveToVehicle from an earlier render.
   const onMoveRef = useRef(onMoveToVehicle);
@@ -107,33 +125,41 @@ export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMo
     }).addTo(map);
     map.setView([18.56, 99.04], 10); // Lamphun / Chiang Mai, until data arrives
     layerRef.current = L.layerGroup().addTo(map);
+    clusterRef.current = L.markerClusterGroup({
+      iconCreateFunction: (cluster) => clusterIcon(cluster.getChildCount()),
+      maxClusterRadius: 50,
+      spiderfyOnMaxZoom: true,
+      showCoverageOnHover: false,
+    }).addTo(map);
     mapRef.current = map;
-
-    if (window.OverlappingMarkerSpiderfier) {
-      const oms = new window.OverlappingMarkerSpiderfier(map, { keepSpiderfied: true, nearbyDistance: 20 });
-      // OMS owns click semantics for any marker added to it (see below,
-      // where each marker's own Leaflet click binding is stripped) — this
-      // is the one place a popup actually gets opened.
-      oms.addListener('click', (marker) => marker.openPopup());
-      oms.addListener('spiderfy', () => map.closePopup());
-      omsRef.current = oms;
-    }
 
     return () => {
       map.remove();
       mapRef.current = null;
       layerRef.current = null;
-      omsRef.current = null;
+      clusterRef.current = null;
     };
   }, []);
 
   useEffect(() => {
     const map = mapRef.current;
     const layer = layerRef.current;
-    if (!map || !layer) return;
+    const cluster = clusterRef.current;
+    if (!map || !layer || !cluster) return;
 
     layer.clearLayers();
-    omsRef.current?.clearMarkers();
+    cluster.clearLayers();
+
+    // Zone polygons first, purely decorative — non-interactive so they never
+    // steal a click or hover meant for a pin sitting on top of them (Leaflet
+    // also keeps vector layers like this in a lower pane than marker icons,
+    // so pins already render above them regardless).
+    for (const z of zones ?? []) {
+      L.geoJSON(z.polygon, {
+        interactive: false,
+        style: { color: z.color, weight: 1.5, opacity: 0.85, fillColor: z.color, fillOpacity: 0.14 },
+      }).addTo(layer);
+    }
 
     if (warehouse) {
       L.marker([warehouse.lat, warehouse.lng], {
@@ -150,7 +176,7 @@ export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMo
 
     // Route lines: warehouse -> stop 1 -> stop 2 -> ... per vehicle, in that
     // vehicle's own colour — drawn under the pins, always visible (never
-    // spiderfied or otherwise touched by the overlap handling below).
+    // clustered or otherwise touched by the pin-grouping below).
     for (const r of vehicleRoutes ?? []) {
       if (r.points.length === 0) continue;
       const latlngs: L.LatLngExpression[] = [
@@ -163,22 +189,20 @@ export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMo
 
     for (const s of stops) {
       const tooltipText = `${escapeHtml(s.label)} · ${escapeHtml(s.zoneName)}${s.status ? ` · ${escapeHtml(s.status)}` : ''}`;
-      const marker = s.pinLabel
-        ? L.marker([s.lat, s.lng], {
-            icon: L.divIcon({
-              className: '',
-              html: `<div style="min-width:28px;height:20px;padding:0 6px;border-radius:10px;background:${escapeHtml(s.color)};color:#161826;display:grid;place-items:center;font-weight:800;font-size:10.5px;white-space:nowrap;border:1.5px solid #161826;box-shadow:0 2px 6px rgba(0,0,0,.5)">${escapeHtml(s.pinLabel)}</div>`,
-              iconSize: [40, 20],
-              iconAnchor: [20, 10],
-            }),
-          })
-        : L.circleMarker([s.lat, s.lng], {
-            radius: 5,
-            color: '#3a3d49',
-            weight: 1.5,
-            fillColor: s.color,
-            fillOpacity: 0.6,
-          });
+      // Flat solid colour, no heavy outline — a soft drop shadow alone gives
+      // enough separation from the tiles underneath. Labeled pins carry the
+      // sequence number; unlabeled ones (not yet assigned to a vehicle) are
+      // a small plain dot, same shape family as the labeled pin.
+      const marker = L.marker([s.lat, s.lng], {
+        icon: L.divIcon({
+          className: '',
+          html: s.pinLabel
+            ? `<div style="min-width:26px;height:22px;padding:0 7px;border-radius:11px;background:${escapeHtml(s.color)};color:#161826;display:grid;place-items:center;font-weight:700;font-size:11px;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,.35)">${escapeHtml(s.pinLabel)}</div>`
+            : `<div style="width:14px;height:14px;border-radius:50%;background:${escapeHtml(s.color)};box-shadow:0 1px 3px rgba(0,0,0,.35)"></div>`,
+          iconSize: s.pinLabel ? [42, 22] : [14, 14],
+          iconAnchor: s.pinLabel ? [21, 11] : [7, 7],
+        }),
+      });
 
       marker.bindTooltip(s.pinLabel ? tooltipText : `${tooltipText} (ยังไม่จัดลงรถ)`);
 
@@ -253,17 +277,9 @@ export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMo
         }
 
         marker.bindPopup(wrap);
-        if (omsRef.current) {
-          // OMS decides when a click should open the popup (letting it
-          // spiderfy overlapping pins apart first) — strip Leaflet's own
-          // auto-open-on-click that bindPopup just registered, so the two
-          // don't race each other on the very first click of a group.
-          marker.off('click');
-        }
       }
 
-      marker.addTo(layer);
-      omsRef.current?.addMarker(marker);
+      cluster.addLayer(marker);
     }
 
     const points: L.LatLngExpression[] = stops.map((s) => [s.lat, s.lng]);
@@ -273,7 +289,7 @@ export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMo
     } else if (points.length === 1) {
       map.setView(points[0], 13);
     }
-  }, [stops, warehouse, vehicleRoutes, vehicleOptions]);
+  }, [stops, warehouse, vehicleRoutes, vehicleOptions, zones]);
 
   return <div ref={containerRef} style={{ position: 'absolute', inset: 0, background: 'var(--color-bg)' }} />;
 }

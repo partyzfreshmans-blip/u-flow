@@ -2,8 +2,8 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 // Side-effect only — attaches the `.pm` namespace to L.Map/L.Layer (and the
 // draw/edit/remove toolbar) via ambient module augmentation; nothing here is
-// imported by name. See RouteMap.tsx for the same pattern with the
-// overlapping-marker-spiderfier plugin.
+// imported by name. See RouteMap.tsx for the same pattern with
+// leaflet.markercluster.
 import '@geoman-io/leaflet-geoman-free';
 import '@geoman-io/leaflet-geoman-free/dist/leaflet-geoman.css';
 import { point } from '@turf/helpers';

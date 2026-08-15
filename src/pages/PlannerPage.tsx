@@ -733,6 +733,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
               vehicleRoutes={vehicleRoutesFiltered}
               vehicleOptions={v.vehicleOptions}
               onMoveToVehicle={v.canEdit ? v.onMapMoveToVehicle : undefined}
+              zones={v.zonePolygons}
             />
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, fontSize: 11, color: 'var(--color-neutral-500)' }}>

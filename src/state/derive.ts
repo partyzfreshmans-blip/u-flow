@@ -1906,6 +1906,11 @@ export function computePlanner(state: AppState, actions: AppActions) {
       actions.setRoutePlan(plan);
     },
     zoneLegend: state.zones.filter((z) => z.active).map((z) => ({ id: z.id, name: z.name, color: z.color })),
+    // Same active zones, geometry included, for RouteMap's translucent
+    // polygon overlay — reversed so the highest-priority zone (index 0,
+    // "ลำดับบนสุด = ชนะ" in pointZone) is the last one added to the map and
+    // therefore renders on top wherever two zones overlap.
+    zonePolygons: [...state.zones].filter((z) => z.active).reverse().map((z) => ({ id: z.id, name: z.name, color: z.color, polygon: z.polygon })),
     unassignedColor: UNASSIGNED_COLOR,
     configTab: state.plannerConfigTab,
     // Zone editing moved off this page entirely — drawing polygons needs a
