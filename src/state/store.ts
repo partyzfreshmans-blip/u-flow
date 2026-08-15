@@ -19,6 +19,7 @@ import {
 } from '../data/receiving';
 import { DEFAULT_VEHICLES, loadRoutePlan, loadVehicles, saveRoutePlan, saveVehicles, type RoutePlan, type Vehicle } from '../data/vehicles';
 import { fetchZones, saveZones as apiSaveZones } from '../data/sources/zonesApi';
+import { fetchUniiKeySetting, saveUniiApiKey, testUniiApiKey, type UniiKeySetting, type UniiKeyTestResult } from '../data/sources/settingsApi';
 import { pointZone, type Zone } from '../data/zones';
 import { coordKey, loadGeocodeCache, saveGeocodeCache, type GeocodeCache } from '../data/geocodeCache';
 import { reverseGeocode } from '../data/sources/geocoding';
@@ -402,11 +403,20 @@ export interface AppState {
   custEditSaving: boolean;
   custEditError: string | null;
 
-  // settings
+  // settings — Unii API key card. apiKey is only ever the draft text typed
+  // into the input; the persisted value never round-trips to the browser
+  // (see uniiKeySetting), so there is nothing to prefill it with on load.
   apiKey: string;
   apiTesting: boolean;
-  apiOk: boolean;
-  keySaved: boolean;
+  /** Real result of the last "ทดสอบการเชื่อมต่อ" — null until one has run
+   * for the current draft (see onApiKey, which clears this on every
+   * keystroke so a stale pass/fail can never be read as still valid for
+   * text the admin has since changed). */
+  apiTestResult: UniiKeyTestResult | null;
+  saveKeyStatus: OrderSaveStatus | null;
+  uniiKeySetting: UniiKeySetting | null;
+  uniiKeySettingLoading: boolean;
+  uniiKeySettingError: string | null;
 
   // sync status — every Google Sheet source this app reads, refreshed
   // together by the header's "Sync" button (see actions.syncNow)
@@ -659,8 +669,11 @@ export const initialState: AppState = {
 
   apiKey: '',
   apiTesting: false,
-  apiOk: false,
-  keySaved: false,
+  apiTestResult: null,
+  saveKeyStatus: null,
+  uniiKeySetting: null,
+  uniiKeySettingLoading: false,
+  uniiKeySettingError: null,
 
   lastSyncAt: null,
   lastSyncErrorAt: null,
@@ -2500,6 +2513,55 @@ export function useAppStore() {
         window.location.href = window.location.pathname;
       },
       clearAuthError: () => dispatch({ type: 'patch', patch: { authError: null } }),
+
+      // Settings page — Unii API key card. Replaces what used to be a pure
+      // client-side mock: a hardcoded masked key/expiry, a setTimeout-faked
+      // "test connection", and a "save" that patched local state and never
+      // called a backend at all. See src/data/sources/settingsApi.ts and
+      // server/lib.ts's handle*UniiApiKey* handlers for the real thing.
+      loadUniiKeySetting: () => {
+        const session = loadSession();
+        if (!session) return;
+        dispatch({ type: 'patch', patch: { uniiKeySettingLoading: true, uniiKeySettingError: null } });
+        fetchUniiKeySetting(session)
+          .then((setting) => dispatch({ type: 'patch', patch: { uniiKeySetting: setting, uniiKeySettingLoading: false } }))
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'โหลดการตั้งค่า API Key ไม่สำเร็จ';
+            dispatch({ type: 'patch', patch: { uniiKeySettingLoading: false, uniiKeySettingError: message } });
+          });
+      },
+      setApiKeyDraft: (v: string) => dispatch({ type: 'patch', patch: { apiKey: v, apiTestResult: null } }),
+      testApiKey: (apiKey: string) => {
+        const session = loadSession();
+        if (!session || apiKey.trim() === '') return;
+        dispatch({ type: 'patch', patch: { apiTesting: true, apiTestResult: null } });
+        testUniiApiKey(session, apiKey.trim())
+          .then((result) => dispatch({ type: 'patch', patch: { apiTesting: false, apiTestResult: result } }))
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'ทดสอบการเชื่อมต่อไม่สำเร็จ';
+            dispatch({ type: 'patch', patch: { apiTesting: false, apiTestResult: { ok: false, error: message } } });
+          });
+      },
+      // Only ever reports success once the backend itself has confirmed the
+      // key both authenticates against Unii AND was actually written to the
+      // App Settings sheet — never optimistic. Updates uniiKeySetting
+      // straight from the response so the card above reflects the new key
+      // immediately, with no reload and no separate re-fetch required.
+      saveApiKey: (apiKey: string) => {
+        const session = loadSession();
+        if (!session || apiKey.trim() === '') return;
+        dispatch({ type: 'patch', patch: { saveKeyStatus: { state: 'saving' } } });
+        saveUniiApiKey(session, apiKey.trim())
+          .then((setting) => {
+            dispatch({ type: 'patch', patch: { uniiKeySetting: setting, saveKeyStatus: { state: 'saved' }, apiKey: '', apiTestResult: null } });
+            setTimeout(() => dispatch({ type: 'patch', patch: { saveKeyStatus: null } }), 3000);
+            logActivity('บันทึก Unii API Key', 'อัปเดต API Key เชื่อมต่อระบบออเดอร์');
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'บันทึก API Key ไม่สำเร็จ';
+            dispatch({ type: 'patch', patch: { saveKeyStatus: { state: 'error', message } } });
+          });
+      },
 
       loadUsers: async () => {
         const session = loadSession();

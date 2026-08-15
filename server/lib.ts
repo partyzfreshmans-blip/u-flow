@@ -1816,6 +1816,206 @@ export async function handleSaveZones(token: string | null, body: unknown): Prom
   }
 }
 
+// ---------- App settings: generic key/value store on its own Sheets tab,
+// for admin-configured values that don't belong to any other page's own
+// data model. Currently just the Unii API key (see below) — the settings
+// page it backs used to be a pure client-side mock (a hardcoded masked key,
+// a hardcoded expiry date, a setTimeout-faked "test connection", and a
+// "save" that never left the browser at all); this is what actually
+// persists it now. Same ensure-sheet-tab pattern as every other tab in this
+// file (Zones, Audit Log, ...). ----------
+const APP_SETTINGS_TAB_TITLE = 'App Settings';
+const APP_SETTINGS_HEADER = ['setting_key', 'setting_value', 'updated_at', 'updated_by'];
+
+async function ensureAppSettingsSheet(sheets: SheetsClient): Promise<void> {
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: MAIN_SHEET_ID });
+  const exists = meta.data.sheets?.some((s) => s.properties?.title === APP_SETTINGS_TAB_TITLE);
+  if (exists) return;
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: MAIN_SHEET_ID,
+    requestBody: { requests: [{ addSheet: { properties: { title: APP_SETTINGS_TAB_TITLE } } }] },
+  });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: MAIN_SHEET_ID,
+    range: `${APP_SETTINGS_TAB_TITLE}!A1:D1`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [APP_SETTINGS_HEADER] },
+  });
+}
+
+interface AppSettingRow {
+  value: string;
+  updatedAt: string;
+  updatedBy: string;
+}
+
+async function readAppSetting(sheets: SheetsClient, key: string): Promise<AppSettingRow | null> {
+  await ensureAppSettingsSheet(sheets);
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${APP_SETTINGS_TAB_TITLE}!A:D` });
+  const rows = res.data.values ?? [];
+  for (const r of rows.slice(1)) {
+    if (String(r[0] ?? '').trim() === key) {
+      return { value: String(r[1] ?? ''), updatedAt: String(r[2] ?? ''), updatedBy: String(r[3] ?? '') };
+    }
+  }
+  return null;
+}
+
+/** Update-in-place if the key's row already exists, append a new row
+ * otherwise — same "one row per key" shape a plain key/value store needs,
+ * kept simple since this tab will only ever hold a handful of settings. */
+async function writeAppSetting(sheets: SheetsClient, key: string, value: string, updatedBy: string): Promise<AppSettingRow> {
+  await ensureAppSettingsSheet(sheets);
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${APP_SETTINGS_TAB_TITLE}!A:D` });
+  const rows = res.data.values ?? [];
+  const updatedAt = new Date().toISOString();
+  const rowValues = [key, value, updatedAt, updatedBy];
+  const existingIndex = rows.slice(1).findIndex((r) => String(r[0] ?? '').trim() === key);
+  if (existingIndex === -1) {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: MAIN_SHEET_ID,
+      range: `${APP_SETTINGS_TAB_TITLE}!A:D`,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [rowValues] },
+    });
+  } else {
+    const rowNumber = existingIndex + 2; // +1 back to 1-based, +1 past the header row
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: MAIN_SHEET_ID,
+      range: `${APP_SETTINGS_TAB_TITLE}!A${rowNumber}:D${rowNumber}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [rowValues] },
+    });
+  }
+  return { value, updatedAt, updatedBy };
+}
+
+// ---------- Unii API key (Settings page) ----------
+// Same base URL / branch id / auth header this app used the one time it
+// called Unii live (server/unii.ts, removed — see git history at
+// 2e1ce03^:server/unii.ts). Order data itself no longer comes from here
+// (it reads the "API Import" Sheets tab instead — see readApiImportOrders),
+// so this endpoint's only job is proving a pasted key actually authenticates
+// against Unii, not fetching real order data.
+const UNII_API_BASE = 'https://mart.iinuhcet.com/api';
+const UNII_BRANCH_ID = '584';
+const UNII_API_KEY_SETTING = 'unii_api_key';
+const UNII_TEST_TIMEOUT_MS = 8_000;
+
+/** Never return the raw key to the browser once saved — a first-4/last-4
+ * masked preview (matching the shape the old mock UI's hardcoded example
+ * used) is enough to confirm "yes, this is the key I just pasted" without
+ * re-exposing the secret on every page load. */
+function maskApiKey(key: string): string {
+  if (key.length <= 8) return '•'.repeat(Math.max(4, key.length));
+  return `${key.slice(0, 4)}${'•'.repeat(key.length - 8)}${key.slice(-4)}`;
+}
+
+function uniiKeySettingBody(row: AppSettingRow | null) {
+  if (!row || !row.value) return { hasKey: false, maskedKey: '', updatedAt: null, updatedBy: null };
+  return { hasKey: true, maskedKey: maskApiKey(row.value), updatedAt: row.updatedAt || null, updatedBy: row.updatedBy || null };
+}
+
+function classifyUniiHttpError(status: number, bodyText: string): string {
+  if (status === 401 || status === 403) return 'Unii API ปฏิเสธ key นี้ (401/403) — key ไม่ถูกต้องหรือหมดอายุ';
+  if (status === 429) return 'Unii API จำกัดจำนวนคำขอ (rate limit) — ลองใหม่อีกครั้งภายหลัง';
+  if (status === 404) return 'Unii API ไม่พบ endpoint ที่เรียก (HTTP 404) — endpoint ฝั่ง Unii อาจเปลี่ยนไปแล้ว';
+  if (status >= 500) return `Unii API มีปัญหาฝั่งเซิร์ฟเวอร์ (HTTP ${status})`;
+  return `Unii API ตอบกลับผิดพลาด (HTTP ${status})${bodyText ? `: ${bodyText.slice(0, 200)}` : ''}`;
+}
+
+/** The one live network call this feature makes — page 1, limit 1 is enough
+ * to prove the key itself authenticates without pulling a real page of
+ * orders. Shared by both the "ทดสอบการเชื่อมต่อ" button (handleTestUniiApiKey)
+ * and the save handler's own server-side re-check below, so the two can
+ * never disagree about what "the key works" means. */
+async function probeUniiApiKey(apiKey: string): Promise<{ ok: true; httpStatus: number; latencyMs: number } | { ok: false; error: string; httpStatus?: number }> {
+  const url = `${UNII_API_BASE}/orders/branch/${UNII_BRANCH_ID}?page=1&limit=1`;
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), UNII_TEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` }, signal: controller.signal });
+    const latencyMs = Date.now() - startedAt;
+    if (!res.ok) {
+      const bodyText = await res.text().catch(() => '');
+      return { ok: false, httpStatus: res.status, error: classifyUniiHttpError(res.status, bodyText) };
+    }
+    return { ok: true, httpStatus: res.status, latencyMs };
+  } catch (err: unknown) {
+    const message =
+      err instanceof Error && err.name === 'AbortError' ? 'หมดเวลาเชื่อมต่อ Unii API (timeout)' : err instanceof Error ? `เชื่อมต่อ Unii API ไม่ได้: ${err.message}` : 'เชื่อมต่อ Unii API ไม่ได้';
+    return { ok: false, error: message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Administrator-only, same gate as the rest of the Settings page. */
+export async function handleGetUniiApiKeySetting(token: string | null): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (payload.role !== 'administrator') return { status: 403, body: { error: 'เฉพาะ Administrator เท่านั้นที่ดูการตั้งค่านี้ได้' } };
+  try {
+    const sheets = await getSheetsClient();
+    const row = await readAppSetting(sheets, UNII_API_KEY_SETTING);
+    return { status: 200, body: uniiKeySettingBody(row) };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'โหลดการตั้งค่า Unii API Key ไม่สำเร็จ';
+    console.error('[settings/unii-key/get]', message);
+    return { status: 500, body: { error: message } };
+  }
+}
+
+/** "ทดสอบการเชื่อมต่อ" — a real network probe against Unii, nothing
+ * persisted. Always 200s back to the client (even on a failed probe) so the
+ * page can show a normal error message instead of a fetch-layer failure;
+ * "did it actually work" lives in the ok field. */
+export async function handleTestUniiApiKey(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (payload.role !== 'administrator') return { status: 403, body: { error: 'เฉพาะ Administrator เท่านั้นที่ทดสอบการเชื่อมต่อได้' } };
+  const { apiKey } = (body ?? {}) as Record<string, unknown>;
+  if (typeof apiKey !== 'string' || apiKey.trim() === '') return { status: 400, body: { ok: false, error: 'กรุณากรอก API Key' } };
+  const result = await probeUniiApiKey(apiKey.trim());
+  return { status: 200, body: result };
+}
+
+/** "บันทึก Key" — persists only after re-proving the key works, server-side,
+ * regardless of what the client's earlier "ทดสอบการเชื่อมต่อ" step reported.
+ * This is the fix for the more serious of the two reported bugs: the old
+ * page showed a green "บันทึกสำเร็จ" toast unconditionally, from a save
+ * button that never called a backend at all. A key that fails this re-check
+ * is never written, and the response says exactly why. */
+export async function handleSaveUniiApiKeySetting(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (payload.role !== 'administrator') return { status: 403, body: { error: 'เฉพาะ Administrator เท่านั้นที่บันทึก API Key ได้' } };
+  const { apiKey } = (body ?? {}) as Record<string, unknown>;
+  if (typeof apiKey !== 'string' || apiKey.trim() === '') return { status: 400, body: { error: 'กรุณากรอก API Key' } };
+  const key = apiKey.trim();
+
+  const probe = await probeUniiApiKey(key);
+  if (!probe.ok) {
+    return { status: 422, body: { error: `บันทึกไม่สำเร็จ — ${probe.error}` } };
+  }
+
+  try {
+    const sheets = await getSheetsClient();
+    const before = await readAppSetting(sheets, UNII_API_KEY_SETTING);
+    const row = await writeAppSetting(sheets, UNII_API_KEY_SETTING, key, payload.username);
+    await appendAuditLog(sheets, payload, [
+      { orderId: '-', field: 'unii_api_key', oldValue: before ? maskApiKey(before.value) : '(ยังไม่เคยตั้งค่า)', newValue: maskApiKey(key) },
+    ]);
+    return { status: 200, body: uniiKeySettingBody(row) };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'บันทึก API Key ไม่สำเร็จ';
+    console.error('[settings/unii-key/save]', message);
+    return { status: 500, body: { error: message } };
+  }
+}
+
 /**
  * Create-or-update a "คำสั่งซื้อ VS" row for one order, matched purely by
  * Order UID — an existing row gets its changed fields updated in place; a

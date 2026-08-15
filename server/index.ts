@@ -19,6 +19,7 @@ import {
   handleFetchSkuMasterList,
   handleFetchStaffOrderInfoList,
   handleFetchZones,
+  handleGetUniiApiKeySetting,
   handleHealth,
   handleListBatchRoutes,
   handleListBookings,
@@ -27,7 +28,9 @@ import {
   handleMe,
   handleReverseGeocode,
   handleLinkLineItemPromo,
+  handleSaveUniiApiKeySetting,
   handleSaveZones,
+  handleTestUniiApiKey,
   handleUpdateCsMasterLocation,
   handleUpdateRouteOrder,
   handleUpdateUser,
@@ -182,6 +185,21 @@ app.post('/api/users/create', async (req, res) => {
 
 app.post('/api/users/update', async (req, res) => {
   const { status, body } = await handleUpdateUser(bearerToken(req.headers.authorization), req.body);
+  res.status(status).json(body);
+});
+
+app.get('/api/users/settings-unii-key', async (req, res) => {
+  const { status, body } = await handleGetUniiApiKeySetting(bearerToken(req.headers.authorization));
+  res.status(status).json(body);
+});
+
+app.post('/api/users/settings-unii-key-test', async (req, res) => {
+  const { status, body } = await handleTestUniiApiKey(bearerToken(req.headers.authorization), req.body);
+  res.status(status).json(body);
+});
+
+app.post('/api/users/settings-unii-key', async (req, res) => {
+  const { status, body } = await handleSaveUniiApiKeySetting(bearerToken(req.headers.authorization), req.body);
   res.status(status).json(body);
 });
 

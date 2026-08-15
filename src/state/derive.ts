@@ -3257,23 +3257,47 @@ export function computeCustomer(state: AppState, actions: AppActions) {
 }
 
 // ---------- SETTINGS ----------
+// Unii API key card — previously a pure client-side mock (hardcoded masked
+// key/expiry, a setTimeout-faked "test connection", a "save" that never
+// called a backend). See src/data/sources/settingsApi.ts and
+// server/lib.ts's handle*UniiApiKey* handlers for what's actually behind
+// this now: reads/writes a real Sheets-backed setting, and "ทดสอบการ
+// เชื่อมต่อ" is a genuine network probe against Unii's API.
 export function computeSettings(state: AppState, actions: AppActions) {
+  const setting = state.uniiKeySetting;
+  const test = state.apiTestResult;
   return {
+    reload: () => actions.loadUniiKeySetting(),
+    settingLoading: state.uniiKeySettingLoading,
+    settingError: state.uniiKeySettingError,
+
+    hasKey: setting?.hasKey ?? false,
+    maskedKey: setting?.maskedKey || 'ยังไม่เคยตั้งค่า',
+    // No real expiry concept exists for a Unii token (nothing in its API
+    // response says when one lapses) — showing "อัปเดตล่าสุดเมื่อ/โดยใคร"
+    // instead of a fabricated countdown is the honest replacement for the
+    // old page's hardcoded "เหลือ 2 วัน · ใกล้หมดอายุ" badge.
+    updatedAtText: setting?.updatedAt ? formatDateTime(new Date(setting.updatedAt).getTime()) : '—',
+    updatedByText: setting?.updatedBy || '—',
+    updatedStyle: setting?.hasKey ? badgeStyle('ok') : badgeStyle('neutral'),
+    updatedLabel: setting?.hasKey ? 'ตั้งค่าแล้ว' : 'ยังไม่เคยตั้งค่า',
+
     apiKey: state.apiKey,
+    onApiKey: (v: string) => actions.setApiKeyDraft(v),
+
     apiTesting: state.apiTesting,
     apiIdle: !state.apiTesting,
-    apiOk: state.apiOk,
-    keySaved: state.keySaved,
-    saveDisabled: !state.apiOk || state.apiKey.trim() === '',
-    onApiKey: (v: string) => actions.patch({ apiKey: v, apiOk: false, keySaved: false }),
-    testConn: () => {
-      if (state.apiKey.trim() === '') return;
-      actions.patch({ apiTesting: true, apiOk: false });
-      setTimeout(() => actions.patch({ apiTesting: false, apiOk: true }), 1200);
-    },
-    saveKey: () => actions.patch({ keySaved: true }),
-    expiryLabel: 'เหลือ 2 วัน · ใกล้หมดอายุ',
-    expiryStyle: badgeStyle('bad'),
+    testConn: () => actions.testApiKey(state.apiKey),
+    testOkText: test?.ok ? `เชื่อมต่อสำเร็จ (${test.httpStatus ?? 200} OK${test.latencyMs != null ? ` · ${test.latencyMs}ms` : ''})` : '',
+    testErrorText: test && !test.ok ? test.error || 'เชื่อมต่อไม่สำเร็จ' : '',
+
+    // Disabled until a real successful test has passed for the CURRENT
+    // draft — onApiKey clears apiTestResult on every keystroke (see
+    // setApiKeyDraft in store.ts), so editing the key after a pass
+    // re-locks "บันทึก" until it's tested again.
+    saveDisabled: !test?.ok || state.apiKey.trim() === '' || state.saveKeyStatus?.state === 'saving',
+    saveKey: () => actions.saveApiKey(state.apiKey),
+    saveStatus: state.saveKeyStatus,
   };
 }
 
