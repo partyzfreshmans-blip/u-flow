@@ -3298,6 +3298,31 @@ export function computeSettings(state: AppState, actions: AppActions) {
     saveDisabled: !test?.ok || state.apiKey.trim() === '' || state.saveKeyStatus?.state === 'saving',
     saveKey: () => actions.saveApiKey(state.apiKey),
     saveStatus: state.saveKeyStatus,
+
+    // "ซิงค์ออเดอร์จาก Unii" — a real, resumable paginated fetch (see
+    // server/lib.ts's handleSyncUniiOrders). Needs a saved key first;
+    // syncDisabled below covers both that and "already running".
+    syncDisabled: !setting?.hasKey || state.uniiSyncing,
+    syncing: state.uniiSyncing,
+    runSync: () => actions.syncUniiOrders(),
+    syncError: state.uniiSyncError,
+    syncResult: state.uniiSyncResult,
+    // A short, scannable summary line — the full per-page log stays
+    // available (syncResult.log) for anyone who wants the raw trace.
+    syncSummaryText: state.uniiSyncResult
+      ? `${state.uniiSyncResult.pagesThisRun} หน้า · รวมในแคช ${state.uniiSyncResult.totalOrdersInCache} รายการ · สถานะที่เจอ: ${state.uniiSyncResult.distinctStatuses.join(', ') || '—'}`
+      : '',
+    syncPartialText: state.uniiSyncResult?.partial
+      ? `ยังไม่ครบรอบ (${
+          { budget: 'หมดเวลาในรอบนี้', 'max-pages': 'ถึงเพดานหน้าต่อรอบ', 'page-error': state.uniiSyncResult.pageErrorMessage ?? 'ดึงหน้าหนึ่งไม่สำเร็จ', 'natural-end': '' }[
+            state.uniiSyncResult.stoppedReason
+          ]
+        }) — กด "ซิงค์ต่อ" เพื่อดึงต่อจากหน้า ${state.uniiSyncResult.resumeFromPage}`
+      : '',
+    syncDroppedText:
+      state.uniiSyncResult && state.uniiSyncResult.droppedCount > 0
+        ? `ข้าม ${state.uniiSyncResult.droppedCount} รายการ (หา order id ไม่เจอ)`
+        : '',
   };
 }
 

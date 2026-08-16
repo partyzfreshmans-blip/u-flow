@@ -30,6 +30,7 @@ import {
   handleLinkLineItemPromo,
   handleSaveUniiApiKeySetting,
   handleSaveZones,
+  handleSyncUniiOrders,
   handleTestUniiApiKey,
   handleUpdateCsMasterLocation,
   handleUpdateRouteOrder,
@@ -127,6 +128,11 @@ app.get('/api/route-orders/export', async (req, res) => {
 app.post('/api/route-orders/export', async (req, res) => {
   const orderNos = Array.isArray((req.body as { orderNos?: unknown } | undefined)?.orderNos) ? ((req.body as { orderNos: string[] }).orderNos) : undefined;
   sendResult(res, await handleExportRouteOrders(bearerToken(req.headers.authorization), orderNos));
+});
+
+app.post('/api/route-orders/sync-unii', async (req, res) => {
+  const { status, body } = await handleSyncUniiOrders(bearerToken(req.headers.authorization));
+  res.status(status).json(body);
 });
 
 app.get('/api/promotions/list', async (req, res) => {

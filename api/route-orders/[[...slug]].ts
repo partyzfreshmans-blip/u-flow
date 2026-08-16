@@ -1,4 +1,4 @@
-import { handleBulkUpdateRouteOrders, handleExportRouteOrders, handleFetchApiImportOrders, handleFetchStaffOrderInfoList, handleUpdateRouteOrder } from '../../server/lib.js';
+import { handleBulkUpdateRouteOrders, handleExportRouteOrders, handleFetchApiImportOrders, handleFetchStaffOrderInfoList, handleSyncUniiOrders, handleUpdateRouteOrder } from '../../server/lib.js';
 import { bearerToken } from '../../server/session.js';
 import { logUnmatchedRoute, routeSlug } from '../_routing.js';
 import { sendResult } from '../_send.js';
@@ -15,7 +15,10 @@ import type { ApiRequest, ApiResponse } from '../_types.js';
 // Management bulk-actions toolbar's write endpoint (many orders, one
 // values.batchUpdate); "export" streams back a .xlsx of that same join
 // instead of JSON, optionally filtered to a selected orderNos list when
-// called as POST.
+// called as POST; "sync-unii" pulls all orders live from Unii's own API and
+// merges them into the "Unii Order Cache" tab api-import now reads from
+// first (see handleSyncUniiOrders — manually triggered from the Settings
+// page, no cron by default).
 export default async function handler(req: ApiRequest, res: ApiResponse) {
   const slug = routeSlug(req, '/api/route-orders');
   const token = bearerToken(req.headers.authorization);
@@ -47,6 +50,11 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   if (slug === 'export' && req.method === 'POST') {
     const { orderNos } = (req.body ?? {}) as { orderNos?: unknown };
     sendResult(res, await handleExportRouteOrders(token, Array.isArray(orderNos) ? (orderNos as string[]) : undefined));
+    return;
+  }
+  if (slug === 'sync-unii' && req.method === 'POST') {
+    const { status, body } = await handleSyncUniiOrders(token);
+    res.status(status).json(body);
     return;
   }
   logUnmatchedRoute('route-orders', req, slug);

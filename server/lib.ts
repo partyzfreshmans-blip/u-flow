@@ -1313,8 +1313,20 @@ interface ApiImportOrderShape {
 
 const apiImportOrdersCache = makeSheetCache<ApiImportOrderShape[]>();
 
+/** Prefers the "Unii Order Cache" tab (see handleSyncUniiOrders below —
+ * populated by this app's own live paginated Unii fetch) once it has at
+ * least one row; falls back to the legacy "API Import" tab (populated by an
+ * external Unii integration outside this app's control, which is exactly
+ * what undercounted orders in the first place) only until the first
+ * successful sync run populates the cache. Same return shape either way, so
+ * every existing caller of handleFetchApiImportOrders (Dashboard, Order
+ * Management, Planner, ...) needs zero changes to pick up the fix. */
 async function loadApiImportOrders(): Promise<ApiImportOrderShape[]> {
   const sheets = await getSheetsClient();
+  const cache = await readUniiOrderCache(sheets);
+  if (cache.size > 0) {
+    return Array.from(cache.values()).map((e) => e.order);
+  }
   const title = await resolveSheetTitle(sheets, API_IMPORT_GID);
   const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${title}!A:Z` });
   return rowsToApiImportOrders(res.data.values ?? []);
@@ -2013,6 +2025,555 @@ export async function handleSaveUniiApiKeySetting(token: string | null, body: un
     const message = err instanceof Error ? err.message : 'บันทึก API Key ไม่สำเร็จ';
     console.error('[settings/unii-key/save]', message);
     return { status: 500, body: { error: message } };
+  }
+}
+
+// ---------- Unii live order sync ----------
+// Reintroduces the paginated live fetch this app called once before
+// (server/unii.ts, deleted at git commit 2e1ce03 — "Rate-limiting on the
+// Unii API and a desire to avoid future Supabase costs made both
+// integrations more trouble than they were worth"). That old design is why
+// this section exists: it's rebuilt to fix its specific failure modes
+// rather than just resurrected as-is —
+//   1. Pagination stopped at a hardcoded 25-second deadline and DISCARDED
+//      everything already fetched that run. This version instead persists a
+//      resume cursor (see readSyncCursor/writeSyncCursor) so a run that
+//      can't finish in its time budget merges in whatever it got and picks
+//      up from the exact next page on the following run — nothing is ever
+//      thrown away, and every run honestly reports whether it finished a
+//      full cycle or is still catching up.
+//   2. Zero retry logic — one bad page (429/5xx/timeout) aborted the whole
+//      fetch. fetchUniiPageWithRetry below retries transient failures with
+//      backoff (honoring Retry-After on 429) and only gives up a page after
+//      exhausting retries, at which point THAT one page's failure ends the
+//      run (persisting a resume-here cursor) instead of the whole attempt
+//      being silently lost.
+//   3. No database this time — Postgres was the other half of why the old
+//      version got removed. This persists into a new Sheets tab instead
+//      (Unii Order Cache), using the same clear+rewrite pattern the Zones
+//      tab already uses, merged in-memory first so a partial run can never
+//      regress previously-synced orders.
+//   4. No cron is wired up by default — the old */10-minute schedule is
+//      explicitly implicated in "rate-limiting on the Unii API" above. This
+//      is manually triggered (Settings page or handleSyncUniiOrders itself,
+//      also callable via CRON_SECRET if a cron is ever added back later, at
+//      a much lower frequency).
+//   5. The old fetch also carried unverified product-listing-shaped query
+//      params (inStockFirst/showOutOfStock/showDiscontinued) with no actual
+//      order-status filter — dropped here for a plain page/limit request.
+//      Whether Unii's endpoint has its own default status filtering is
+//      still unverified (nobody has real API docs for it) — instead, every
+//      completed sync logs and reports the full DISTINCT set of `status`
+//      values seen across the whole cache, so that can be checked against
+//      what Unii's own dashboard shows after one real run.
+
+const UNII_ORDER_CACHE_TAB_TITLE = 'Unii Order Cache';
+const UNII_ORDER_CACHE_HEADER = [
+  'order_uid', 'no', 'status', 'payment_type', 'paid', 'item_count', 'total_amount',
+  'customer', 'phone', 'address', 'district', 'province', 'ordered_at', 'delivered_at',
+  'completed_at', 'wants_tax_invoice', 'updated_at', 'lat', 'lng', 'distance_from_wh_km',
+  'wh_lat', 'wh_lng', 'raw_json', 'synced_at',
+];
+
+async function ensureUniiOrderCacheSheet(sheets: SheetsClient): Promise<void> {
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: MAIN_SHEET_ID });
+  const exists = meta.data.sheets?.some((s) => s.properties?.title === UNII_ORDER_CACHE_TAB_TITLE);
+  if (exists) return;
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: MAIN_SHEET_ID,
+    requestBody: { requests: [{ addSheet: { properties: { title: UNII_ORDER_CACHE_TAB_TITLE } } }] },
+  });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: MAIN_SHEET_ID,
+    range: `${UNII_ORDER_CACHE_TAB_TITLE}!A1:X1`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [UNII_ORDER_CACHE_HEADER] },
+  });
+}
+
+function uniiCacheRowValues(o: ApiImportOrderShape, syncedAt: string): unknown[] {
+  return [
+    o.orderUid, o.no, o.status, o.paymentType, o.paid, o.itemCount, o.totalAmount,
+    o.customer, o.phone, o.address, o.district, o.province, o.orderedAt, o.deliveredAt,
+    o.completedAt, o.wantsTaxInvoice, o.updatedAt, o.lat ?? '', o.lng ?? '',
+    o.distanceFromWhKm ?? '', o.whLat ?? '', o.whLng ?? '', JSON.stringify(o.raw), syncedAt,
+  ];
+}
+
+function parseUniiCacheRow(r: unknown[]): ApiImportOrderShape | null {
+  const orderUid = String(r[0] ?? '').trim();
+  if (!orderUid) return null;
+  const num = (v: unknown) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const numOrNull = (v: unknown) => {
+    const s = String(v ?? '').trim();
+    if (!s) return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  };
+  let raw: Record<string, unknown> = {};
+  try {
+    raw = JSON.parse(String(r[22] ?? '{}')) as Record<string, unknown>;
+  } catch {
+    raw = {};
+  }
+  return {
+    orderUid,
+    no: String(r[1] ?? ''),
+    status: String(r[2] ?? ''),
+    paymentType: String(r[3] ?? ''),
+    paid: String(r[4] ?? ''),
+    itemCount: num(r[5]),
+    totalAmount: num(r[6]),
+    customer: String(r[7] ?? ''),
+    phone: String(r[8] ?? ''),
+    address: String(r[9] ?? ''),
+    district: String(r[10] ?? ''),
+    province: String(r[11] ?? ''),
+    orderedAt: String(r[12] ?? ''),
+    deliveredAt: String(r[13] ?? ''),
+    completedAt: String(r[14] ?? ''),
+    wantsTaxInvoice: String(r[15] ?? ''),
+    updatedAt: String(r[16] ?? ''),
+    lat: numOrNull(r[17]),
+    lng: numOrNull(r[18]),
+    distanceFromWhKm: numOrNull(r[19]),
+    whLat: numOrNull(r[20]),
+    whLng: numOrNull(r[21]),
+    raw,
+  };
+}
+
+interface UniiCacheEntry {
+  order: ApiImportOrderShape;
+  /** When THIS specific order was last actually re-confirmed from Unii —
+   * NOT when the tab was last rewritten. A row carried over untouched by a
+   * given run keeps its old timestamp, so this stays meaningful even across
+   * resumed/partial syncs. */
+  syncedAt: string;
+}
+
+async function readUniiOrderCache(sheets: SheetsClient): Promise<Map<string, UniiCacheEntry>> {
+  await ensureUniiOrderCacheSheet(sheets);
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${UNII_ORDER_CACHE_TAB_TITLE}!A:X` });
+  const rows = res.data.values ?? [];
+  const map = new Map<string, UniiCacheEntry>();
+  for (const r of rows.slice(1)) {
+    const order = parseUniiCacheRow(r);
+    if (order) map.set(order.orderUid, { order, syncedAt: String(r[23] ?? '') });
+  }
+  return map;
+}
+
+// Chunked well under Sheets' per-request payload limits — 1000 rows * 24
+// columns is a small fraction of what one values.update call can carry, kept
+// conservative rather than tuned to the exact ceiling.
+const UNII_CACHE_WRITE_CHUNK = 1000;
+
+async function writeUniiOrderCache(sheets: SheetsClient, entries: Map<string, UniiCacheEntry>): Promise<void> {
+  await ensureUniiOrderCacheSheet(sheets);
+  const rows = Array.from(entries.values()).map((e) => uniiCacheRowValues(e.order, e.syncedAt));
+  await sheets.spreadsheets.values.clear({ spreadsheetId: MAIN_SHEET_ID, range: `${UNII_ORDER_CACHE_TAB_TITLE}!A2:X` });
+  for (let i = 0; i < rows.length; i += UNII_CACHE_WRITE_CHUNK) {
+    const chunk = rows.slice(i, i + UNII_CACHE_WRITE_CHUNK);
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: MAIN_SHEET_ID,
+      range: `${UNII_ORDER_CACHE_TAB_TITLE}!A${2 + i}:X${1 + i + chunk.length}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: chunk },
+    });
+  }
+}
+
+// ---- Field mapping — same defensive multi-candidate-key approach the
+// original server/unii.ts used (recovered from git history at 2e1ce03^),
+// since Unii's real JSON shape has still never been confirmed against real
+// API docs. Tries the exact Thai header text the externally-populated "API
+// Import" tab has always used first (that data originated from Unii too, so
+// it's a strong signal for Unii's real field names), then English guesses. ----
+function uniiPick(obj: Record<string, unknown>, keys: string[]): unknown {
+  for (const key of keys) {
+    const parts = key.split('.');
+    let cur: unknown = obj;
+    for (const part of parts) {
+      if (cur == null || typeof cur !== 'object') {
+        cur = undefined;
+        break;
+      }
+      cur = (cur as Record<string, unknown>)[part];
+    }
+    if (cur !== undefined && cur !== null && cur !== '') return cur;
+  }
+  return undefined;
+}
+function uniiPickStr(obj: Record<string, unknown>, keys: string[]): string {
+  const v = uniiPick(obj, keys);
+  if (v == null) return '';
+  if (typeof v === 'string') return v.trim();
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  return '';
+}
+function uniiPickNum(obj: Record<string, unknown>, keys: string[]): number {
+  const v = uniiPick(obj, keys);
+  const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v.replace(/,/g, '')) : NaN;
+  return Number.isFinite(n) ? n : 0;
+}
+function uniiPickLatLng(obj: Record<string, unknown>, keys: string[]): number | null {
+  const v = uniiPick(obj, keys);
+  const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : null;
+}
+function uniiPickYesNoText(obj: Record<string, unknown>, keys: string[]): string {
+  const v = uniiPick(obj, keys);
+  if (typeof v === 'boolean') return v ? 'ใช่' : '';
+  if (typeof v === 'string') return v.trim();
+  return '';
+}
+
+const UNII_FIELD_KEY_CANDIDATES = {
+  orderUid: ['Order UID', 'orderUid', 'order_uid', 'uid', 'orderNo', 'order_no', 'orderNumber', 'orderCode', 'id'],
+  no: ['No', 'no', 'orderIndex', 'runningNo'],
+  status: ['สถานะ', 'status', 'orderStatus', 'statusText', 'status_text'],
+  paymentType: ['ประเภทชำระเงิน', 'paymentType', 'payment_type', 'paymentMethod', 'payment_method'],
+  paid: ['ชำระเงินแล้ว', 'paid', 'isPaid', 'paymentStatus', 'payment_status'],
+  itemCount: ['จำนวนรายการ', 'itemCount', 'item_count', 'totalItems', 'total_items'],
+  totalAmount: ['ยอดขายรวม', 'totalAmount', 'total_amount', 'total', 'grandTotal', 'grand_total', 'netTotal', 'net_total'],
+  customer: ['ลูกค้า', 'customer.name', 'customerName', 'customer_name', 'receiver.name', 'name'],
+  phone: ['เบอร์โทร', 'customer.phone', 'customerPhone', 'customer_phone', 'phone', 'receiver.phone', 'tel'],
+  address: ['ที่อยู่', 'customer.address', 'address', 'shippingAddress', 'shipping_address', 'deliveryAddress', 'delivery_address'],
+  district: ['อำเภอ', 'customer.district', 'district', 'amphoe', 'customer.amphoe'],
+  province: ['จังหวัด', 'customer.province', 'province', 'changwat', 'customer.changwat'],
+  orderedAt: ['วันที่สั่ง', 'orderedAt', 'ordered_at', 'createdAt', 'created_at'],
+  deliveredAt: ['วันที่จัดส่ง', 'deliveredAt', 'delivered_at', 'shippedAt', 'shipped_at'],
+  completedAt: ['วันที่ส่งสำเร็จ', 'completedAt', 'completed_at', 'finishedAt', 'finished_at'],
+  wantsTaxInvoice: ['ขอใบกำกับภาษี', 'wantsTaxInvoice', 'wants_tax_invoice', 'taxInvoice', 'tax_invoice', 'requestTaxInvoice'],
+  updatedAt: ['วันที่อัปเดต', 'updatedAt', 'updated_at'],
+  lat: ['Latitude', 'lat', 'latitude', 'customer.lat', 'customer.latitude'],
+  lng: ['Longitude', 'lng', 'lon', 'long', 'longitude', 'customer.lng', 'customer.longitude'],
+  distanceFromWhKm: ['far_from_wh', 'distanceFromWh', 'distance_from_wh'],
+  whLat: ['wh_lat', 'whLat'],
+  whLng: ['wh_long', 'wh_lng', 'whLng'],
+} as const;
+
+/** Returns null (and records it in `dropped`) only when no plausible order
+ * identifier was found at all — never a guess, since that would silently
+ * merge two unrelated orders into one cache row. */
+function mapUniiOrderRaw(raw: unknown, dropped: { count: number; samples: string[] }): ApiImportOrderShape | null {
+  if (!raw || typeof raw !== 'object') {
+    dropped.count++;
+    if (dropped.samples.length < 5) dropped.samples.push('(ไม่ใช่ object)');
+    return null;
+  }
+  const o = raw as Record<string, unknown>;
+  const orderUid = uniiPickStr(o, [...UNII_FIELD_KEY_CANDIDATES.orderUid]);
+  if (!orderUid) {
+    dropped.count++;
+    if (dropped.samples.length < 5) dropped.samples.push(JSON.stringify(o).slice(0, 150));
+    return null;
+  }
+  return {
+    no: uniiPickStr(o, [...UNII_FIELD_KEY_CANDIDATES.no]) || orderUid,
+    orderUid,
+    status: uniiPickStr(o, [...UNII_FIELD_KEY_CANDIDATES.status]),
+    paymentType: uniiPickStr(o, [...UNII_FIELD_KEY_CANDIDATES.paymentType]),
+    paid: uniiPickYesNoText(o, [...UNII_FIELD_KEY_CANDIDATES.paid]),
+    itemCount: uniiPickNum(o, [...UNII_FIELD_KEY_CANDIDATES.itemCount]),
+    totalAmount: uniiPickNum(o, [...UNII_FIELD_KEY_CANDIDATES.totalAmount]),
+    customer: uniiPickStr(o, [...UNII_FIELD_KEY_CANDIDATES.customer]),
+    phone: uniiPickStr(o, [...UNII_FIELD_KEY_CANDIDATES.phone]),
+    address: uniiPickStr(o, [...UNII_FIELD_KEY_CANDIDATES.address]),
+    district: uniiPickStr(o, [...UNII_FIELD_KEY_CANDIDATES.district]),
+    province: uniiPickStr(o, [...UNII_FIELD_KEY_CANDIDATES.province]),
+    orderedAt: uniiPickStr(o, [...UNII_FIELD_KEY_CANDIDATES.orderedAt]),
+    deliveredAt: uniiPickStr(o, [...UNII_FIELD_KEY_CANDIDATES.deliveredAt]),
+    completedAt: uniiPickStr(o, [...UNII_FIELD_KEY_CANDIDATES.completedAt]),
+    wantsTaxInvoice: uniiPickYesNoText(o, [...UNII_FIELD_KEY_CANDIDATES.wantsTaxInvoice]),
+    updatedAt: uniiPickStr(o, [...UNII_FIELD_KEY_CANDIDATES.updatedAt]),
+    lat: uniiPickLatLng(o, [...UNII_FIELD_KEY_CANDIDATES.lat]),
+    lng: uniiPickLatLng(o, [...UNII_FIELD_KEY_CANDIDATES.lng]),
+    distanceFromWhKm: uniiPickLatLng(o, [...UNII_FIELD_KEY_CANDIDATES.distanceFromWhKm]),
+    whLat: uniiPickLatLng(o, [...UNII_FIELD_KEY_CANDIDATES.whLat]),
+    whLng: uniiPickLatLng(o, [...UNII_FIELD_KEY_CANDIDATES.whLng]),
+    raw: o,
+  };
+}
+
+function extractUniiOrdersArray(body: unknown): unknown[] | null {
+  if (Array.isArray(body)) return body;
+  if (!body || typeof body !== 'object') return null;
+  const b = body as Record<string, unknown>;
+  for (const key of ['data', 'orders', 'items', 'results', 'rows']) {
+    const v = b[key];
+    if (Array.isArray(v)) return v;
+    if (v && typeof v === 'object' && Array.isArray((v as Record<string, unknown>).data)) {
+      return (v as Record<string, unknown>).data as unknown[];
+    }
+  }
+  return null;
+}
+
+// ---- Paginated fetch with retry-with-backoff ----
+const UNII_PAGE_LIMIT = 100;
+const UNII_PAGE_TIMEOUT_MS = 8_000;
+const UNII_MAX_RETRIES = 3;
+const UNII_RETRY_BASE_DELAY_MS = 800;
+// Configurable since the right value depends on this deployment's actual
+// Vercel plan/Fluid Compute duration limit, which this code can't detect —
+// default is a conservative guess; set UNII_SYNC_BUDGET_MS in the
+// environment to whatever's actually safe once that's been verified. Must
+// leave enough headroom under the route's real maxDuration for the final
+// Sheets write after the fetch loop ends.
+const UNII_SYNC_BUDGET_MS = Number(process.env.UNII_SYNC_BUDGET_MS) > 0 ? Number(process.env.UNII_SYNC_BUDGET_MS) : 45_000;
+// Safety cap independent of the time budget, in case pages come back
+// unrealistically fast — 60 pages * 100/page = 6,000 orders in one run.
+const UNII_MAX_PAGES_PER_RUN = 60;
+
+function isRetryableUniiStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+function uniiSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type UniiPageFetch = { rows: unknown[] } | { retryable: true; retryAfterMs: number | null; error: string } | { retryable: false; error: string };
+
+async function fetchUniiPageOnce(apiKey: string, page: number): Promise<UniiPageFetch> {
+  const url = `${UNII_API_BASE}/orders/branch/${UNII_BRANCH_ID}?page=${page}&limit=${UNII_PAGE_LIMIT}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), UNII_PAGE_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` }, signal: controller.signal });
+    if (!res.ok) {
+      const bodyText = await res.text().catch(() => '');
+      if (isRetryableUniiStatus(res.status)) {
+        const retryAfterHeader = res.headers.get('retry-after');
+        const parsedRetryAfter = retryAfterHeader ? Number(retryAfterHeader) : NaN;
+        const retryAfterMs = Number.isFinite(parsedRetryAfter) ? Math.min(parsedRetryAfter * 1000, 10_000) : null;
+        return { retryable: true, retryAfterMs, error: classifyUniiHttpError(res.status, bodyText) };
+      }
+      return { retryable: false, error: classifyUniiHttpError(res.status, bodyText) };
+    }
+    const body: unknown = await res.json().catch(() => null);
+    const rows = extractUniiOrdersArray(body);
+    if (rows === null) return { retryable: false, error: 'Unii API ตอบกลับในรูปแบบที่ไม่รู้จัก — หา array ของออเดอร์ในผลลัพธ์ไม่พบ' };
+    return { rows };
+  } catch (err: unknown) {
+    const isTimeout = err instanceof Error && err.name === 'AbortError';
+    return {
+      retryable: true,
+      retryAfterMs: null,
+      error: isTimeout ? 'หมดเวลาเชื่อมต่อ Unii API (timeout)' : `เชื่อมต่อ Unii API ไม่ได้: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Retries a transient failure (429/5xx/timeout) up to UNII_MAX_RETRIES
+ * times with exponential backoff, honoring Retry-After when Unii sends one.
+ * A non-retryable failure (401/403/404/unrecognized body) returns
+ * immediately on the first attempt — retrying an auth error just wastes the
+ * time budget. */
+async function fetchUniiPageWithRetry(apiKey: string, page: number, log: (line: string) => void): Promise<{ rows: unknown[] } | { error: string }> {
+  let lastError = '';
+  for (let attempt = 1; attempt <= UNII_MAX_RETRIES; attempt++) {
+    const result = await fetchUniiPageOnce(apiKey, page);
+    if ('rows' in result) return result;
+    lastError = result.error;
+    if (!result.retryable || attempt === UNII_MAX_RETRIES) return { error: result.error };
+    const delay = result.retryAfterMs ?? UNII_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+    log(`[unii-sync] หน้า ${page}: ${result.error} — retry ${attempt}/${UNII_MAX_RETRIES}, รออีก ${delay}ms`);
+    await uniiSleep(delay);
+  }
+  return { error: lastError };
+}
+
+// ---- Resume cursor (persisted via the App Settings key/value tab) ----
+const UNII_SYNC_CURSOR_SETTING = 'unii_sync_cursor';
+const UNII_SYNC_LAST_RESULT_SETTING = 'unii_sync_last_result';
+
+interface UniiSyncCursor {
+  nextPage: number;
+  /** Distinct orders merged so far in the CURRENT cycle (informational only
+   * — resets to 0 whenever a cycle completes and a new one starts at page 1). */
+  cycleOrdersSoFar: number;
+}
+
+function defaultUniiSyncCursor(): UniiSyncCursor {
+  return { nextPage: 1, cycleOrdersSoFar: 0 };
+}
+
+async function readUniiSyncCursor(sheets: SheetsClient): Promise<UniiSyncCursor> {
+  const row = await readAppSetting(sheets, UNII_SYNC_CURSOR_SETTING);
+  if (!row?.value) return defaultUniiSyncCursor();
+  try {
+    const parsed = JSON.parse(row.value) as Partial<UniiSyncCursor>;
+    const nextPage = Number(parsed.nextPage);
+    return {
+      nextPage: Number.isFinite(nextPage) && nextPage >= 1 ? nextPage : 1,
+      cycleOrdersSoFar: Number(parsed.cycleOrdersSoFar) || 0,
+    };
+  } catch {
+    return defaultUniiSyncCursor();
+  }
+}
+
+async function writeUniiSyncCursor(sheets: SheetsClient, cursor: UniiSyncCursor, actor: string): Promise<void> {
+  await writeAppSetting(sheets, UNII_SYNC_CURSOR_SETTING, JSON.stringify(cursor), actor);
+}
+
+interface UniiSyncCycleResult {
+  fetchedByOrderUid: Map<string, ApiImportOrderShape>;
+  pagesThisRun: number;
+  rowsPerPage: number[];
+  reachedNaturalEnd: boolean;
+  stoppedReason: 'natural-end' | 'budget' | 'max-pages' | 'page-error';
+  /** Page to resume from next run — 1 whenever reachedNaturalEnd is true
+   * (a fresh cycle starts over), otherwise the exact next unfetched page. */
+  nextPage: number;
+  droppedCount: number;
+  droppedSamples: string[];
+  pageErrorMessage: string | null;
+}
+
+/** The core paginated loop for ONE invocation — never assumes it can reach
+ * the true last page in one run; every stop condition (time budget, a page
+ * that failed after retries, the safety page cap) leaves an explicit,
+ * honest resume point instead of silently declaring victory. */
+async function runUniiSyncCycle(apiKey: string, startPage: number, logLines: string[]): Promise<UniiSyncCycleResult> {
+  const deadline = Date.now() + UNII_SYNC_BUDGET_MS;
+  const fetchedByOrderUid = new Map<string, ApiImportOrderShape>();
+  const rowsPerPage: number[] = [];
+  const dropped = { count: 0, samples: [] as string[] };
+  let page = startPage;
+  let pagesThisRun = 0;
+  let stoppedReason: UniiSyncCycleResult['stoppedReason'] = 'natural-end';
+  let pageErrorMessage: string | null = null;
+
+  while (pagesThisRun < UNII_MAX_PAGES_PER_RUN) {
+    if (Date.now() > deadline) {
+      stoppedReason = 'budget';
+      logLines.push(`[unii-sync] หมดเวลางบประมาณของรอบนี้ (${UNII_SYNC_BUDGET_MS}ms) ก่อนถึงหน้า ${page} — จะดึงต่อจากหน้านี้ในรอบถัดไป`);
+      break;
+    }
+    const result = await fetchUniiPageWithRetry(apiKey, page, (l) => logLines.push(l));
+    if ('error' in result) {
+      stoppedReason = 'page-error';
+      pageErrorMessage = `หน้า ${page}: ${result.error}`;
+      logLines.push(`[unii-sync] ${pageErrorMessage} — หยุดรอบนี้ จะดึงหน้า ${page} ต่อในรอบถัดไป`);
+      break;
+    }
+    pagesThisRun++;
+    rowsPerPage.push(result.rows.length);
+    logLines.push(`[unii-sync] หน้า ${page}: ได้ ${result.rows.length} รายการ`);
+    for (const raw of result.rows) {
+      const order = mapUniiOrderRaw(raw, dropped);
+      if (order) fetchedByOrderUid.set(order.orderUid, order);
+    }
+    if (result.rows.length < UNII_PAGE_LIMIT) {
+      stoppedReason = 'natural-end';
+      break;
+    }
+    page++;
+  }
+  if (pagesThisRun >= UNII_MAX_PAGES_PER_RUN && stoppedReason === 'natural-end' && rowsPerPage.at(-1) === UNII_PAGE_LIMIT) {
+    stoppedReason = 'max-pages';
+    logLines.push(`[unii-sync] ถึงเพดานหน้าต่อรอบ (${UNII_MAX_PAGES_PER_RUN} หน้า) — จะดึงต่อจากหน้า ${page + 1} ในรอบถัดไป`);
+  }
+
+  if (dropped.count > 0) {
+    logLines.push(`[unii-sync] ข้าม ${dropped.count} รายการ (หา order id ไม่เจอ): ${dropped.samples.join(' | ')}`);
+  }
+
+  return {
+    fetchedByOrderUid,
+    pagesThisRun,
+    rowsPerPage,
+    reachedNaturalEnd: stoppedReason === 'natural-end',
+    stoppedReason,
+    nextPage: stoppedReason === 'natural-end' ? 1 : stoppedReason === 'max-pages' ? page + 1 : page,
+    droppedCount: dropped.count,
+    droppedSamples: dropped.samples,
+    pageErrorMessage,
+  };
+}
+
+/** Manually triggered (Settings page "ซิงค์ออเดอร์จาก Unii" button) — or,
+ * if a cron is ever added back later, via `Authorization: Bearer
+ * $CRON_SECRET`. Deliberately NOT wired to any cron by default; see this
+ * section's header comment for why. Every call logs its own full trace
+ * (console.log, so it shows in Vercel's function logs / local dev stdout)
+ * AND returns the same trace in the response body, since the whole point of
+ * rebuilding this was better visibility into what a sync actually did. */
+export async function handleSyncUniiOrders(token: string | null): Promise<ApiResult> {
+  const cronSecret = process.env.CRON_SECRET?.trim();
+  const isCron = !!cronSecret && token === cronSecret;
+  const session = isCron ? null : verifySessionToken(token);
+  const isPrivileged = !!session && (session.role === 'administrator' || session.role === 'manager');
+  if (!isCron && !isPrivileged) {
+    return { status: 401, body: { error: 'ต้องเป็น Administrator/Manager หรือใช้ CRON_SECRET' } };
+  }
+  const actor = isCron ? 'cron' : (session?.username ?? 'unknown');
+
+  const logLines: string[] = [];
+  try {
+    const sheets = await getSheetsClient();
+    const keyRow = await readAppSetting(sheets, UNII_API_KEY_SETTING);
+    if (!keyRow?.value) {
+      return { status: 400, body: { error: 'ยังไม่ได้ตั้งค่า Unii API Key — ไปตั้งค่าที่หน้า "ตั้งค่า / API Key" ก่อน' } };
+    }
+    const apiKey = keyRow.value;
+
+    const cursor = await readUniiSyncCursor(sheets);
+    logLines.push(`[unii-sync] เริ่มรอบซิงค์ (โดย ${actor}) — เริ่มจากหน้า ${cursor.nextPage}`);
+
+    const cycle = await runUniiSyncCycle(apiKey, cursor.nextPage, logLines);
+
+    const existing = await readUniiOrderCache(sheets);
+    const now = new Date().toISOString();
+    for (const [uid, order] of cycle.fetchedByOrderUid) {
+      existing.set(uid, { order, syncedAt: now });
+    }
+    await writeUniiOrderCache(sheets, existing);
+    apiImportOrdersCache.invalidate();
+
+    const cumulativeCycleOrders = cursor.nextPage === 1 ? cycle.fetchedByOrderUid.size : cursor.cycleOrdersSoFar + cycle.fetchedByOrderUid.size;
+    const distinctStatuses = Array.from(new Set(Array.from(existing.values()).map((e) => e.order.status || '(ไม่มีสถานะ)'))).sort();
+
+    const nextCursor: UniiSyncCursor = cycle.reachedNaturalEnd ? defaultUniiSyncCursor() : { nextPage: cycle.nextPage, cycleOrdersSoFar: cumulativeCycleOrders };
+    await writeUniiSyncCursor(sheets, nextCursor, actor);
+
+    const resultSummary = {
+      completedAt: now,
+      partial: !cycle.reachedNaturalEnd,
+      pagesThisRun: cycle.pagesThisRun,
+      rowsPerPage: cycle.rowsPerPage,
+      totalOrdersInCache: existing.size,
+      cumulativeCycleOrders,
+      distinctStatuses,
+      droppedCount: cycle.droppedCount,
+      droppedSamples: cycle.droppedSamples,
+      stoppedReason: cycle.stoppedReason,
+      pageErrorMessage: cycle.pageErrorMessage,
+      resumeFromPage: nextCursor.nextPage,
+    };
+    logLines.push(
+      `[unii-sync] จบรอบนี้: ${cycle.pagesThisRun} หน้า, รวมในแคชตอนนี้ ${existing.size} รายการ, สถานะที่เจอ: ${distinctStatuses.join(', ')}` +
+        (resultSummary.partial ? ` — ยังไม่ครบรอบ จะดึงต่อจากหน้า ${nextCursor.nextPage} ในรอบถัดไป` : ' — ซิงค์ครบรอบแล้ว'),
+    );
+    for (const line of logLines) console.log(line);
+
+    await writeAppSetting(sheets, UNII_SYNC_LAST_RESULT_SETTING, JSON.stringify(resultSummary), actor);
+
+    return { status: 200, body: { ok: true, ...resultSummary, log: logLines } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'ซิงค์ข้อมูล Unii ไม่สำเร็จ';
+    logLines.push(`[unii-sync] ล้มเหลว: ${message}`);
+    for (const line of logLines) console.error(line);
+    return { status: 502, body: { error: message, log: logLines } };
   }
 }
 

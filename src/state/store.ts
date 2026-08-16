@@ -20,6 +20,7 @@ import {
 import { DEFAULT_VEHICLES, loadRoutePlan, loadVehicles, saveRoutePlan, saveVehicles, type RoutePlan, type Vehicle } from '../data/vehicles';
 import { fetchZones, saveZones as apiSaveZones } from '../data/sources/zonesApi';
 import { fetchUniiKeySetting, saveUniiApiKey, testUniiApiKey, type UniiKeySetting, type UniiKeyTestResult } from '../data/sources/settingsApi';
+import { syncUniiOrders as apiSyncUniiOrders, type UniiSyncResult } from '../data/sources/uniiSyncApi';
 import { pointZone, type Zone } from '../data/zones';
 import { coordKey, loadGeocodeCache, saveGeocodeCache, type GeocodeCache } from '../data/geocodeCache';
 import { reverseGeocode } from '../data/sources/geocoding';
@@ -418,6 +419,13 @@ export interface AppState {
   uniiKeySettingLoading: boolean;
   uniiKeySettingError: string | null;
 
+  // settings — "ซิงค์ออเดอร์จาก Unii" (live paginated fetch, see
+  // uniiSyncApi.ts). One call = one resumable run; uniiSyncResult.partial
+  // tells the UI whether to offer "ซิงค์ต่อ" for another run.
+  uniiSyncing: boolean;
+  uniiSyncResult: UniiSyncResult | null;
+  uniiSyncError: string | null;
+
   // sync status — every Google Sheet source this app reads, refreshed
   // together by the header's "Sync" button (see actions.syncNow)
   /** ms epoch of the last time every source refreshed successfully; null = never yet. */
@@ -674,6 +682,10 @@ export const initialState: AppState = {
   uniiKeySetting: null,
   uniiKeySettingLoading: false,
   uniiKeySettingError: null,
+
+  uniiSyncing: false,
+  uniiSyncResult: null,
+  uniiSyncError: null,
 
   lastSyncAt: null,
   lastSyncErrorAt: null,
@@ -2560,6 +2572,29 @@ export function useAppStore() {
           .catch((err: unknown) => {
             const message = err instanceof Error ? err.message : 'บันทึก API Key ไม่สำเร็จ';
             dispatch({ type: 'patch', patch: { saveKeyStatus: { state: 'error', message } } });
+          });
+      },
+      // One call = one resumable run (see uniiSyncApi.ts's UniiSyncResult —
+      // .partial tells the caller whether another run picks up where this
+      // one left off). Can genuinely take a while against a real
+      // third-party API with retries, so this never optimistically reports
+      // anything — the button stays showing "กำลังซิงค์..." until the
+      // backend actually responds.
+      syncUniiOrders: () => {
+        const session = loadSession();
+        if (!session) return;
+        dispatch({ type: 'patch', patch: { uniiSyncing: true, uniiSyncError: null } });
+        apiSyncUniiOrders(session)
+          .then((result) => {
+            dispatch({ type: 'patch', patch: { uniiSyncing: false, uniiSyncResult: result } });
+            logActivity(
+              'ซิงค์ออเดอร์จาก Unii',
+              `${result.pagesThisRun} หน้า · รวมในแคช ${result.totalOrdersInCache} รายการ · สถานะที่เจอ: ${result.distinctStatuses.join(', ')}${result.partial ? ` · ยังไม่ครบ (จะดึงต่อจากหน้า ${result.resumeFromPage})` : ' · ครบรอบแล้ว'}`,
+            );
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'ซิงค์ออเดอร์จาก Unii ไม่สำเร็จ';
+            dispatch({ type: 'patch', patch: { uniiSyncing: false, uniiSyncError: message } });
           });
       },
 
