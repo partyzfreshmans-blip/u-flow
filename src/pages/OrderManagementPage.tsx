@@ -105,7 +105,7 @@ function OrderTable({
   setSelection: (orderNos: string[]) => void;
 }) {
   const [shown, setShown] = useState(PAGE_SIZE);
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
   const visible = rows.slice(0, shown);
   // Header checkbox selects only the currently-shown (paginated) page — bulk
   // selection beyond that is the separate "เลือกทั้งหมด N รายการที่ตรงตัวกรอง"
@@ -267,8 +267,8 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
   ].join('|');
 
   const [pendingBatchDialogOpen, setPendingBatchDialogOpen] = useState(false);
-  const [pendingBatchCollapsed, setPendingBatchCollapsed] = useState(false);
-  const [stuckCollapsed, setStuckCollapsed] = useState(false);
+  const [pendingBatchCollapsed, setPendingBatchCollapsed] = useState(true);
+  const [stuckCollapsed, setStuckCollapsed] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const doExport = (selectedOnly: boolean) => {
@@ -359,77 +359,6 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
         <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: 13, marginBottom: 16, borderRadius: 10, background: 'var(--color-surface)', fontSize: 13, color: 'var(--color-neutral-400)' }}>
           <i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />
           กำลังระบุพื้นที่จากพิกัด ({v.geocodeProgress.done.toLocaleString('en-US')}/{v.geocodeProgress.total.toLocaleString('en-US')}) — ใช้ข้อมูลที่มีอยู่ก่อนได้ตามปกติ
-        </div>
-      )}
-
-      {v.pendingBatchCount > 0 && (
-        <div className="card elev-sm" style={{ padding: '4px 14px 8px', marginBottom: 18 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 2px 8px', fontWeight: 600, fontSize: 13.5, color: 'var(--st-info-fg)', flexWrap: 'wrap' }}>
-            <button
-              onClick={() => setPendingBatchCollapsed(!pendingBatchCollapsed)}
-              style={{ display: 'flex', alignItems: 'center', gap: 8, border: 0, background: 'transparent', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-body)', fontWeight: 600, fontSize: 13.5, color: 'inherit' }}
-            >
-              <i className={pendingBatchCollapsed ? 'ph ph-caret-right' : 'ph ph-caret-down'} />
-              <i className="ph ph-truck" />
-              รอจัด Batch ({v.pendingBatchCount})
-            </button>
-            {canEdit && (
-              <button className="btn btn-primary" style={{ marginLeft: 'auto', fontSize: 12.5 }} onClick={() => setPendingBatchDialogOpen(true)}>
-                <i className="ph ph-package" />จัด Batch ทั้งหมดที่รอ
-              </button>
-            )}
-          </div>
-          {!pendingBatchCollapsed && (
-            <div className="table-scroll">
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>Route</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th style={{ textAlign: 'right' }}>ยอดรวม</th>
-                    <th style={{ textAlign: 'center' }}>รายการ</th><th>เวลา</th><th>สถานะ</th><th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {v.pendingBatchOrders.map((o) => (
-                    <tr key={o.orderNo}>
-                      <td><span style={{ display: 'inline-flex', fontSize: 11, padding: '2px 8px', borderRadius: 5, background: 'var(--color-neutral-800)', color: 'var(--color-neutral-200)' }}>{o.route}</span></td>
-                      <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap' }}>
-                        {o.orderNo}<CopyButton value={o.orderNo} label="เลขคำสั่งซื้อ" />
-                      </td>
-                      <td>
-                        {o.customer}<CopyButton value={o.customer} label="ชื่อลูกค้า" />
-                        {o.phone && <CopyButton value={o.phone} label="เบอร์โทร" />}
-                      </td>
-                      <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{o.amtText}</td>
-                      <td style={{ textAlign: 'center' }}>{o.itemCountText}</td>
-                      <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.orderedAtText}</td>
-                      <td style={{ whiteSpace: 'nowrap' }}>
-                        <span style={o.stStyle}>{o.stLabel}</span>
-                        {o.noDeliveryDate ? (
-                          <span
-                            style={{ marginLeft: 6, fontSize: 10, padding: '1px 6px', borderRadius: 5, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)' }}
-                            title="ระบุวันที่จะจัดส่งในตารางด้านล่างก่อน จึงจะจัดลงรถ/จัดล็อตได้"
-                          >
-                            <i className="ph ph-calendar-x" style={{ marginRight: 3 }} />ต้องระบุวันที่จัดส่งก่อน
-                          </span>
-                        ) : (
-                          <span
-                            style={{
-                              marginLeft: 6, fontSize: 10, padding: '1px 6px', borderRadius: 5,
-                              background: o.batchReady ? 'var(--st-ok-bg)' : 'var(--st-warn-bg)',
-                              color: o.batchReady ? 'var(--st-ok-fg)' : 'var(--st-warn-fg)',
-                            }}
-                          >
-                            {o.batchReady ? 'พร้อม batch' : 'รอ batch'}
-                          </span>
-                        )}
-                      </td>
-                      <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={o.viewItems}>ดูสินค้า</button></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
         </div>
       )}
 
@@ -604,6 +533,77 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
           setSelection={v.setSelection}
         />
       )}
+            {v.pendingBatchCount > 0 && (
+        <div className="card elev-sm" style={{ padding: '4px 14px 8px', marginBottom: 18 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 2px 8px', fontWeight: 600, fontSize: 13.5, color: 'var(--st-info-fg)', flexWrap: 'wrap' }}>
+            <button
+              onClick={() => setPendingBatchCollapsed(!pendingBatchCollapsed)}
+              style={{ display: 'flex', alignItems: 'center', gap: 8, border: 0, background: 'transparent', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-body)', fontWeight: 600, fontSize: 13.5, color: 'inherit' }}
+            >
+              <i className={pendingBatchCollapsed ? 'ph ph-caret-right' : 'ph ph-caret-down'} />
+              <i className="ph ph-truck" />
+              รอจัด Batch ({v.pendingBatchCount})
+            </button>
+            {canEdit && (
+              <button className="btn btn-primary" style={{ marginLeft: 'auto', fontSize: 12.5 }} onClick={() => setPendingBatchDialogOpen(true)}>
+                <i className="ph ph-package" />จัด Batch ทั้งหมดที่รอ
+              </button>
+            )}
+          </div>
+          {!pendingBatchCollapsed && (
+            <div className="table-scroll">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Route</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th style={{ textAlign: 'right' }}>ยอดรวม</th>
+                    <th style={{ textAlign: 'center' }}>รายการ</th><th>เวลา</th><th>สถานะ</th><th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {v.pendingBatchOrders.map((o) => (
+                    <tr key={o.orderNo}>
+                      <td><span style={{ display: 'inline-flex', fontSize: 11, padding: '2px 8px', borderRadius: 5, background: 'var(--color-neutral-800)', color: 'var(--color-neutral-200)' }}>{o.route}</span></td>
+                      <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap' }}>
+                        {o.orderNo}<CopyButton value={o.orderNo} label="เลขคำสั่งซื้อ" />
+                      </td>
+                      <td>
+                        {o.customer}<CopyButton value={o.customer} label="ชื่อลูกค้า" />
+                        {o.phone && <CopyButton value={o.phone} label="เบอร์โทร" />}
+                      </td>
+                      <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{o.amtText}</td>
+                      <td style={{ textAlign: 'center' }}>{o.itemCountText}</td>
+                      <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.orderedAtText}</td>
+                      <td style={{ whiteSpace: 'nowrap' }}>
+                        <span style={o.stStyle}>{o.stLabel}</span>
+                        {o.noDeliveryDate ? (
+                          <span
+                            style={{ marginLeft: 6, fontSize: 10, padding: '1px 6px', borderRadius: 5, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)' }}
+                            title="ระบุวันที่จะจัดส่งในตารางด้านล่างก่อน จึงจะจัดลงรถ/จัดล็อตได้"
+                          >
+                            <i className="ph ph-calendar-x" style={{ marginRight: 3 }} />ต้องระบุวันที่จัดส่งก่อน
+                          </span>
+                        ) : (
+                          <span
+                            style={{
+                              marginLeft: 6, fontSize: 10, padding: '1px 6px', borderRadius: 5,
+                              background: o.batchReady ? 'var(--st-ok-bg)' : 'var(--st-warn-bg)',
+                              color: o.batchReady ? 'var(--st-ok-fg)' : 'var(--st-warn-fg)',
+                            }}
+                          >
+                            {o.batchReady ? 'พร้อม batch' : 'รอ batch'}
+                          </span>
+                        )}
+                      </td>
+                      <td style={{ textAlign: 'right' }}><button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={o.viewItems}>ดูสินค้า</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
       {!v.isEmpty && (
         <OrderTable
           key={`dated-${filterSignature}`}
