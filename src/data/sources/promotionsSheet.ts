@@ -121,17 +121,26 @@ export function formatTiersTerm(tiers: PromoTier[], unit: PromoUnit): string {
     .join(', ');
 }
 
+function getField(row: Record<string, string>, ...keys: string[]): string {
+  for (const k of keys) {
+    if (row[k] !== undefined && row[k] !== '') return row[k].trim();
+    const foundKey = Object.keys(row).find((rk) => rk.trim().toLowerCase() === k.toLowerCase());
+    if (foundKey && row[foundKey] !== undefined && row[foundKey] !== '') return row[foundKey].trim();
+  }
+  return '';
+}
+
 function rowToPromo(row: Record<string, string>): Promo | null {
-  const sku = (row['SKU'] ?? '').trim();
-  const status = (row['Status'] ?? '').trim();
+  const sku = getField(row, 'SKU', 'รหัสสินค้า', 'รหัส SKU', 'sku', 'Item Code', 'SKU ID');
   if (!sku) return null;
 
-  const productName = (row['Product Name'] ?? '').trim();
-  const promoPrice = toNumber(row['Promotion Price']);
-  const basePrice = toNumber(row['Box Price']) || toNumber(row['Single Price']);
-  const start = (row['เริ่มโปร'] ?? '').trim();
-  const end = (row['สินสุด'] ?? '').trim();
-  const termText = (row['Promotion Term'] ?? '').trim();
+  const status = getField(row, 'Status', 'สถานะ', 'status') || 'Active';
+  const productName = getField(row, 'Product Name', 'ชื่อสินค้า', 'ชื่อโปรโมชั่น', 'รายการสินค้า', 'product_name', 'Name');
+  const promoPrice = toNumber(getField(row, 'Promotion Price', 'ราคาโปรโมชั่น', 'ราคาโปร', 'Price', 'promotion_price', 'ราคา'));
+  const basePrice = toNumber(getField(row, 'Box Price', 'ราคาลัง', 'ราคาหีบ', 'box_price')) || toNumber(getField(row, 'Single Price', 'ราคาชิ้น', 'ราคาเดี่ยว', 'single_price'));
+  const start = getField(row, 'เริ่มโปร', 'วันที่เริ่ม', 'Start Date', 'start_date', 'เริ่ม');
+  const end = getField(row, 'สินสุด', 'สิ้นสุด', 'วันที่สิ้นสุด', 'End Date', 'end_date');
+  const termText = getField(row, 'Promotion Term', 'เงื่อนไขโปรโมชั่น', 'เงื่อนไข', 'promotion_term', 'Term');
 
   const packUnits = parsePackUnits(termText);
   const parsedTiers = packUnits.length > 0 ? [] : parseTiers(termText);
@@ -144,7 +153,7 @@ function rowToPromo(row: Record<string, string>): Promo | null {
   const bestPackUnit = packUnits.length > 0 ? packUnits.reduce((a, b) => (avgPricePerPiece(b) < avgPricePerPiece(a) ? b : a)) : null;
 
   return {
-    name: termText || productName,
+    name: termText || productName || sku,
     value: bestPackUnit
       ? `เฉลี่ยต่ำสุด ฿${avgPricePerPiece(bestPackUnit).toFixed(2)}/ชิ้น (${bestPackUnit.label} ฿${bestPackUnit.price})`
       : basePrice > promoPrice && promoPrice > 0
@@ -153,8 +162,8 @@ function rowToPromo(row: Record<string, string>): Promo | null {
     sku,
     skuName: productName,
     type: packUnits.length > 0 ? 'ราคาต่อหน่วยบรรจุ' : tiers.length > 1 ? 'ลดขั้นบันได' : 'ลดราคา',
-    period: start && end ? `${start} – ${end}` : '',
-    st: status || 'ไม่ระบุ',
+    period: start && end ? `${start} – ${end}` : start || end || '',
+    st: status,
     unit,
     tiers,
     packUnits,

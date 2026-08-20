@@ -210,7 +210,7 @@ export const pageTitles: Record<AppState['route'], [string, string]> = {
   driver: ['มุมมองคนขับ', 'ใบจัดรูทมือถือรายคัน'],
   pick: ['Batch picking / จัดล็อตหยิบสินค้า', 'รวมหลายออเดอร์เป็นล็อตเดียว หยิบสินค้าตามตำแหน่งเก็บ'],
   cod: ['เคลียร์เงินปลายทาง (COD)', 'เทียบยอดที่ควรเก็บกับยอดคืนจริงต่อ driver'],
-  promo: ['โปรโมชั่น / ส่วนลด', 'โปรโมชั่นที่ Active จาก Google Sheet · สร้าง/แก้ไขแล้วบันทึกกลับชีทได้'],
+  promo: ['โปรโมชั่น / ส่วนลด', 'โปรโมชั่นทั้งหมดจาก Google Sheet · สร้าง/แก้ไขแล้วบันทึกกลับชีทได้'],
   grn: ['รับสินค้าเข้าคลัง (Goods Receiving)', 'บันทึกของเข้าจากซัพพลายเออร์ · เทียบจำนวนกับบิล · แนบไฟล์บิลขึ้น Drive'],
   sku: ['ฐานข้อมูลสินค้า (SKU master)', 'ทะเบียนสินค้าทั้งหมดในระบบ'],
   customer: ['ฐานข้อมูลลูกค้า (CS Master)', 'แก้ไขพิกัด lat/long แล้วบันทึกกลับเข้า Google Sheet จริง'],
@@ -830,7 +830,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
   // status filter), so this explicitly narrows to Active before cross
   // referencing against each order's line items, so staff can see at a
   // glance which orders include a promoted product without opening every one.
-  const activePromoSkus = new Set(state.promos.filter((p) => p.st === 'Active').map((p) => p.sku));
+  const activePromoSkus = new Set(state.promos.filter((p) => p.st.toLowerCase() === 'active' || p.st === 'ใช้งานอยู่').map((p) => p.sku));
   const orderSkus = new Map<string, Set<string>>();
   for (const li of state.orderLineItems) {
     let set = orderSkus.get(li.orderNo);

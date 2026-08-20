@@ -630,7 +630,7 @@ export const initialState: AppState = {
   promosLoading: true,
   promosError: null,
   promoQ: '',
-  promoStatusFilter: 'Active',
+  promoStatusFilter: 'all',
   promoModal: false,
   promoEditingOriginal: null,
   promoForm: DEFAULT_PROMO_FORM,
