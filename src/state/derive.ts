@@ -2081,7 +2081,15 @@ export function computeDriverDayPicker(state: AppState, actions: AppActions, veh
   const today = todayDayKey();
   const selected = state.driverDate || today;
 
-  const batches = state.batchRoutes.filter((b) => b.vehicleId === vehicleId && !b.cancelled);
+  const uniqueBatchesById = new Map<string, BatchRoute>();
+  for (const b of state.batchRoutes) {
+    if (b.vehicleId !== vehicleId || b.cancelled) continue;
+    const existing = uniqueBatchesById.get(b.id);
+    if (!existing || (b.updatedAt || b.createdAt) > (existing.updatedAt || existing.createdAt)) {
+      uniqueBatchesById.set(b.id, b);
+    }
+  }
+  const batches = Array.from(uniqueBatchesById.values());
   const describe = (b: BatchRoute) => {
     const orders = b.orderNos.map((no) => byOrderNo.get(no)).filter((o): o is RouteOrder => o != null);
     const doneCount = orders.filter((o) => ORDER_RESOLVED_FOR_BATCH_STATUSES.includes(o.status)).length;
