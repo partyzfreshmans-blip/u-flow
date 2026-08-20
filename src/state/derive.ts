@@ -790,17 +790,33 @@ export function computeRoute(state: AppState, actions: AppActions) {
   // fall back to their original sheet order since Array#sort is stable.
   filtered.sort((a, b) => (sheetDateTimeToMs(b.orderedAtText) ?? 0) - (sheetDateTimeToMs(a.orderedAtText) ?? 0));
 
-  const chipBase: CSSProperties = { border: 0, cursor: 'pointer', fontFamily: 'var(--font-body)', fontSize: 12.5, padding: '6px 13px', borderRadius: 20, fontWeight: 500 };
+  const STATUS_LABEL_MAP: Record<string, string> = {
+    all: 'ทั้งหมด (ไม่รวมยกเลิก)',
+    ReadyForPickup: 'พร้อมรับ (ReadyForPickup)',
+  };
+
+  const countForStatus = (st: string) =>
+    st === 'all'
+      ? visibleOrders.filter((o) => o.status !== CANCELLED_STATUS).length
+      : visibleOrders.filter((o) => o.status === st).length;
+
+  const chipBase: CSSProperties = { border: 0, cursor: 'pointer', fontFamily: 'var(--font-body)', fontSize: 12, padding: '5px 11px', borderRadius: 20, fontWeight: 500 };
   const makeTabs = (values: string[], selected: string, onSelect: (v: string) => void) =>
-    ['all', ...values].map((v) => ({
-      key: v,
-      label: v === 'all' ? 'ทั้งหมด (ไม่รวมยกเลิก)' : v,
-      style:
-        v === selected
-          ? { ...chipBase, background: 'var(--color-accent)', color: '#fff' }
-          : { ...chipBase, background: 'var(--color-surface)', color: 'var(--color-neutral-300)', boxShadow: 'inset 0 0 0 1px var(--color-divider)' },
-      go: () => onSelect(v),
-    }));
+    ['all', ...values].map((v) => {
+      const isSelected = v === selected;
+      const count = countForStatus(v);
+      return {
+        key: v,
+        label: STATUS_LABEL_MAP[v] || v,
+        count,
+        selected: isSelected,
+        style:
+          isSelected
+            ? { ...chipBase, background: 'var(--color-accent)', color: '#fff', boxShadow: '0 2px 8px rgba(229, 72, 77, 0.35)' }
+            : { ...chipBase, background: 'var(--color-bg)', color: 'var(--color-neutral-300)', boxShadow: 'inset 0 0 0 1px var(--color-divider)' },
+        go: () => onSelect(v),
+      };
+    });
 
   const countForDistrict = (dp: string) => workingOrders.filter((o) => o.districtProvince.trim() === dp).length;
   const noDistrictCount = workingOrders.filter((o) => o.districtProvince.trim() === '').length;
@@ -998,6 +1014,20 @@ export function computeRoute(state: AppState, actions: AppActions) {
     districtProvinceOptions,
     districtProvinceFilter: state.routeFilterValue,
     onDistrictProvinceFilter: (v: string) => actions.patch({ routeFilterValue: v }),
+    hasAnyFilter:
+      state.routeQ !== '' ||
+      state.routeOrderDateFilter !== '' ||
+      state.routeDeliveryDateFilter !== '' ||
+      state.routeFilterValue !== 'all' ||
+      state.routeStatusFilter !== 'all',
+    clearAllFilters: () =>
+      actions.patch({
+        routeQ: '',
+        routeOrderDateFilter: '',
+        routeDeliveryDateFilter: '',
+        routeFilterValue: 'all',
+        routeStatusFilter: 'all',
+      }),
     statusTabs: makeTabs(statusValues, state.routeStatusFilter, (v) => actions.patch({ routeStatusFilter: v })),
     rowsNoDate,
     rowsWithDate,

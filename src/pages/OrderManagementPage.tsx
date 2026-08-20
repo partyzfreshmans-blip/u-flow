@@ -385,69 +385,244 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
         </div>
       )}
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
-        <div style={{ position: 'relative', flex: 1, minWidth: 220, maxWidth: 320 }}>
-          <i className="ph ph-magnifying-glass" style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', fontSize: 15, color: 'var(--color-neutral-500)' }} />
-          <input className="input" style={{ paddingLeft: 32 }} placeholder="ค้นหาลูกค้า / เลขคำสั่งซื้อ" value={v.routeQ} onChange={(e) => v.onRouteSearch(e.target.value)} />
+      {/* Redesigned Premium Filter Toolbar */}
+      <div
+        className="card elev-sm"
+        style={{
+          padding: '14px 18px',
+          marginBottom: 16,
+          background: 'var(--color-surface)',
+          borderRadius: 14,
+          boxShadow: '0 2px 10px rgba(0,0,0,0.18), inset 0 0 0 1px var(--color-divider)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 12,
+        }}
+      >
+        {/* Row 1: Search + Result Badge + Quick Action Buttons */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          {/* Search Box */}
+          <div style={{ position: 'relative', flex: '1 1 260px', maxWidth: 400 }}>
+            <i
+              className="ph ph-magnifying-glass"
+              style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 16, color: 'var(--color-neutral-500)' }}
+            />
+            <input
+              className="input"
+              style={{
+                paddingLeft: 36,
+                paddingRight: v.routeQ ? 32 : 12,
+                height: 38,
+                fontSize: 13,
+                borderRadius: 9,
+                background: 'var(--color-bg)',
+                width: '100%',
+              }}
+              placeholder="ค้นหาลูกค้า / เลขคำสั่งซื้อ / เบอร์โทร..."
+              value={v.routeQ}
+              onChange={(e) => v.onRouteSearch(e.target.value)}
+            />
+            {v.routeQ && (
+              <button
+                className="btn btn-icon btn-ghost"
+                style={{ position: 'absolute', right: 4, top: '50%', transform: 'translateY(-50%)', width: 26, height: 26, color: 'var(--color-neutral-400)' }}
+                onClick={() => v.onRouteSearch('')}
+                title="ล้างคำค้นหา"
+              >
+                <i className="ph ph-x" style={{ fontSize: 13 }} />
+              </button>
+            )}
+          </div>
+
+          {/* Result Count Badge */}
+          <div
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              fontSize: 12,
+              padding: '6px 12px',
+              borderRadius: 20,
+              background: 'var(--color-bg)',
+              color: 'var(--color-neutral-300)',
+              boxShadow: 'inset 0 0 0 1px var(--color-divider)',
+            }}
+          >
+            <i className="ph ph-list-numbers" style={{ color: 'var(--color-accent-300)' }} />
+            <span>พบ <b style={{ color: '#fff', fontVariantNumeric: 'tabular-nums' }}>{v.resultCount.toLocaleString('en-US')}</b> รายการ</span>
+          </div>
+
+          {/* Right Action Tools */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto', flexWrap: 'wrap' }}>
+            {canEdit && v.allFilteredCount > v.selectedCount && (
+              <button
+                className="btn btn-secondary"
+                style={{ fontSize: 12, height: 36, borderRadius: 8 }}
+                onClick={() => v.setSelection(v.allFilteredOrderNos)}
+                title="เลือกทุกรายการที่ตรงกับตัวกรองปัจจุบันเพื่อจัดการพร้อมกัน"
+              >
+                <i className="ph ph-check-square" style={{ color: 'var(--color-accent-300)' }} />
+                เลือกทั้งหมด ({v.allFilteredCount.toLocaleString('en-US')})
+              </button>
+            )}
+
+            <button
+              className="btn btn-secondary"
+              style={{ fontSize: 12, height: 36, borderRadius: 8 }}
+              disabled={exporting}
+              onClick={() => doExport(false)}
+            >
+              <i
+                className={exporting ? 'ph ph-circle-notch' : 'ph ph-file-xls'}
+                style={{ color: '#22c55e', animation: exporting ? 'spin .8s linear infinite' : undefined }}
+              />
+              {exporting ? 'กำลังส่งออก...' : 'ส่งออกเป็น Excel'}
+            </button>
+
+            {v.canArchive && (
+              <label
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 7,
+                  fontSize: 12,
+                  padding: '7px 12px',
+                  borderRadius: 8,
+                  background: v.archivedFilter ? 'var(--color-accent-900)' : 'var(--color-bg)',
+                  color: v.archivedFilter ? 'var(--color-accent-200)' : 'var(--color-neutral-400)',
+                  boxShadow: v.archivedFilter ? 'inset 0 0 0 1px var(--color-accent-700)' : 'inset 0 0 0 1px var(--color-divider)',
+                  cursor: 'pointer',
+                  userSelect: 'none',
+                }}
+              >
+                <input type="checkbox" checked={v.archivedFilter} onChange={v.toggleArchivedFilter} />
+                <i className="ph ph-archive" />
+                <span>ออเดอร์ที่จัดเก็บแล้ว{v.archivedCount > 0 ? ` (${v.archivedCount})` : ''}</span>
+              </label>
+            )}
+          </div>
         </div>
-        {v.canArchive && (
-          <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, color: 'var(--color-neutral-400)', marginLeft: 'auto' }}>
-            <input type="checkbox" checked={v.archivedFilter} onChange={v.toggleArchivedFilter} />
-            แสดงออเดอร์ที่จัดเก็บแล้ว{v.archivedCount > 0 ? ` (${v.archivedCount})` : ''}
-          </label>
+
+        {exportError && (
+          <div style={{ display: 'flex', gap: 9, padding: 11, borderRadius: 9, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 12.5 }}>
+            <i className="ph ph-warning-fill" style={{ flex: 'none' }} />ส่งออกไม่สำเร็จ: {exportError}
+          </div>
         )}
-        <div style={{ fontSize: 12, color: 'var(--color-neutral-500)', marginLeft: v.canArchive ? 0 : 'auto' }}>{v.resultCount} รายการ</div>
-        {canEdit && v.allFilteredCount > v.selectedCount && (
-          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => v.setSelection(v.allFilteredOrderNos)}>
-            <i className="ph ph-checks" />เลือกทั้งหมด {v.allFilteredCount.toLocaleString('en-US')} รายการที่ตรงตัวกรอง
-          </button>
+
+        {v.archivedFilter && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderRadius: 9, background: 'var(--color-bg)', boxShadow: 'inset 0 0 0 1px var(--color-divider)', fontSize: 12.5, color: 'var(--color-neutral-400)' }}>
+            <i className="ph ph-archive" style={{ color: 'var(--color-accent-300)', flex: 'none' }} />
+            <span>กำลังดูออเดอร์ที่จัดเก็บแล้ว — เลือกรายการแล้วกด "นำกลับมาใช้งาน" ที่แถบด้านล่างเพื่อย้ายกลับมาใช้งาน</span>
+          </div>
         )}
-        <button className="btn btn-ghost" style={{ fontSize: 12 }} disabled={exporting} onClick={() => doExport(false)}>
-          <i className={exporting ? 'ph ph-circle-notch' : 'ph ph-file-xls'} style={exporting ? { animation: 'spin .8s linear infinite' } : undefined} />
-          {exporting ? 'กำลังส่งออก...' : 'ส่งออกเป็น Excel'}
-        </button>
-      </div>
-      {exportError && (
-        <div style={{ display: 'flex', gap: 9, padding: 13, marginBottom: 12, borderRadius: 10, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 13 }}>
-          <i className="ph ph-warning-fill" style={{ flex: 'none' }} />Export ไม่สำเร็จ: {exportError}
+
+        {/* Row 2: Secondary Filters (Dates, Area, and Reset Button) */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 14,
+            flexWrap: 'wrap',
+            paddingTop: 10,
+            borderTop: '1px solid var(--color-divider)',
+          }}
+        >
+          {/* วันที่สั่ง */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--color-neutral-400)' }}>
+            <span style={{ fontWeight: 500, whiteSpace: 'nowrap' }}><i className="ph ph-calendar" style={{ marginRight: 4, color: 'var(--color-accent-300)' }} />วันที่สั่ง:</span>
+            <input
+              type="date"
+              className="input"
+              style={{ height: 32, width: 145, fontSize: 12, borderRadius: 7, background: 'var(--color-bg)' }}
+              value={v.orderDateFilter}
+              onChange={(e) => v.onOrderDateFilter(e.target.value)}
+            />
+          </div>
+
+          {/* วันที่จะจัดส่ง */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--color-neutral-400)' }}>
+            <span style={{ fontWeight: 500, whiteSpace: 'nowrap' }}><i className="ph ph-truck" style={{ marginRight: 4, color: 'var(--color-accent-300)' }} />วันที่จะจัดส่ง:</span>
+            <input
+              type="date"
+              className="input"
+              style={{ height: 32, width: 145, fontSize: 12, borderRadius: 7, background: 'var(--color-bg)' }}
+              value={v.deliveryDateFilter}
+              onChange={(e) => v.onDeliveryDateFilter(e.target.value)}
+            />
+          </div>
+
+          {/* พื้นที่จัดส่ง (อำเภอ, จังหวัด) */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--color-neutral-400)' }}>
+            <span style={{ fontWeight: 500, whiteSpace: 'nowrap' }}><i className="ph ph-map-pin" style={{ marginRight: 4, color: 'var(--color-accent-300)' }} />พื้นที่จัดส่ง:</span>
+            <select
+              className="input"
+              style={{ height: 32, minWidth: 200, maxWidth: 300, fontSize: 12, borderRadius: 7, background: 'var(--color-bg)' }}
+              value={v.districtProvinceFilter}
+              onChange={(e) => v.onDistrictProvinceFilter(e.target.value)}
+            >
+              {v.districtProvinceOptions.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Reset All Filters button */}
+          {v.hasAnyFilter && (
+            <button
+              className="btn btn-ghost"
+              style={{ fontSize: 12, height: 32, color: 'var(--st-bad-fg)', padding: '0 10px', marginLeft: 'auto' }}
+              onClick={v.clearAllFilters}
+            >
+              <i className="ph ph-arrow-counter-clockwise" />ล้างตัวกรองทั้งหมด
+            </button>
+          )}
         </div>
-      )}
 
-      {v.archivedFilter && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', marginBottom: 12, borderRadius: 10, background: 'var(--color-surface)', boxShadow: 'var(--shadow-sm)', fontSize: 12.5, color: 'var(--color-neutral-400)' }}>
-          <i className="ph ph-archive" style={{ color: 'var(--color-accent-300)' }} />
-          กำลังดูออเดอร์ที่จัดเก็บแล้ว — ออเดอร์เหล่านี้ถูกซ่อนจากตารางหลักและหน้าอื่นๆ (วางแผนจัดรูท / จัดล็อตหยิบสินค้า / แดชบอร์ด) แต่ข้อมูลยังอยู่ครบ เลือกแล้วกด "นำกลับมาใช้งาน" เพื่อย้ายกลับ
+        {/* Row 3: Status Pills Bar */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            flexWrap: 'wrap',
+            paddingTop: 10,
+            borderTop: '1px solid var(--color-divider)',
+          }}
+        >
+          <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-neutral-400)', display: 'flex', alignItems: 'center', gap: 5, marginRight: 2 }}>
+            <i className="ph ph-funnel" /> สถานะ:
+          </span>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {v.statusTabs.map((t) => (
+              <button
+                key={t.key}
+                onClick={t.go}
+                style={{
+                  ...t.style,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  transition: 'all .12s ease',
+                }}
+              >
+                <span>{t.label}</span>
+                <span
+                  style={{
+                    fontSize: 11,
+                    padding: '1px 6px',
+                    borderRadius: 10,
+                    background: t.selected ? 'rgba(255,255,255,0.28)' : 'var(--color-neutral-800)',
+                    color: t.selected ? '#fff' : 'var(--color-neutral-400)',
+                    fontVariantNumeric: 'tabular-nums',
+                    fontWeight: 600,
+                  }}
+                >
+                  {t.count.toLocaleString('en-US')}
+                </span>
+              </button>
+            ))}
+          </div>
         </div>
-      )}
-
-      <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', marginBottom: 12 }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, color: 'var(--color-neutral-400)' }}>
-          วันที่สั่ง
-          <input type="date" className="input" style={{ minHeight: 32, width: 155 }} value={v.orderDateFilter} onChange={(e) => v.onOrderDateFilter(e.target.value)} />
-        </label>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, color: 'var(--color-neutral-400)' }}>
-          วันที่จะจัดส่ง
-          <input type="date" className="input" style={{ minHeight: 32, width: 155 }} value={v.deliveryDateFilter} onChange={(e) => v.onDeliveryDateFilter(e.target.value)} />
-        </label>
-        {v.hasDateFilters && (
-          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={v.clearDateFilters}>
-            <i className="ph ph-x" />ล้างตัวกรองวันที่
-          </button>
-        )}
-      </div>
-
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10, alignItems: 'center' }}>
-        <span style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginRight: 2 }}>อำเภอ,จังหวัด</span>
-        <select className="input" style={{ minHeight: 32, maxWidth: 320, fontSize: 12.5 }} value={v.districtProvinceFilter} onChange={(e) => v.onDistrictProvinceFilter(e.target.value)}>
-          {v.districtProvinceOptions.map((o) => (
-            <option key={o.value} value={o.value}>{o.label}</option>
-          ))}
-        </select>
-      </div>
-
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12, alignItems: 'center' }}>
-        <span style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginRight: 2 }}>สถานะ</span>
-        {v.statusTabs.map((t) => <button key={t.key} style={t.style} onClick={t.go}>{t.label}</button>)}
       </div>
 
       {v.canArchive && v.selectedCount > 0 && (
