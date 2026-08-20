@@ -4,7 +4,7 @@ import type { PickLot } from '../data/pickLots';
 import { PROMO_UNITS, type ApiImportOrder, type Order, type OrderLineItem, type Promo, type PromoPackUnit, type PromoUnit, type RouteOrder, type Sku } from '../data/types';
 import { lineDiff, lineNetTotal, receivingFolderKey, recordHasDiscrepancy, recordTotal, type ReceivingLine, type ReceivingRecord } from '../data/receiving';
 import { loadCode } from '../data/vehicles';
-import { nextBatchId, type BatchRoute } from '../data/batchRoutes';
+import { nextBatchId, dedupeBatchRoutes, type BatchRoute } from '../data/batchRoutes';
 import { pointZone, UNASSIGNED_COLOR, type ZoneMatch } from '../data/zones';
 import { coordKey, type GeocodeCache } from '../data/geocodeCache';
 import { resolveRouteOrderLocations } from '../data/customerLocation';
@@ -2430,7 +2430,8 @@ export function computeBatchRouteHistory(state: AppState, actions: AppActions) {
   const role = state.session?.role;
   const canCancel = role ? canCancelBatchRoute(role) : false;
 
-  const rows = state.batchRoutes
+  const uniqueHistoryBatches = dedupeBatchRoutes(state.batchRoutes);
+  const rows = uniqueHistoryBatches
     .filter((b) => !q || b.id.toLowerCase().includes(q) || b.deliveryDate.includes(q) || b.vehicleName.toLowerCase().includes(q))
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
     .map((b) => {
@@ -2840,11 +2841,12 @@ export function computeCod(state: AppState, actions: AppActions) {
 
   const byOrderNo = new Map(state.routeOrders.map((o) => [o.orderNo, o]));
 
-  const vehicleFilterOptions = Array.from(new Map(state.batchRoutes.map((b) => [b.vehicleId, b.vehicleName])).entries())
+  const uniqueBatches = dedupeBatchRoutes(state.batchRoutes);
+  const vehicleFilterOptions = Array.from(new Map(uniqueBatches.map((b) => [b.vehicleId, b.vehicleName])).entries())
     .map(([id, name]) => ({ id, name }))
     .sort((a, b) => a.name.localeCompare(b.name));
 
-  const visibleBatches = state.batchRoutes
+  const visibleBatches = uniqueBatches
     .filter((b) => !b.cancelled && (effectiveVehicleFilter === 'all' || b.vehicleId === effectiveVehicleFilter))
     // Newest first — same ordering as the Batch Route History page.
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));

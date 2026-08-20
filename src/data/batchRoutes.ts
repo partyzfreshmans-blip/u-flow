@@ -41,7 +41,7 @@ const STORAGE_KEY = 'warehouse-ops.batchRoutes.v1';
 /** Older persisted batches predate the codClosed/codClosedAt/codClosedBy
  * fields — default them to "never closed" rather than leaving them
  * undefined, so every reader can rely on the fields always being present. */
-function normalize(b: BatchRoute): BatchRoute {
+export function normalizeBatchRoute(b: BatchRoute): BatchRoute {
   return {
     ...b,
     codClosed: b.codClosed ?? false,
@@ -53,12 +53,41 @@ function normalize(b: BatchRoute): BatchRoute {
   };
 }
 
+export function dedupeBatchRoutes(list: BatchRoute[]): BatchRoute[] {
+  const byId = new Map<string, BatchRoute>();
+  for (const item of list) {
+    if (!item || !item.id) continue;
+    const normalized = normalizeBatchRoute(item);
+    const existing = byId.get(normalized.id);
+    if (!existing) {
+      byId.set(normalized.id, normalized);
+    } else {
+      if (normalized.orderNos.length > 0 && existing.orderNos.length === 0) {
+        byId.set(normalized.id, normalized);
+      } else if (normalized.orderNos.length === 0 && existing.orderNos.length > 0) {
+        byId.set(normalized.id, {
+          ...existing,
+          codClosed: normalized.codClosed || existing.codClosed,
+          updatedAt: normalized.updatedAt > existing.updatedAt ? normalized.updatedAt : existing.updatedAt,
+        });
+      } else {
+        const itemTime = normalized.updatedAt || normalized.createdAt || '';
+        const existTime = existing.updatedAt || existing.createdAt || '';
+        if (itemTime >= existTime) {
+          byId.set(normalized.id, normalized);
+        }
+      }
+    }
+  }
+  return Array.from(byId.values());
+}
+
 export function loadBatchRoutes(): BatchRoute[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as BatchRoute[]).map(normalize) : [];
+    return Array.isArray(parsed) ? dedupeBatchRoutes((parsed as BatchRoute[]).map(normalizeBatchRoute)) : [];
   } catch {
     return [];
   }
@@ -66,7 +95,7 @@ export function loadBatchRoutes(): BatchRoute[] {
 
 export function saveBatchRoutes(list: BatchRoute[]): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(dedupeBatchRoutes(list)));
   } catch {
     /* storage unavailable — batches stay in memory for this session */
   }

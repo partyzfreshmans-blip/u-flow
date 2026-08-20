@@ -852,12 +852,12 @@ async function readBatchRoutes(sheets: SheetsClient): Promise<BatchRouteRecord[]
   await ensureBatchRoutesSheet(sheets);
   const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${BATCH_ROUTES_TAB_TITLE}!A:P` });
   const rows = res.data.values ?? [];
-  const out: BatchRouteRecord[] = [];
+  const byId = new Map<string, BatchRouteRecord>();
   for (let i = 1; i < rows.length; i++) {
     const r = rows[i] ?? [];
     const id = String(r[0] ?? '').trim();
     if (!id) continue;
-    out.push({
+    const record: BatchRouteRecord = {
       rowIndex: i + 1,
       id,
       vehicleId: String(r[1] ?? '').trim(),
@@ -875,9 +875,13 @@ async function readBatchRoutes(sheets: SheetsClient): Promise<BatchRouteRecord[]
       cancelled: String(r[13] ?? '').trim().toUpperCase() === 'TRUE',
       cancelledAt: String(r[14] ?? '').trim(),
       cancelledBy: String(r[15] ?? '').trim(),
-    });
+    };
+    const existing = byId.get(id);
+    if (!existing || record.orderNos.length > existing.orderNos.length || (record.updatedAt || record.createdAt) >= (existing.updatedAt || existing.createdAt)) {
+      byId.set(id, record);
+    }
   }
-  return out;
+  return Array.from(byId.values());
 }
 
 function batchRouteRowValues(b: Omit<BatchRouteRecord, 'rowIndex'>): unknown[] {
