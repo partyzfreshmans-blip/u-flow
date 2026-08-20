@@ -1179,7 +1179,20 @@ export function computePlanner(state: AppState, actions: AppActions) {
    * it so a batch's stops can never leak into a different date again. */
   const currentOrderNos = (vehicleId: string): string[] => {
     const b = activeBatchByVehicle.get(vehicleId);
-    if (b) return b.orderNos;
+    if (b && b.locked && !state.batchRouteUnlocked[b.id]) {
+      // If the batch has real orders, return them; if it is an empty batch (0 orders) but routePlan has draft orders, prefer routePlan
+      if (b.orderNos.length > 0) return b.orderNos;
+      if (state.routePlan[vehicleId] && state.routePlan[vehicleId].length > 0) {
+        return filterOutBatchedOrderNos(state.routePlan[vehicleId], state.batchRoutes);
+      }
+      return [];
+    }
+    if (b && state.batchRouteUnlocked[b.id]) {
+      if (state.routePlan[vehicleId] && state.routePlan[vehicleId].length > 0) {
+        return state.routePlan[vehicleId];
+      }
+      return b.orderNos;
+    }
     return filterOutBatchedOrderNos(state.routePlan[vehicleId] ?? [], state.batchRoutes);
   };
   /** Writes a single vehicle's new order list to whichever store currently
@@ -1189,7 +1202,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
    * updates the batch itself in that case, and writing routePlan too would
    * just recreate the stale-leftover-entry leak this exists to prevent. */
   const applyVehicleOrderNos = (vehicleId: string, next: string[]) => {
-    if (!activeBatchByVehicle.get(vehicleId)) actions.setRoutePlan({ ...state.routePlan, [vehicleId]: next });
+    actions.setRoutePlan({ ...state.routePlan, [vehicleId]: next });
   };
 
   // Customer-corrected coordinates always win over the raw CS_Lat/CS_Long
@@ -1832,40 +1845,48 @@ export function computePlanner(state: AppState, actions: AppActions) {
     const planPatch: RoutePlanShape = {};
     const now = new Date().toISOString();
     for (const vehicleId of vehicleIds) {
-      if (isVehicleLocked(vehicleId)) continue;
       const veh = state.vehicles.find((x) => x.id === vehicleId);
-      const vehicleOrderNos = currentOrderNos(vehicleId);
-      if (!veh || vehicleOrderNos.length === 0) continue;
-      const id = nextBatchId(nextBatches, state.plannerDate, veh.loadPrefix);
-      const batch: BatchRoute = {
-        id,
-        vehicleId,
-        vehicleName: veh.name,
-        deliveryDate: state.plannerDate,
-        orderNos: [...vehicleOrderNos],
-        createdAt: now,
-        createdBy: username,
-        updatedAt: now,
-        updatedBy: username,
-        locked: true,
-        codClosed: false,
-        codClosedAt: '',
-        codClosedBy: '',
-        cancelled: false,
-        cancelledAt: '',
-        cancelledBy: '',
-      };
-      nextBatches = [...nextBatches, batch];
-      // The batch now owns these orderNos permanently — clear the vehicle's
-      // routePlan draft so it can never resurface under this vehicle on a
-      // different plannerDate (the original cross-date leak: an Assign that
-      // left routePlan holding the same orders forever).
+      if (!veh) continue;
+      const rawDraft = state.routePlan[vehicleId] ?? [];
+      const vehicleOrderNos = rawDraft.length > 0 ? rawDraft : currentOrderNos(vehicleId);
+      if (vehicleOrderNos.length === 0) continue;
+
+      const existingBatch = activeBatchByVehicle.get(vehicleId);
+      if (existingBatch && (existingBatch.orderNos.length === 0 || state.batchRouteUnlocked[existingBatch.id])) {
+        const updated: BatchRoute = {
+          ...existingBatch,
+          orderNos: [...vehicleOrderNos],
+          updatedAt: now,
+          updatedBy: username,
+          locked: true,
+        };
+        nextBatches = nextBatches.map((x) => (x.id === existingBatch.id ? updated : x));
+        actions.logActivity('อัปเดต Batch Route', `${existingBatch.id} · ${veh.name} · ${vehicleOrderNos.length} ออเดอร์ (${vehicleOrderNos.join(', ')})`);
+      } else {
+        const id = nextBatchId(nextBatches, state.plannerDate, veh.loadPrefix);
+        const batch: BatchRoute = {
+          id,
+          vehicleId,
+          vehicleName: veh.name,
+          deliveryDate: state.plannerDate,
+          orderNos: [...vehicleOrderNos],
+          createdAt: now,
+          createdBy: username,
+          updatedAt: now,
+          updatedBy: username,
+          locked: true,
+          codClosed: false,
+          codClosedAt: '',
+          codClosedBy: '',
+          cancelled: false,
+          cancelledAt: '',
+          cancelledBy: '',
+        };
+        nextBatches = [...nextBatches, batch];
+        actions.logActivity('ยืนยันรูท (สร้าง Batch Route)', `${id} · ${veh.name} · ${vehicleOrderNos.length} ออเดอร์ (${vehicleOrderNos.join(', ')})`);
+      }
       planPatch[vehicleId] = [];
-      actions.logActivity('ยืนยันรูท (สร้าง Batch Route)', `${id} · ${veh.name} · ${vehicleOrderNos.length} ออเดอร์ (${vehicleOrderNos.join(', ')})`);
     }
-    // setBatchRoutes's backend push now ALSO stamps every order in each new
-    // batch (batch_route_id/route/assigned_driver/stop_sequence) in the same
-    // transaction — see server/lib.ts's handleUpsertBatchRoutes.
     actions.setBatchRoutes(nextBatches);
     if (Object.keys(planPatch).length > 0) actions.setRoutePlan({ ...state.routePlan, ...planPatch });
     actions.patch({ assignDialogOpen: false, assignSelectedVehicleIds: [] });
@@ -2471,7 +2492,7 @@ export function computeBatchRouteHistory(state: AppState, actions: AppActions) {
         cancelledBy: b.cancelledBy,
         cancelledAtText: b.cancelledAt ? formatDateTime(new Date(b.cancelledAt).getTime()) : '',
         canCancelRole: canCancel,
-        canCancel: canCancel && !b.cancelled && actuallyDeliveredCount === 0,
+        canCancel: canCancel && !b.cancelled && (actuallyDeliveredCount === 0 || b.orderNos.length === 0),
         cancelBlockedReason,
         cancelOrderCount: b.orderNos.length,
         cancel: () => actions.cancelBatchRoute(b.id, state.batchRoutes, state.routeOrders),
