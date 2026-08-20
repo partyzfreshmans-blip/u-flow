@@ -320,34 +320,36 @@ textarea.input { min-height: 90px; resize: vertical; font-family: inherit; }
    single narrow column reads as broken on a phone, not helpful. */
 .planner-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 420px;
+  grid-template-columns: minmax(0, 1.1fr) minmax(480px, 1fr);
   gap: 18px;
-  /* align-items deliberately left unset (defaults to stretch) so both
-   * columns stretch to the row's full height — the left column is much
-   * taller, and that tall row is exactly what gives .planner-map-col's
-   * position: sticky (align-self: start, set on that column alone) room
-   * to hold it in place as the row scrolls past. Setting align-items:
-   * start here would shrink both columns to content height and break that. */
+  transition: grid-template-columns .2s ease;
+}
+.planner-layout.planner-layout-large-map {
+  grid-template-columns: minmax(0, 0.95fr) minmax(560px, 1.25fr);
 }
 .planner-layout > *:first-child {
   min-width: 0;
 }
 .planner-map-col {
   position: sticky;
-  top: 96px;
+  top: 14px;
   align-self: start;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
   min-width: 0;
-  /* Explicit and intentional, not incidental — this column's grid track is
-   * a fixed 420px, so it should never need to sit above overflowing left-
-   * column content (that overflow is what .table-scroll now prevents), but
-   * this stacking order is deliberate in case anything else ever floats. */
   z-index: 2;
 }
+@media (max-width: 1100px) {
+  .planner-layout,
+  .planner-layout.planner-layout-large-map {
+    grid-template-columns: minmax(0, 1fr) minmax(380px, 440px);
+    gap: 14px;
+  }
+}
 @media (max-width: 900px) {
-  .planner-layout {
+  .planner-layout,
+  .planner-layout.planner-layout-large-map {
     grid-template-columns: minmax(0, 1fr);
   }
   .planner-map-col {

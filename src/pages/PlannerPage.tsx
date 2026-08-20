@@ -30,6 +30,8 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
   // every date's unassigned pool becomes visible, not just today's) and
   // narrows the table below to just that flagged subset via this filter.
   const [attentionFilter, setAttentionFilter] = useState<'none' | 'no-date' | 'overdue'>('none');
+  const [mapExpanded, setMapExpanded] = useState(false);
+  const [mapSplitRatio, setMapSplitRatio] = useState<'normal' | 'large'>('large');
   const toggleVehicleOnMap = (vehicleId: string) =>
     setHiddenVehicleIds((cur) => {
       const next = new Set(cur);
@@ -263,7 +265,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
         </div>
       )}
 
-      <div className="planner-layout">
+      <div className={`planner-layout ${mapSplitRatio === 'large' ? 'planner-layout-large-map' : ''}`}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {/* per-vehicle plans */}
           {v.vehicles.map((veh) => (
@@ -676,57 +678,99 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
             see .planner-map-col in nocturne.css for how/why, and its mobile
             breakpoint that drops this to a plain stacked block instead. */}
         <div className="planner-map-col">
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
-            <span style={{ fontSize: 11, color: 'var(--color-neutral-500)', marginRight: 2 }}>แสดงบนแผนที่</span>
-            {v.vehicles.map((veh) => {
-              const hidden = hiddenVehicleIds.has(veh.id);
-              return (
-                <button
-                  key={veh.id}
-                  onClick={() => toggleVehicleOnMap(veh.id)}
-                  title={hidden ? `ซ่อนอยู่ — คลิกเพื่อแสดง ${veh.name}` : `คลิกเพื่อซ่อน ${veh.name}`}
-                  style={{
-                    display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, padding: '3px 9px', borderRadius: 20,
-                    border: 0, cursor: 'pointer', fontFamily: 'var(--font-body)',
-                    background: hidden ? 'var(--color-bg)' : 'var(--color-surface)',
-                    color: hidden ? 'var(--color-neutral-600)' : 'var(--color-neutral-200)',
-                    boxShadow: hidden ? 'inset 0 0 0 1px var(--color-divider)' : 'inset 0 0 0 1px var(--color-neutral-700)',
-                    opacity: hidden ? 0.6 : 1,
-                  }}
-                >
-                  <span style={{ width: 9, height: 9, borderRadius: '50%', background: veh.vehicleColor, flex: 'none' }} />
-                  {veh.name} ({veh.stopCount})
-                  {hidden && <i className="ph ph-eye-slash" style={{ fontSize: 11 }} />}
-                </button>
-              );
-            })}
-            <button
-              onClick={() => setShowUnassignedOnMap((cur) => !cur)}
-              title={showUnassignedOnMap ? 'คลิกเพื่อซ่อนออเดอร์ที่ยังไม่ได้จัด' : 'ซ่อนอยู่ — คลิกเพื่อแสดงออเดอร์ที่ยังไม่ได้จัด'}
-              style={{
-                display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, padding: '3px 9px', borderRadius: 20,
-                border: 0, cursor: 'pointer', fontFamily: 'var(--font-body)',
-                background: showUnassignedOnMap ? 'var(--color-surface)' : 'var(--color-bg)',
-                color: showUnassignedOnMap ? 'var(--color-neutral-200)' : 'var(--color-neutral-600)',
-                boxShadow: showUnassignedOnMap ? 'inset 0 0 0 1px var(--color-neutral-700)' : 'inset 0 0 0 1px var(--color-divider)',
-                opacity: showUnassignedOnMap ? 1 : 0.6,
-              }}
-            >
-              <span style={{ width: 9, height: 9, borderRadius: '50%', background: v.unassignedColor, flex: 'none' }} />
-              ยังไม่ได้จัด ({v.unassignedCount})
-              {!showUnassignedOnMap && <i className="ph ph-eye-slash" style={{ fontSize: 11 }} />}
-            </button>
-            {hiddenVehicleIds.size > 0 && (
+          {/* Map Header & Controls */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--color-neutral-400)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <i className="ph ph-map-pin" style={{ color: 'var(--color-accent-300)' }} />หมุดรถ:
+              </span>
+              {v.vehicles.map((veh) => {
+                const hidden = hiddenVehicleIds.has(veh.id);
+                return (
+                  <button
+                    key={veh.id}
+                    onClick={() => toggleVehicleOnMap(veh.id)}
+                    title={hidden ? `คลิกเพื่อแสดง ${veh.name}` : `คลิกเพื่อซ่อน ${veh.name}`}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5, padding: '4px 10px', borderRadius: 20,
+                      border: 0, cursor: 'pointer', fontFamily: 'var(--font-body)', fontWeight: 500,
+                      background: hidden ? 'var(--color-bg)' : 'var(--color-surface)',
+                      color: hidden ? 'var(--color-neutral-500)' : '#fff',
+                      boxShadow: hidden ? 'inset 0 0 0 1px var(--color-divider)' : '0 1px 4px rgba(0,0,0,0.3), inset 0 0 0 1px var(--color-neutral-700)',
+                      opacity: hidden ? 0.6 : 1,
+                      transition: 'all .12s ease',
+                    }}
+                  >
+                    <span style={{ width: 10, height: 10, borderRadius: '50%', background: veh.vehicleColor, border: '1.5px solid #fff', flex: 'none' }} />
+                    {veh.name} <b style={{ fontVariantNumeric: 'tabular-nums' }}>({veh.stopCount})</b>
+                    {hidden && <i className="ph ph-eye-slash" style={{ fontSize: 11 }} />}
+                  </button>
+                );
+              })}
               <button
-                className="btn btn-ghost"
-                style={{ fontSize: 11, padding: '3px 8px' }}
-                onClick={() => setHiddenVehicleIds(new Set())}
+                onClick={() => setShowUnassignedOnMap((cur) => !cur)}
+                title={showUnassignedOnMap ? 'คลิกเพื่อซ่อนออเดอร์ที่ยังไม่ได้จัด' : 'คลิกเพื่อแสดงออเดอร์ที่ยังไม่ได้จัด'}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5, padding: '4px 10px', borderRadius: 20,
+                  border: 0, cursor: 'pointer', fontFamily: 'var(--font-body)', fontWeight: 500,
+                  background: showUnassignedOnMap ? 'var(--color-surface)' : 'var(--color-bg)',
+                  color: showUnassignedOnMap ? 'var(--color-neutral-200)' : 'var(--color-neutral-500)',
+                  boxShadow: showUnassignedOnMap ? '0 1px 4px rgba(0,0,0,0.3), inset 0 0 0 1px var(--color-neutral-700)' : 'inset 0 0 0 1px var(--color-divider)',
+                  opacity: showUnassignedOnMap ? 1 : 0.6,
+                }}
               >
-                <i className="ph ph-x" />แสดงทั้งหมด
+                <span style={{ width: 10, height: 10, borderRadius: '50%', background: v.unassignedColor, border: '1.5px solid #fff', flex: 'none' }} />
+                ยังไม่ได้จัด <b style={{ fontVariantNumeric: 'tabular-nums' }}>({v.unassignedCount})</b>
+                {!showUnassignedOnMap && <i className="ph ph-eye-slash" style={{ fontSize: 11 }} />}
               </button>
-            )}
+            </div>
+
+            {/* Map Action Tools */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' }}>
+              {hiddenVehicleIds.size > 0 && (
+                <button
+                  className="btn btn-ghost"
+                  style={{ fontSize: 11, padding: '3px 8px', height: 28 }}
+                  onClick={() => setHiddenVehicleIds(new Set())}
+                >
+                  <i className="ph ph-x" />แสดงทุกคัน
+                </button>
+              )}
+              <button
+                className="btn btn-secondary"
+                style={{ fontSize: 11.5, padding: '4px 10px', height: 28, borderRadius: 8 }}
+                onClick={() => setMapSplitRatio((cur) => (cur === 'normal' ? 'large' : 'normal'))}
+                title={mapSplitRatio === 'normal' ? 'ขยายความกว้างแผนที่ (55%)' : 'ปรับความกว้างแผนที่ปกติ (45%)'}
+              >
+                <i className="ph ph-sidebar" />
+                {mapSplitRatio === 'normal' ? 'ขยายกว้างขึ้น' : 'ขนาดปกติ'}
+              </button>
+              <button
+                className="btn btn-secondary"
+                style={{ fontSize: 11.5, padding: '4px 10px', height: 28, borderRadius: 8 }}
+                onClick={() => setMapExpanded((cur) => !cur)}
+                title={mapExpanded ? 'ย่อแผนที่กลับ' : 'ขยายแผนที่เต็มจอ'}
+              >
+                <i className={mapExpanded ? 'ph ph-arrows-in-simple' : 'ph ph-arrows-out-simple'} />
+                {mapExpanded ? 'ย่อกลับ' : 'เต็มจอ'}
+              </button>
+            </div>
           </div>
-          <div className="card elev-sm" style={{ padding: 0, overflow: 'hidden', height: 560, position: 'relative' }}>
+
+          {/* Large Sticky Map Container */}
+          <div
+            className="card elev-sm"
+            style={{
+              padding: 0,
+              overflow: 'hidden',
+              height: 'calc(100vh - 165px)',
+              minHeight: 620,
+              maxHeight: 900,
+              borderRadius: 14,
+              boxShadow: '0 2px 12px rgba(0,0,0,0.22), inset 0 0 0 1px var(--color-divider)',
+              position: 'relative',
+            }}
+          >
             <RouteMap
               stops={mapStopsFiltered}
               warehouse={v.warehouse}
@@ -736,14 +780,16 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
               zones={v.zonePolygons}
             />
           </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, fontSize: 11, color: 'var(--color-neutral-500)' }}>
+
+          {/* Zone Legend */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, fontSize: 11.5, color: 'var(--color-neutral-400)', paddingTop: 4 }}>
             {v.zoneLegend.map((z) => (
               <span key={z.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                <span style={{ width: 9, height: 9, borderRadius: '50%', background: z.color, flex: 'none' }} />{z.name}
+                <span style={{ width: 10, height: 10, borderRadius: '50%', background: z.color, flex: 'none' }} />{z.name}
               </span>
             ))}
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-              <span style={{ width: 16, height: 12, borderRadius: 3, background: '#fff', border: '1.5px solid var(--color-neutral-700)', flex: 'none' }} />WH คลัง
+              <span style={{ width: 18, height: 13, borderRadius: 3, background: '#fff', border: '1.5px solid var(--color-neutral-700)', flex: 'none' }} />WH คลังสินค้า
             </span>
             {v.excludedStopCount > 0 && (
               <span style={{ color: 'var(--st-warn-fg)' }}><i className="ph ph-warning" style={{ marginRight: 3 }} />ซ่อนพิกัดผิดปกติ {v.excludedStopCount} จุด</span>
@@ -752,6 +798,37 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
         </div>
       </div>
         </>
+      )}
+
+      {mapExpanded && (
+        <div className="dialog-backdrop" style={{ zIndex: 1000, padding: 16 }} onClick={() => setMapExpanded(false)}>
+          <div
+            className="dialog"
+            style={{ width: '100vw', maxWidth: '96vw', height: '94vh', padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', borderRadius: 16 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ padding: '12px 18px', background: 'var(--color-surface)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--color-divider)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <i className="ph ph-map-trifold" style={{ fontSize: 18, color: 'var(--color-accent-300)' }} />
+                <span style={{ fontWeight: 700, fontSize: 15 }}>แผนที่จัดรูทขนาดใหญ่เต็มจอ (Full Map View)</span>
+                <span style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>— วันที่ {v.plannerDate || 'ทั้งหมด'} ({mapStopsFiltered.length} จุดบนแผนที่)</span>
+              </div>
+              <button className="btn btn-secondary" style={{ height: 32 }} onClick={() => setMapExpanded(false)}>
+                <i className="ph ph-arrows-in-simple" />ปิดเต็มจอ
+              </button>
+            </div>
+            <div style={{ flex: 1, position: 'relative' }}>
+              <RouteMap
+                stops={mapStopsFiltered}
+                warehouse={v.warehouse}
+                vehicleRoutes={vehicleRoutesFiltered}
+                vehicleOptions={v.vehicleOptions}
+                onMoveToVehicle={v.canEdit ? v.onMapMoveToVehicle : undefined}
+                zones={v.zonePolygons}
+              />
+            </div>
+          </div>
+        </div>
       )}
 
       {v.assignDialogOpen && (

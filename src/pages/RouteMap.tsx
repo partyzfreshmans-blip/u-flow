@@ -176,7 +176,15 @@ export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMo
       }
     });
 
+    const resizeObserver = new ResizeObserver(() => {
+      map.invalidateSize();
+    });
+    if (containerRef.current) {
+      resizeObserver.observe(containerRef.current);
+    }
+
     return () => {
+      resizeObserver.disconnect();
       map.remove();
       mapRef.current = null;
       layerRef.current = null;
