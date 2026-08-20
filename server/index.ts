@@ -17,6 +17,7 @@ import {
   handleFetchPromotionsList,
   handleFetchSkuDetailList,
   handleFetchSkuMasterList,
+  handleUpdateSkuMaster,
   handleFetchStaffOrderInfoList,
   handleFetchZones,
   handleGetUniiApiKeySetting,
@@ -157,6 +158,11 @@ app.post('/api/sku-detail/link-promo', async (req, res) => {
 
 app.post('/api/sku-detail/export', async (req, res) => {
   sendResult(res, await handleExportOrderLineItems(bearerToken(req.headers.authorization), req.body));
+});
+
+app.post('/api/sku-master/update', async (req, res) => {
+  const { status, body } = await handleUpdateSkuMaster(bearerToken(req.headers.authorization), req.body);
+  res.status(status).json(body);
 });
 
 app.get('/api/sku-master/list', async (req, res) => {

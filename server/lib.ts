@@ -302,7 +302,7 @@ async function resolveSheetTitle(sheets: ReturnType<typeof google.sheets>, gid: 
 /** Phone formats in the sheet are inconsistent ("66 823848337", "6 895559406",
  * "082-384-8337"), so compare the last 9 digits — the part that actually
  * identifies the subscriber — rather than requiring an exact string match. */
-function phoneKey(v: string): string {
+export function phoneKey(v: string): string {
   return v.replace(/\D/g, '').slice(-9);
 }
 
@@ -1214,6 +1214,14 @@ export async function handleUpdateCsMasterLocation(token: string | null, body: u
       requestBody: { values: [[lat, lng]] },
     });
 
+    // Record _PINFIX audit log entry for traceability
+    await appendAuditLog(sheets, { username: payload.username, role: payload.role }, [{
+      orderId: wantedPhone || wantedName,
+      field: '_PINFIX',
+      oldValue: `${rows[targetRow - 1]?.[3] ?? ''}, ${rows[targetRow - 1]?.[4] ?? ''}`,
+      newValue: `${lat}, ${lng}`,
+    }]);
+
     return { status: 200, body: { ok: true, updatedRow: targetRow } };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
@@ -1720,6 +1728,89 @@ export async function handleFetchStaffOrderInfoList(token: string | null): Promi
     },
     'โหลดข้อมูลออเดอร์ (คำสั่งซื้อ VS) ไม่สำเร็จ',
   );
+}
+
+export async function handleUpdateSkuMaster(token: string | null, body: unknown): Promise<ApiResult> {
+  const payload = verifySessionToken(token);
+  if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
+  if (!['administrator', 'manager'].includes(payload.role)) {
+    return { status: 403, body: { error: 'เฉพาะหัวหน้าคลัง (Administrator/Manager) เท่านั้นที่มีสิทธิ์แก้ไขฐานข้อมูลสินค้า' } };
+  }
+
+  const { id, barcode, name, unit, stock, status } = (body ?? {}) as Record<string, unknown>;
+  if (!id || typeof id !== 'string' || !name || typeof name !== 'string') {
+    return { status: 400, body: { error: 'ต้องระบุ SKU ID และชื่อสินค้า' } };
+  }
+
+  try {
+    const sheets = await getSheetsClient();
+    const title = await resolveSheetTitle(sheets, SKU_MASTER_GID, SKU_SHEET_ID);
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId: SKU_SHEET_ID, range: `${title}!A:Z` });
+    const rows = res.data.values ?? [];
+    if (rows.length === 0) return { status: 500, body: { error: 'ไม่พบข้อมูลในชีท SKU Master' } };
+
+    const header = rows[0].map((h) => String(h ?? '').trim());
+    const at = (colName: string) => header.indexOf(colName);
+    const skuIdCol = at('SKU ID');
+    const barcodeCol = at('บาร์โค้ด (Barcode)') !== -1 ? at('บาร์โค้ด (Barcode)') : at('Barcode');
+    const nameCol = at('ชื่อสินค้า (Product Name)');
+    const unitCol = at('หน่วยสินค้า (Unit)');
+    const stockCol = at('สต็อกปัจจุบัน (Stock)');
+    const inStockCol = at('สถานะในสต็อก (In Stock)');
+
+    const wantedId = id.trim();
+    let targetRow = -1;
+    for (let i = 1; i < rows.length; i++) {
+      if (String(rows[i]?.[skuIdCol] ?? '').trim() === wantedId) {
+        targetRow = i + 1; // 1-based sheet row
+        break;
+      }
+    }
+
+    const updates: { range: string; values: unknown[][] }[] = [];
+    if (targetRow !== -1) {
+      if (barcodeCol !== -1 && barcode !== undefined) updates.push({ range: `${title}!${columnLetter(barcodeCol)}${targetRow}`, values: [[barcode]] });
+      if (nameCol !== -1 && name !== undefined) updates.push({ range: `${title}!${columnLetter(nameCol)}${targetRow}`, values: [[name]] });
+      if (unitCol !== -1 && unit !== undefined) updates.push({ range: `${title}!${columnLetter(unitCol)}${targetRow}`, values: [[unit]] });
+      if (stockCol !== -1 && stock !== undefined) updates.push({ range: `${title}!${columnLetter(stockCol)}${targetRow}`, values: [[stock]] });
+      if (inStockCol !== -1 && status !== undefined) updates.push({ range: `${title}!${columnLetter(inStockCol)}${targetRow}`, values: [[status === 'inactive' ? 'หมด' : 'มีสินค้า']] });
+
+      for (const u of updates) {
+        await sheets.spreadsheets.values.update({ spreadsheetId: SKU_SHEET_ID, range: u.range, valueInputOption: 'RAW', requestBody: { values: u.values } });
+      }
+    } else {
+      // Append new SKU row
+      const newRow: unknown[] = new Array(header.length).fill('');
+      if (skuIdCol !== -1) newRow[skuIdCol] = wantedId;
+      if (barcodeCol !== -1) newRow[barcodeCol] = barcode ?? '';
+      if (nameCol !== -1) newRow[nameCol] = name;
+      if (unitCol !== -1) newRow[unitCol] = unit ?? '';
+      if (stockCol !== -1) newRow[stockCol] = stock ?? 0;
+      if (inStockCol !== -1) newRow[inStockCol] = status === 'inactive' ? 'หมด' : 'มีสินค้า';
+
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SKU_SHEET_ID,
+        range: `${title}!A:Z`,
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: [newRow] },
+      });
+    }
+
+    skuMasterRowsCache.invalidate();
+
+    await appendAuditLog(sheets, { username: payload.username, role: payload.role }, [{
+      orderId: wantedId,
+      field: 'sku_master',
+      oldValue: targetRow !== -1 ? 'EXISTING' : 'NEW',
+      newValue: JSON.stringify({ id: wantedId, name, barcode, unit, stock, status }),
+    }]);
+
+    return { status: 200, body: { ok: true } };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'บันทึก SKU ไม่สำเร็จ';
+    return { status: 500, body: { error: message } };
+  }
 }
 
 export async function handleFetchSkuMasterList(token: string | null): Promise<ApiResult> {

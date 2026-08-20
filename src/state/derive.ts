@@ -1818,15 +1818,8 @@ export function computePlanner(state: AppState, actions: AppActions) {
       assignedCount++;
       touchedVehicleIds.add(target.id);
     }
-    // Keep each touched vehicle in farthest-first order after bulk
-    // assignment — locked vehicles are left untouched entirely, batch or not.
-    for (const id of touchedVehicleIds) {
-      plan[id] = [...plan[id]].sort((a, b) => {
-        const oa = byOrderNo.get(a);
-        const ob = byOrderNo.get(b);
-        return byFarthestFirst(oa ? distanceKmOf(oa) : null, ob ? distanceKmOf(ob) : null);
-      });
-    }
+    // INVARIANT #3: ห้ามมี auto-sequencing ของลำดับจุดส่งภายในรูท — คนขับ/หัวหน้าจัดลำดับเอง
+    // auto-assign ทำได้แค่ "จัดเข้ารถไหน" ห้ามใส่ sort กลับเข้ามาเด็ดขาด
     actions.setRoutePlan(plan);
     if (assignedCount > 0) actions.logActivity('จัดอัตโนมัติตามโซน (วางแผนจัดรูท)', `จัดลงรถอัตโนมัติ ${assignedCount} ออเดอร์`);
     for (const id of touchedVehicleIds) {
@@ -3232,6 +3225,8 @@ export function computeSku(state: AppState, actions: AppActions) {
     onSkuSearch: (v: string) => actions.patch({ skuQ: v }),
     skuRows,
     skuModalOpen: !!state.skuModal,
+    skuSaving: state.skuSaving,
+    skuSaveError: state.skuSaveError,
     skuIsEdit: state.skuModal === 'edit',
     skuModalTitle: state.skuModal === 'edit' ? 'แก้ไขสินค้า' : 'เพิ่มสินค้าใหม่',
     skuF: state.skuF,

@@ -76,9 +76,16 @@ export function SkuPage({ state, actions }: { state: AppState; actions: AppActio
                 </div>
               </div>
             </div>
+            {v.skuSaveError && (
+              <div style={{ padding: '8px 12px', borderRadius: 8, background: 'var(--st-bad-bg)', color: 'var(--st-bad-fg)', fontSize: 13 }}>
+                <i className="ph ph-warning-fill" style={{ marginRight: 6 }} />{v.skuSaveError}
+              </div>
+            )}
             <div className="dialog-actions">
-              <button className="btn btn-secondary" onClick={v.closeSku}>ยกเลิก</button>
-              <button className="btn btn-primary" onClick={v.saveSku}>บันทึก</button>
+              <button className="btn btn-secondary" onClick={v.closeSku} disabled={v.skuSaving}>ยกเลิก</button>
+              <button className="btn btn-primary" onClick={v.saveSku} disabled={v.skuSaving}>
+                {v.skuSaving ? <><i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลังบันทึกลง Google Sheet...</> : 'บันทึก'}
+              </button>
             </div>
           </div>
         </div>

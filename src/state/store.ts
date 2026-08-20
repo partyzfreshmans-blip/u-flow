@@ -8,6 +8,7 @@ import { fetchRouteOrders } from '../data/sources/routeOrders';
 import { fetchAllOrderLineItems, fetchOrderLineItems, fetchOrderLineItemsForOrders } from '../data/sources/skuDetail';
 import { linkLineItemPromo as apiLinkLineItemPromo } from '../data/sources/skuDetailWrite';
 import { fetchSkusFromSheet } from '../data/sources/skuSheet';
+import { updateSkuMaster } from '../data/sources/skuMasterWrite';
 import { attachmentKey, loadAttachments, saveAttachments, uploadToDrive, type AttachmentIndex } from '../data/sources/attachments';
 import {
   emptyLine,
@@ -387,6 +388,8 @@ export interface AppState {
   skus: Sku[];
   skusLoading: boolean;
   skusError: string | null;
+  skuSaving: boolean;
+  skuSaveError: string | null;
   skuQ: string;
   skuModal: 'add' | 'edit' | null;
   skuF: SkuForm;
@@ -663,6 +666,8 @@ export const initialState: AppState = {
   skusError: null,
   skuQ: '',
   skuModal: null,
+  skuSaving: false,
+  skuSaveError: null,
   skuF: { key: '', id: '', barcode: '', name: '', unit: 'ชิ้น', stock: '', status: 'active' },
 
   customers: [],
@@ -751,17 +756,7 @@ function reducer(state: AppState, action: Action): AppState {
       };
 
     case 'saveSku': {
-      const f = state.skuF;
-      if (!f.id || !f.name) return state;
-      const key = f.key || f.id;
-      const arr = [...state.skus];
-      const idx = arr.findIndex((x) => x.id === key);
-      // No location field in the edit form yet (the sheet has no such column
-      // today either) — carry over whatever an existing row already had.
-      const rec: Sku = { id: key, displayId: f.id, barcode: f.barcode, name: f.name, unit: f.unit, stock: Number(f.stock || 0), status: f.status, location: idx >= 0 ? arr[idx].location : '' };
-      if (idx >= 0) arr[idx] = rec;
-      else arr.push(rec);
-      return { ...state, skus: arr, skuModal: null };
+      return state;
     }
 
     case 'applyPromoSaved': {
@@ -1686,7 +1681,31 @@ export function useAppStore() {
         dispatch({ type: 'patch', patch: { receivingLog: next } });
       },
       openEditSku: (sku: Sku) => dispatch({ type: 'openEditSku', sku }),
-      saveSku: () => dispatch({ type: 'saveSku' }),
+      saveSku: async () => {
+        const f = state.skuF;
+        if (!f.id || !f.name) return;
+        dispatch({ type: 'patch', patch: { skuSaving: true, skuSaveError: null } });
+        try {
+          await updateSkuMaster({
+            id: f.id,
+            barcode: f.barcode,
+            name: f.name,
+            unit: f.unit,
+            stock: Number(f.stock || 0),
+            status: f.status,
+          });
+          const key = f.key || f.id;
+          const arr = [...state.skus];
+          const idx = arr.findIndex((x) => x.id === key);
+          const rec: Sku = { id: key, displayId: f.id, barcode: f.barcode, name: f.name, unit: f.unit, stock: Number(f.stock || 0), status: f.status, location: idx >= 0 ? arr[idx].location : '' };
+          if (idx >= 0) arr[idx] = rec;
+          else arr.push(rec);
+          dispatch({ type: 'patch', patch: { skus: arr, skuModal: null, skuSaving: false, skuSaveError: null } });
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : 'บันทึก SKU ไม่สำเร็จ';
+          dispatch({ type: 'patch', patch: { skuSaving: false, skuSaveError: message } });
+        }
+      },
 
       openCreatePromo: () =>
         dispatch({ type: 'patch', patch: { promoModal: true, promoEditingOriginal: null, promoForm: DEFAULT_PROMO_FORM, promoSaveStatus: null } }),

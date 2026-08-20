@@ -43,4 +43,14 @@ export function saveDeliveryFailures(index: DeliveryFailureIndex): void {
  * set rendered as big buttons so reporting a failure needs no typing at all
  * (a phone keyboard at a shop door is the slowest possible input). The
  * free-text note is still there for anything more specific, but optional. */
-export const DELIVERY_FAILURE_REASONS = ['ร้านปิด', 'ลูกค้าไม่รับสาย', 'ของไม่ครบ', 'อื่นๆ'] as const;
+export const DELIVERY_FAILURE_REASONS = [
+  'ร้านปิด',
+  'ลูกค้าไม่รับสาย',
+  'ของไม่ครบ',
+  'สินค้าชำรุด/เสียหาย',
+  'ลูกค้าขอเลื่อนวันส่ง',
+  'ที่อยู่/พิกัดไม่ถูกต้อง',
+  'ลูกค้าปฏิเสธการรับสินค้า',
+  'อุปสรรคการเดินทาง/ภัยธรรมชาติ',
+  'อื่นๆ',
+] as const;

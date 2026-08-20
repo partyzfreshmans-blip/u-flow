@@ -16,6 +16,10 @@ const DEV_FALLBACK_SECRET = 'dev-only-insecure-secret-change-me';
 function getSecret(): string {
   const secret = process.env.AUTH_SESSION_SECRET?.trim();
   if (secret) return secret;
+  // In production (or on Vercel), fail-closed immediately if AUTH_SESSION_SECRET is not provided.
+  if (process.env.NODE_ENV === 'production' || process.env.VERCEL === '1' || process.env.VERCEL_ENV) {
+    throw new Error('FATAL: AUTH_SESSION_SECRET is not set in production. Set a secure secret in your deployment environment before running.');
+  }
   console.warn('[session] AUTH_SESSION_SECRET is not set — using an insecure development-only default. Set it in your deployment environment before relying on real logins.');
   return DEV_FALLBACK_SECRET;
 }
