@@ -38,6 +38,7 @@ export const SHEET_TABS = {
   promotions: { sheetId: MAIN_SHEET_ID, gid: '1999566312' },
   csMaster: { sheetId: MAIN_SHEET_ID, gid: '514841442' },
   skuMaster: { sheetId: SKU_SHEET_ID, gid: '0' },
+  ordersGid0: { sheetId: MAIN_SHEET_ID, gid: '0' },
 } as const;
 
 /** Exact header text and left-to-right order (columns A–M) for "คำสั่งซื้อ VS"

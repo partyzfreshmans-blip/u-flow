@@ -26,6 +26,7 @@ export const PROMOTIONS_GID = Number(SHEET_TABS.promotions.gid);
 export const SKU_DETAIL_GID = Number(SHEET_TABS.skuDetail.gid);
 export const API_IMPORT_GID = Number(SHEET_TABS.apiImport.gid);
 export const SKU_MASTER_GID = Number(SHEET_TABS.skuMaster.gid);
+export const ORDERS_GID_0 = Number(SHEET_TABS.ordersGid0?.gid ?? '0');
 
 // Columns in the CS Master tab: A=ชื่อ B=เบอร์ C=ที่อยู่ D=ละ(lat) E=ลอง(lng)
 const LAT_COLUMN = 'D';
@@ -1561,6 +1562,103 @@ export async function handleFetchSkuDetailList(token: string | null): Promise<Ap
   );
 }
 
+
+function findOrderUidColumn(header: unknown[], rows: unknown[][]): number {
+  const knownHeaders = ['เลขคำสั่งซื้อ', 'Order UID', 'Order No', 'order_no', 'Order Number', 'Order_UID'];
+  for (const name of knownHeaders) {
+    const idx = header.findIndex((h) => String(h ?? '').trim().toLowerCase() === name.toLowerCase());
+    if (idx !== -1) return idx;
+  }
+  for (let c = 0; c < (header.length || 10); c++) {
+    let matchCount = 0;
+    for (let r = 1; r < Math.min(rows.length, 10); r++) {
+      if (/^UM-\d+/i.test(String(rows[r]?.[c] ?? '').trim())) matchCount++;
+    }
+    if (matchCount > 0) return c;
+  }
+  return 0;
+}
+
+async function writeGid0DeliveryDate(sheets: ReturnType<typeof google.sheets>, orderNo: string, sheetDate: string): Promise<void> {
+  try {
+    const titleGid0 = await resolveSheetTitle(sheets, ORDERS_GID_0);
+    const current = await sheets.spreadsheets.values.get({
+      spreadsheetId: MAIN_SHEET_ID,
+      range: `${titleGid0}!A:Z`,
+    });
+    const rows = current.data.values ?? [];
+    if (rows.length === 0) return;
+    const header = rows[0] ?? [];
+    const uidCol = findOrderUidColumn(header, rows);
+    const headerDateIdx = header.findIndex((h) => String(h ?? '').trim() === 'วันที่จะจัดส่ง');
+    const dateColLetter = headerDateIdx !== -1 ? columnLetter(headerDateIdx) : 'C';
+
+    const wanted = orderNo.trim();
+    for (let i = 1; i < rows.length; i++) {
+      if (String(rows[i]?.[uidCol] ?? '').trim() === wanted) {
+        const rowNumber = i + 1;
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: MAIN_SHEET_ID,
+          range: `${titleGid0}!${dateColLetter}${rowNumber}`,
+          valueInputOption: 'USER_ENTERED',
+          requestBody: { values: [[sheetDate]] },
+        });
+        break;
+      }
+    }
+  } catch (err: unknown) {
+    console.warn(`[route-orders/writeGid0DeliveryDate] Failed for order ${orderNo}:`, err instanceof Error ? err.message : err);
+  }
+}
+
+async function writeGid0DeliveryDatesBulk(sheets: ReturnType<typeof google.sheets>, datesMap: Map<string, string>): Promise<void> {
+  if (datesMap.size === 0) return;
+  try {
+    const titleGid0 = await resolveSheetTitle(sheets, ORDERS_GID_0);
+    const current = await sheets.spreadsheets.values.get({
+      spreadsheetId: MAIN_SHEET_ID,
+      range: `${titleGid0}!A:Z`,
+    });
+    const rows = current.data.values ?? [];
+    if (rows.length === 0) return;
+    const header = rows[0] ?? [];
+    const uidCol = findOrderUidColumn(header, rows);
+    const headerDateIdx = header.findIndex((h) => String(h ?? '').trim() === 'วันที่จะจัดส่ง');
+    const dateColLetter = headerDateIdx !== -1 ? columnLetter(headerDateIdx) : 'C';
+
+    const rowsByUid = new Map<string, number>();
+    for (let i = 1; i < rows.length; i++) {
+      const uid = String(rows[i]?.[uidCol] ?? '').trim();
+      if (uid && !rowsByUid.has(uid)) {
+        rowsByUid.set(uid, i + 1);
+      }
+    }
+
+    const data: { range: string; values: string[][] }[] = [];
+    for (const [orderNo, sheetDate] of datesMap.entries()) {
+      const rowNumber = rowsByUid.get(orderNo.trim());
+      if (rowNumber != null) {
+        data.push({
+          range: `${titleGid0}!${dateColLetter}${rowNumber}`,
+          values: [[sheetDate]],
+        });
+      }
+    }
+
+    if (data.length > 0) {
+      await sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId: MAIN_SHEET_ID,
+        requestBody: {
+          valueInputOption: 'USER_ENTERED',
+          data,
+        },
+      });
+    }
+  } catch (err: unknown) {
+    console.warn('[route-orders/writeGid0DeliveryDatesBulk] Failed bulk write to gid 0:', err instanceof Error ? err.message : err);
+  }
+}
+
 export async function handleFetchStaffOrderInfoList(token: string | null): Promise<ApiResult> {
   if (!isRouteOrdersTabConfigured()) return { status: 500, body: { error: ROUTE_ORDERS_NOT_CONFIGURED_MESSAGE } };
   return handleSheetRowsList(
@@ -1570,7 +1668,51 @@ export async function handleFetchStaffOrderInfoList(token: string | null): Promi
       const sheets = await getSheetsClient();
       const title = await resolveSheetTitle(sheets, ROUTE_ORDERS_GID);
       const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${title}!A:Z` });
-      return sheetRowsToRecords(res.data.values ?? []);
+      const records = sheetRowsToRecords(res.data.values ?? []);
+
+      // Also read delivery date from tab "คำสั่งซื้อ" (gid 0) column C
+      try {
+        const titleGid0 = await resolveSheetTitle(sheets, ORDERS_GID_0);
+        const resGid0 = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${titleGid0}!A:Z` });
+        const rowsGid0 = resGid0.data.values ?? [];
+        if (rowsGid0.length > 1) {
+          const headerGid0 = rowsGid0[0] ?? [];
+          const uidColGid0 = findOrderUidColumn(headerGid0, rowsGid0);
+          const headerDateIdx = headerGid0.findIndex((h) => String(h ?? '').trim() === 'วันที่จะจัดส่ง');
+          const dateColGid0 = headerDateIdx !== -1 ? headerDateIdx : 2; // Column C (0-indexed 2)
+
+          const dateMap = new Map<string, string>();
+          for (let i = 1; i < rowsGid0.length; i++) {
+            const uid = String(rowsGid0[i]?.[uidColGid0] ?? '').trim();
+            const d = String(rowsGid0[i]?.[dateColGid0] ?? '').trim();
+            if (uid && d) dateMap.set(uid, d);
+          }
+
+          const existingUids = new Set<string>();
+          for (const rec of records) {
+            const uid = (rec['เลขคำสั่งซื้อ'] ?? '').trim();
+            if (uid) {
+              existingUids.add(uid);
+              if (!(rec['วันที่จะจัดส่ง'] ?? '').trim() && dateMap.has(uid)) {
+                rec['วันที่จะจัดส่ง'] = dateMap.get(uid)!;
+              }
+            }
+          }
+
+          for (const [uid, d] of dateMap.entries()) {
+            if (!existingUids.has(uid)) {
+              records.push({
+                'เลขคำสั่งซื้อ': uid,
+                'วันที่จะจัดส่ง': d,
+              });
+            }
+          }
+        }
+      } catch (err: unknown) {
+        console.warn('[route-orders/fetchStaffOrderInfo] Could not read gid 0 dates:', err instanceof Error ? err.message : err);
+      }
+
+      return records;
     },
     'โหลดข้อมูลออเดอร์ (คำสั่งซื้อ VS) ไม่สำเร็จ',
   );
@@ -2899,6 +3041,11 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
 
     await appendAuditLog(sheets, { username: payload.username, role: payload.role }, auditEntries);
 
+    if (sheetDate !== null) {
+      await writeGid0DeliveryDate(sheets, wanted, sheetDate);
+    }
+    staffOrderInfoRowsCache.invalidate();
+
     return { status: 200, body: { ok: true } };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
@@ -3217,6 +3364,24 @@ export async function handleBulkUpdateRouteOrders(token: string | null, body: un
         { orderId: `${first} – ${last} (${succeeded.length} รายการ)`, field: `bulk:${bulkAction}`, oldValue: '', newValue: description },
       ]);
     }
+
+    if (bulkAction === 'setDeliveryDate' && succeeded.length > 0) {
+      const gid0DatesToWrite = new Map<string, string>();
+      for (const orderNo of succeeded) {
+        const iso = dates?.[orderNo];
+        if (typeof iso === 'string' && iso) {
+          try {
+            gid0DatesToWrite.set(orderNo, isoToSheetDate(iso));
+          } catch {
+            // ignore
+          }
+        }
+      }
+      if (gid0DatesToWrite.size > 0) {
+        await writeGid0DeliveryDatesBulk(sheets, gid0DatesToWrite);
+      }
+    }
+    staffOrderInfoRowsCache.invalidate();
 
     return { status: 200, body: { ok: true, succeeded, failed } };
   } catch (err: unknown) {
