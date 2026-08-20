@@ -862,6 +862,7 @@ export function computeRoute(state: AppState, actions: AppActions) {
       amtText: fmt(o.totalAmount),
       itemCountText: o.itemCount.toLocaleString('en-US'),
       orderedAtText: formatOrderedAt(o.orderedAtText),
+      plannedDeliveryDate: o.plannedDeliveryDate || '—',
       stLabel: o.status || '—',
       stStyle: sheetStatusStyle(o.status),
       batchReady: routePlanVehicleByOrderNo.has(o.orderNo),

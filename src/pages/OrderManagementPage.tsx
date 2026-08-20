@@ -556,7 +556,7 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
                 <thead>
                   <tr>
                     <th>Route</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th style={{ textAlign: 'right' }}>ยอดรวม</th>
-                    <th style={{ textAlign: 'center' }}>รายการ</th><th>เวลา</th><th>สถานะ</th><th></th>
+                    <th style={{ textAlign: 'center' }}>รายการ</th><th>เวลาที่สั่ง</th><th>วันที่จะจัดส่ง</th><th>สถานะ</th><th></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -573,6 +573,7 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
                       <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{o.amtText}</td>
                       <td style={{ textAlign: 'center' }}>{o.itemCountText}</td>
                       <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.orderedAtText}</td>
+                      <td style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', color: o.noDeliveryDate ? 'var(--st-bad-fg)' : 'var(--color-neutral-300)' }}>{o.plannedDeliveryDate}</td>
                       <td style={{ whiteSpace: 'nowrap' }}>
                         <span style={o.stStyle}>{o.stLabel}</span>
                         {o.noDeliveryDate ? (
