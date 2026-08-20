@@ -6,13 +6,56 @@
 
 export function parseSheetDate(raw: string): Date | null {
   const s = (raw ?? '').trim();
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-  if (!m) return null;
-  const month = Number(m[1]);
-  const day = Number(m[2]);
-  const year = Number(m[3]);
-  const d = new Date(year, month - 1, day);
-  return Number.isNaN(d.getTime()) ? null : d;
+  if (!s) return null;
+
+  // 1. ISO format: YYYY-MM-DD or YYYY/MM/DD (e.g. 2026-08-20)
+  const isoMatch = s.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})/);
+  if (isoMatch) {
+    let year = Number(isoMatch[1]);
+    const month = Number(isoMatch[2]);
+    const day = Number(isoMatch[3]);
+    if (year > 2400) year -= 543;
+    const d = new Date(year, month - 1, day);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  // 2. Hyphen format: DD-MM-YYYY or MM-DD-YYYY (e.g. 20-08-2026 or 20-8-2026)
+  const hyphenMatch = s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})/);
+  if (hyphenMatch) {
+    const p1 = Number(hyphenMatch[1]);
+    const p2 = Number(hyphenMatch[2]);
+    let year = Number(hyphenMatch[3]);
+    if (year > 2400) year -= 543;
+    const day = p1 > 12 || p2 <= 12 ? p1 : p2;
+    const month = p1 > 12 || p2 <= 12 ? p2 : p1;
+    const d = new Date(year, month - 1, day);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  // 3. Slash format: D/M/YYYY or M/D/YYYY or DD/MM/YYYY (e.g. 8/19/2026 or 20/08/2026)
+  const slashMatch = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (slashMatch) {
+    const p1 = Number(slashMatch[1]);
+    const p2 = Number(slashMatch[2]);
+    let year = Number(slashMatch[3]);
+    if (year > 2400) year -= 543;
+    let month: number;
+    let day: number;
+    if (p1 > 12) {
+      day = p1;
+      month = p2;
+    } else if (p2 > 12) {
+      month = p1;
+      day = p2;
+    } else {
+      month = p1;
+      day = p2;
+    }
+    const d = new Date(year, month - 1, day);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  return null;
 }
 
 export function dayKey(d: Date): string {
