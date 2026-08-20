@@ -149,7 +149,7 @@ export function DashboardPage({ state, actions }: { state: AppState; actions: Ap
           <input type="radio" name="dashboardTab" checked={v.dashboardTab === 'overview'} onChange={() => v.setDashboardTab('overview')} /><i className="ph ph-squares-four" />ภาพรวม
         </label>
         <label className="seg-opt">
-          <input type="radio" name="dashboardTab" checked={v.dashboardTab === 'calendar'} onChange={() => v.setDashboardTab('calendar')} /><i className="ph ph-calendar-blank" />Route Calendar
+          <input type="radio" name="dashboardTab" checked={v.dashboardTab === 'calendar'} onChange={() => v.setDashboardTab('calendar')} /><i className="ph ph-calendar-blank" />ปฏิทินการจัดส่ง (Route Calendar)
         </label>
       </div>
 
@@ -198,7 +198,7 @@ export function DashboardPage({ state, actions }: { state: AppState; actions: Ap
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 22 }}>
         <div className="card elev-sm" style={{ gap: 12 }}>
-          <div className="card-kicker">Daily Performance</div>
+          <div className="card-kicker">ผลการดำเนินงานประจำวัน (Daily Performance)</div>
           <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
             <div>
               <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginBottom: 3 }}>Total Sales (วันนี้)</div>
@@ -209,7 +209,7 @@ export function DashboardPage({ state, actions }: { state: AppState; actions: Ap
               <div style={{ fontSize: 10.5, color: 'var(--color-neutral-600)', marginTop: 2 }}>เทียบกับเมื่อวาน</div>
             </div>
             <div>
-              <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginBottom: 3 }}>Incomplete</div>
+              <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginBottom: 3 }}>ออเดอร์ค้างส่ง</div>
               <div style={{ fontFamily: 'var(--font-heading)', fontWeight: 600, fontSize: 27, lineHeight: 1, color: v.dailyPerformance.incompleteCount > 0 ? 'var(--st-bad-fg)' : undefined }}>
                 {v.dailyPerformance.incompleteCount}
               </div>
@@ -219,17 +219,17 @@ export function DashboardPage({ state, actions }: { state: AppState; actions: Ap
         </div>
 
         <div className="card elev-sm" style={{ gap: 12 }}>
-          <div className="card-kicker">Operational Status</div>
+          <div className="card-kicker">สถานะการดำเนินงาน (Operational Status)</div>
           <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
             <div>
-              <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginBottom: 3 }}>Fleet Availability</div>
+              <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginBottom: 3 }}>ความพร้อมของรถขนส่ง</div>
               <div style={{ fontFamily: 'var(--font-heading)', fontWeight: 600, fontSize: 27, lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>
                 {v.operationalStatus.fleetAvailable} / {v.operationalStatus.fleetTotal}
               </div>
               <div style={{ fontSize: 10.5, color: 'var(--color-neutral-600)', marginTop: 2 }}>คันว่าง / รถทั้งหมด</div>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-              <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginBottom: 3 }}>Warehouse Capacity</div>
+              <div style={{ fontSize: 11.5, color: 'var(--color-neutral-500)', marginBottom: 3 }}>ความจุคลังสินค้า</div>
               <div style={{ fontSize: 11.5, color: 'var(--color-neutral-600)', maxWidth: 220 }}>
                 <i className="ph ph-info" style={{ marginRight: 4 }} />ยังไม่มีข้อมูลความจุ/สต็อกคลังในระบบ — ข้ามการ์ดนี้ไว้ก่อน
               </div>
@@ -241,7 +241,7 @@ export function DashboardPage({ state, actions }: { state: AppState; actions: Ap
       {v.activeBatchCards.length > 0 && (
         <div className="card elev-sm" style={{ marginBottom: 22, gap: 12 }}>
           <div style={{ fontWeight: 600, fontSize: 14 }}>
-            <i className="ph ph-truck" style={{ marginRight: 6, color: 'var(--color-accent-300)' }} />Batch การจัดส่งที่กำลังทำงาน ({v.activeBatchCards.length})
+            <i className="ph ph-truck" style={{ marginRight: 6, color: 'var(--color-accent-300)' }} />ชุดจัดส่ง (Batch) ที่กำลังทำงาน ({v.activeBatchCards.length})
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
             {v.activeBatchCards.map((b) => (
@@ -264,7 +264,7 @@ export function DashboardPage({ state, actions }: { state: AppState; actions: Ap
       <div className="card elev-sm" style={{ marginBottom: 22, gap: 10, padding: '4px 14px 8px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 2px 8px', fontWeight: 600, fontSize: 13.5 }}>
           <i className="ph ph-warning-fill" style={{ color: 'var(--st-bad-fg)' }} />
-          Incomplete Orders ({v.incompleteCount})
+          ออเดอร์ค้างส่ง / ตกหล่น ({v.incompleteCount})
           <button className="btn btn-ghost" style={{ marginLeft: 'auto', fontSize: 12 }} onClick={v.goToIncompleteOrders}>แสดงทั้งหมด<i className="ph ph-arrow-right" /></button>
         </div>
         {v.incompleteOrders.length === 0 ? (

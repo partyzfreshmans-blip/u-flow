@@ -9,12 +9,12 @@ export const ROLES = ['administrator', 'manager', 'admin_staff', 'checker', 'pic
 export type Role = (typeof ROLES)[number];
 
 export const ROLE_LABELS: Record<Role, string> = {
-  administrator: 'Administrator',
-  manager: 'Manager',
-  admin_staff: 'Admin (Staff)',
-  checker: 'Checker',
-  picker: 'Picker',
-  driver: 'Driver',
+  administrator: 'ผู้ดูแลระบบ (Admin)',
+  manager: 'ผู้จัดการ (Manager)',
+  admin_staff: 'เจ้าหน้าที่แอดมิน (Admin Staff)',
+  checker: 'เจ้าหน้าที่ตรวจสอบ (Checker)',
+  picker: 'เจ้าหน้าที่หยิบสินค้า (Picker)',
+  driver: 'พนักงานขับรถ (Driver)',
 };
 
 export type PageAccess = 'edit' | 'view' | 'none';

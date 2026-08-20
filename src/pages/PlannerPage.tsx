@@ -129,7 +129,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
             <input type="radio" name="plannerTab" checked={v.plannerTab === 'plan'} onChange={() => v.setPlannerTab('plan')} /><i className="ph ph-map-trifold" />แผนวันนี้
           </label>
           <label className="seg-opt">
-            <input type="radio" name="plannerTab" checked={v.plannerTab === 'history'} onChange={() => v.setPlannerTab('history')} /><i className="ph ph-clock-counter-clockwise" />ประวัติ Batch Route
+            <input type="radio" name="plannerTab" checked={v.plannerTab === 'history'} onChange={() => v.setPlannerTab('history')} /><i className="ph ph-clock-counter-clockwise" />ประวัติชุดจัดส่ง (Batch Route)
           </label>
         </div>
       )}
@@ -333,7 +333,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                       {assigningVehicleId === veh.id ? (
                         <><i className="ph ph-circle-notch" style={{ animation: 'spin .8s linear infinite' }} />กำลัง sync...</>
                       ) : (
-                        <><i className="ph ph-seal-check" />ยืนยันรูท (Assign)</>
+                        <><i className="ph ph-seal-check" />ยืนยันรูท (มอบหมายรถ)</>
                       )}
                     </button>
                   )}
@@ -757,7 +757,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
       {v.assignDialogOpen && (
         <div className="dialog-backdrop" onClick={v.closeAssignDialog}>
           <div className="dialog" onClick={(e) => e.stopPropagation()} style={{ width: 'min(440px, 100%)' }}>
-            <div className="dialog-title">ยืนยันรูท — สร้าง Batch Route</div>
+            <div className="dialog-title">ยืนยันรูท — สร้างชุดจัดส่ง (Batch Route)</div>
             <div className="dialog-body" style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
               <div style={{ fontSize: 12, color: 'var(--color-neutral-400)' }}>
                 เลือกคันรถที่จัดจุดส่งเสร็จแล้ว — ระบบจะสร้างรหัส Batch Route ถาวรและล็อกลำดับจุดส่งของแต่ละคันไว้ (วันที่จัดส่ง {v.plannerDate || '—'})

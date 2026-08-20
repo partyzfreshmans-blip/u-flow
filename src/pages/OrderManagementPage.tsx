@@ -133,7 +133,7 @@ function OrderTable({
         <thead>
           <tr>
             {canEdit && <th style={{ width: 26 }}><input type="checkbox" checked={allSelected} onChange={toggleSelectAll} /></th>}
-            <th>Route</th><th>อำเภอ, จังหวัด</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th>Batch Route</th><th style={{ textAlign: 'right' }}>ยอดขาย</th>
+            <th>สายส่ง (Route)</th><th>อำเภอ, จังหวัด</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th>ชุดจัดส่ง (Batch Route)</th><th style={{ textAlign: 'right' }}>ยอดขาย</th>
             <th style={{ textAlign: 'center' }}>รายการ</th><th>วันเวลาที่สั่ง</th><th style={{ minWidth: 168 }}>วันที่จะจัดส่ง</th><th>หมายเหตุ</th><th style={{ textAlign: 'center' }}>ใบกำกับภาษี</th><th style={{ textAlign: 'center' }}>โปรโมชั่น</th><th style={{ textAlign: 'center' }}>ปัญหาการส่ง</th><th>สถานะ</th><th></th>
           </tr>
         </thead>
@@ -275,7 +275,7 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
     setExporting(true);
     setExportError(null);
     exportRouteOrdersXlsx(state.session, selectedOnly ? state.routeSelectedOrderNos : undefined)
-      .catch((err: unknown) => setExportError(err instanceof Error ? err.message : 'Export ไม่สำเร็จ'))
+      .catch((err: unknown) => setExportError(err instanceof Error ? err.message : 'ส่งออกไม่สำเร็จ'))
       .finally(() => setExporting(false));
   };
 
@@ -365,7 +365,7 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
       {pendingBatchDialogOpen && (
         <div className="dialog-backdrop" onClick={() => setPendingBatchDialogOpen(false)}>
           <div className="dialog" onClick={(e) => e.stopPropagation()}>
-            <div className="dialog-title">ยืนยันจัด Batch ทั้งหมดที่รอ</div>
+            <div className="dialog-title">ยืนยันจัดชุดส่งทั้งหมดที่รอ</div>
             <div className="dialog-body">
               เลือกออเดอร์ที่รอ batch ทั้งหมด {v.pendingBatchReadyOrderNos.length} รายการไว้แล้ว แล้วพาไปหน้า "วางแผนจัดรูท" — จากนั้นเลือกรถจากดรอปดาวน์ "จัดลงรถ…" แล้วกด "ยืนยันรูท (Assign)" ตามขั้นตอนปกติเพื่อสร้าง Batch Route จริง (ออเดอร์ที่คนละวันจัดส่งกันต้อง Assign แยกรอบกัน เพราะหนึ่ง Batch ผูกกับวันที่จัดส่งเดียว)
               {v.pendingBatchNoDateCount > 0 && (
@@ -404,7 +404,7 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
         )}
         <button className="btn btn-ghost" style={{ fontSize: 12 }} disabled={exporting} onClick={() => doExport(false)}>
           <i className={exporting ? 'ph ph-circle-notch' : 'ph ph-file-xls'} style={exporting ? { animation: 'spin .8s linear infinite' } : undefined} />
-          {exporting ? 'กำลัง Export...' : 'Export เป็น Excel'}
+          {exporting ? 'กำลังส่งออก...' : 'ส่งออกเป็น Excel'}
         </button>
       </div>
       {exportError && (
@@ -473,7 +473,7 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
             <i className="ph ph-calendar-check" />ตั้งวันที่จัดส่ง
           </button>
           <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => openBulk('assign')}>
-            <i className="ph ph-truck" />Assign ยกชุด
+            <i className="ph ph-truck" />จัดมอบหมายรถยกชุด
           </button>
           <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => openBulk('status')}>
             <i className="ph ph-flag" />เปลี่ยนสถานะ
@@ -489,7 +489,7 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
           </button>
           <button className="btn btn-ghost" style={{ fontSize: 12 }} disabled={exporting} onClick={() => doExport(true)}>
             <i className={exporting ? 'ph ph-circle-notch' : 'ph ph-file-xls'} style={exporting ? { animation: 'spin .8s linear infinite' } : undefined} />
-            Export เฉพาะที่เลือก
+            ส่งออกเฉพาะที่เลือก
           </button>
           <button className="btn btn-primary" style={{ fontSize: 12.5 }} onClick={() => { setArchiveDoubleConfirm(false); v.openArchiveDialog(); }}>
             <i className={v.archivedFilter ? 'ph ph-arrow-counter-clockwise' : 'ph ph-archive'} />
@@ -555,7 +555,7 @@ export function OrderManagementPage({ state, actions }: { state: AppState; actio
               <table className="table">
                 <thead>
                   <tr>
-                    <th>Route</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th style={{ textAlign: 'right' }}>ยอดรวม</th>
+                    <th>สายส่ง (Route)</th><th>เลขคำสั่งซื้อ</th><th>ลูกค้า</th><th style={{ textAlign: 'right' }}>ยอดรวม</th>
                     <th style={{ textAlign: 'center' }}>รายการ</th><th>เวลาที่สั่ง</th><th>วันที่จะจัดส่ง</th><th>สถานะ</th><th></th>
                   </tr>
                 </thead>

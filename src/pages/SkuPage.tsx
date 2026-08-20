@@ -33,7 +33,7 @@ export function SkuPage({ state, actions }: { state: AppState; actions: AppActio
       <div className="card elev-sm" style={{ padding: '4px 14px 8px' }}>
         <table className="table">
           <thead>
-            <tr><th>SKU ID</th><th>บาร์โค้ด</th><th>ชื่อสินค้า</th><th>หน่วยนับ</th><th style={{ textAlign: 'right' }}>สต็อกปัจจุบัน</th><th>สถานะ</th><th></th></tr>
+            <tr><th>รหัสสินค้า (SKU)</th><th>บาร์โค้ด</th><th>ชื่อสินค้า</th><th>หน่วยนับ</th><th style={{ textAlign: 'right' }}>สต็อกปัจจุบัน</th><th>สถานะ</th><th></th></tr>
           </thead>
           <tbody>
             {v.skuRows.map((s) => (
@@ -57,7 +57,7 @@ export function SkuPage({ state, actions }: { state: AppState; actions: AppActio
             <div className="dialog-title">{v.skuModalTitle}</div>
             <div className="dialog-body" style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 11 }}>
-                <div className="field"><label>SKU ID</label><input className="input" value={v.skuF.id} onChange={(e) => v.onFormId(e.target.value)} disabled={v.skuIsEdit} /></div>
+                <div className="field"><label>รหัสสินค้า (SKU ID)</label><input className="input" value={v.skuF.id} onChange={(e) => v.onFormId(e.target.value)} disabled={v.skuIsEdit} /></div>
                 <div className="field"><label>บาร์โค้ด</label><input className="input" value={v.skuF.barcode} onChange={(e) => v.onFormBarcode(e.target.value)} /></div>
               </div>
               <div className="field"><label>ชื่อสินค้า</label><input className="input" value={v.skuF.name} onChange={(e) => v.onFormName(e.target.value)} /></div>

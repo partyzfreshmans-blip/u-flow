@@ -19,16 +19,16 @@ export function LoginPage({ state, actions }: { state: AppState; actions: AppAct
           <div style={{ width: 38, height: 38, borderRadius: 10, background: 'var(--color-accent)', display: 'grid', placeItems: 'center', color: '#fff', fontWeight: 700, fontSize: 19, letterSpacing: '-.02em' }}>U</div>
           <div style={{ lineHeight: 1.1 }}>
             <div style={{ fontFamily: 'var(--font-heading)', fontWeight: 600, fontSize: 18 }}>Unii</div>
-            <div style={{ fontSize: 10.5, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--color-neutral-500)' }}>Warehouse Ops</div>
+            <div style={{ fontSize: 10.5, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--color-neutral-500)' }}>ระบบจัดการคลังสินค้าและจัดส่ง</div>
           </div>
         </div>
 
         <div className="field">
-          <label>Username</label>
+          <label>ชื่อผู้ใช้งาน (Username)</label>
           <input className="input" autoFocus value={username} onChange={(e) => setUsername(e.target.value)} disabled={state.authLoading} autoComplete="username" />
         </div>
         <div className="field">
-          <label>Password</label>
+          <label>รหัสผ่าน (Password)</label>
           <div style={{ position: 'relative' }}>
             <input
               className="input"

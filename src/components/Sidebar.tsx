@@ -23,14 +23,14 @@ const navGroups: { header: string | null; items: [RouteKey, string, string][] }[
     ],
   },
   {
-    header: 'MARKETING',
+    header: 'การตลาดและสินค้า',
     items: [
       ['promo', 'โปรโมชั่น', 'ph ph-tag'],
       ['sku', 'ฐานข้อมูลสินค้า', 'ph ph-package'],
     ],
   },
   {
-    header: 'SYSTEM',
+    header: 'ระบบและการตั้งค่า',
     items: [
       ['activity', 'บันทึกการเปลี่ยนแปลง', 'ph ph-clock-counter-clockwise'],
       ['users', 'จัดการผู้ใช้', 'ph ph-identification-badge'],
@@ -60,7 +60,7 @@ export function Sidebar({ route, actions, session }: { route: RouteKey; actions:
         <div style={{ width: 32, height: 32, borderRadius: 9, background: 'var(--color-accent)', display: 'grid', placeItems: 'center', color: '#fff', fontWeight: 700, fontSize: 17, letterSpacing: '-.02em' }}>U</div>
         <div style={{ lineHeight: 1.1 }}>
           <div style={{ fontFamily: 'var(--font-heading)', fontWeight: 600, fontSize: 16 }}>Unii</div>
-          <div style={{ fontSize: 10.5, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--color-neutral-500)' }}>Warehouse Ops</div>
+          <div style={{ fontSize: 10.5, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--color-neutral-500)' }}>ระบบจัดการคลังและจัดส่ง</div>
         </div>
       </div>
       <nav style={{ display: 'flex', flexDirection: 'column', gap: 14, padding: '6px 12px', overflowY: 'auto' }}>

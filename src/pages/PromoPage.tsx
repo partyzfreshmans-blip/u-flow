@@ -37,7 +37,7 @@ export function PromoPage({ state, actions }: { state: AppState; actions: AppAct
         <div className="table-scroll">
         <table className="table">
           <thead>
-            <tr><th>โปรโมชั่น</th><th>SKU / สินค้า</th><th>ประเภท</th><th>ราคา</th><th>ช่วงเวลา</th><th>สถานะ</th><th></th></tr>
+            <tr><th>โปรโมชั่น</th><th>รหัสสินค้า (SKU) / ชื่อสินค้า</th><th>ประเภท</th><th>ราคา</th><th>ช่วงเวลา</th><th>สถานะ</th><th></th></tr>
           </thead>
           <tbody>
             {v.promos.map((p, i) => (

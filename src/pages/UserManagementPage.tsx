@@ -108,7 +108,7 @@ export function UserManagementPage({ state, actions }: { state: AppState; action
       <div className="card elev-sm" style={{ padding: '4px 14px 8px' }}>
         <table className="table">
           <thead>
-            <tr><th>Username</th><th>Role</th><th>สถานะ</th><th>รถที่รับผิดชอบ (Driver)</th><th>สร้างเมื่อ</th><th></th></tr>
+            <tr><th>ชื่อผู้ใช้งาน (Username)</th><th>บทบาท (Role)</th><th>สถานะ</th><th>รถที่รับผิดชอบ (พนักงานขับ)</th><th>สร้างเมื่อ</th><th></th></tr>
           </thead>
           <tbody>
             {v.rows.map((r) => (
@@ -152,7 +152,7 @@ export function UserManagementPage({ state, actions }: { state: AppState; action
             <div className="dialog-title">เพิ่มผู้ใช้ใหม่</div>
             <div className="dialog-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div className="field">
-                <label>Username</label>
+                <label>ชื่อผู้ใช้งาน (Username)</label>
                 <input className="input" value={createForm.username} onChange={(e) => setCreateForm({ ...createForm, username: e.target.value })} disabled={creating} />
               </div>
               <div className="field">
@@ -160,7 +160,7 @@ export function UserManagementPage({ state, actions }: { state: AppState; action
                 <input className="input" type="password" value={createForm.password} onChange={(e) => setCreateForm({ ...createForm, password: e.target.value })} disabled={creating} />
               </div>
               <div className="field">
-                <label>Role</label>
+                <label>บทบาท (Role)</label>
                 <select className="input" value={createForm.role} onChange={(e) => setCreateForm({ ...createForm, role: e.target.value as Role })} disabled={creating}>
                   {v.roleOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
@@ -196,7 +196,7 @@ export function UserManagementPage({ state, actions }: { state: AppState; action
             <div className="dialog-title">แก้ไขผู้ใช้ · {editingUsername}</div>
             <div className="dialog-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div className="field">
-                <label>Role</label>
+                <label>บทบาท (Role)</label>
                 <select className="input" value={editRole} onChange={(e) => setEditRole(e.target.value as Role)} disabled={editSaving}>
                   {v.roleOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
