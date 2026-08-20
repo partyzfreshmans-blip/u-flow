@@ -24,7 +24,7 @@ export interface Zone {
   polygon: GeoJSON.Polygon | GeoJSON.MultiPolygon;
 }
 
-export const UNASSIGNED_COLOR = '#9397ab';
+export const UNASSIGNED_COLOR = '#475569';
 
 /** Result of resolving a coordinate against the zone list — mirrors the old
  * ZoneMatch shape closely enough that downstream badge/legend code barely

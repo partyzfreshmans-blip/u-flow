@@ -84,11 +84,11 @@ function escapeHtml(s: string): string {
  * curve can be tuned at either end independently. */
 function pinScaleForZoom(zoom: number): number {
   const anchors: [number, number][] = [
-    [6, 0.4],
-    [10, 0.55],
-    [13, 0.8],
-    [15, 1],
-    [18, 1.3],
+    [6, 0.5],
+    [10, 0.7],
+    [13, 0.95],
+    [15, 1.15],
+    [18, 1.4],
   ];
   if (zoom <= anchors[0][0]) return anchors[0][1];
   if (zoom >= anchors[anchors.length - 1][0]) return anchors[anchors.length - 1][1];
@@ -100,31 +100,43 @@ function pinScaleForZoom(zoom: number): number {
   return 1;
 }
 
-/** Flat solid colour, no heavy outline — a soft drop shadow alone gives
- * enough separation from the tiles underneath. Labeled pins carry the
- * delivery sequence, but only once zoomed in enough to read it; zoomed out
- * they collapse to the same plain dot shape unlabeled (unassigned) stops
- * always use, since a number too small to read is just visual noise. */
+function isDarkColor(hex: string): boolean {
+  const c = hex.replace('#', '');
+  if (c.length !== 6) return true;
+  const r = parseInt(c.slice(0, 2), 16);
+  const g = parseInt(c.slice(2, 4), 16);
+  const b = parseInt(c.slice(4, 6), 16);
+  const yiq = (r * 299 + g * 587 + b * 114) / 1000;
+  return yiq < 155;
+}
+
+/** High-contrast pins with white stroke and crisp drop-shadow for instant readability on any map tile */
 function pinIcon(color: string, pinLabel: string | null, zoom: number): L.DivIcon {
   const scale = pinScaleForZoom(zoom);
-  const showLabel = pinLabel != null && zoom >= 12;
+  const showLabel = pinLabel != null && zoom >= 11;
+  const isDark = isDarkColor(color);
+  const textColor = isDark ? '#ffffff' : '#0f172a';
+  const textShadow = isDark ? '0 1px 2px rgba(0,0,0,0.85)' : 'none';
+  const border = '2px solid #ffffff';
+  const shadow = '0 2px 7px rgba(0,0,0,0.55), 0 0 0 1px rgba(0,0,0,0.2)';
+
   if (showLabel) {
-    const height = Math.max(13, Math.round(22 * scale));
-    const padX = Math.max(3, Math.round(7 * scale));
-    const minWidth = Math.max(15, Math.round(26 * scale));
-    const fontSize = Math.max(8, Math.round(11 * scale * 10) / 10);
+    const height = Math.max(16, Math.round(24 * scale));
+    const padX = Math.max(4, Math.round(8 * scale));
+    const minWidth = Math.max(18, Math.round(28 * scale));
+    const fontSize = Math.max(9.5, Math.round(12 * scale * 10) / 10);
     const width = minWidth + padX * 2;
     return L.divIcon({
       className: '',
-      html: `<div style="min-width:${minWidth}px;height:${height}px;padding:0 ${padX}px;border-radius:${Math.round(height / 2)}px;background:${escapeHtml(color)};color:#161826;display:grid;place-items:center;font-weight:700;font-size:${fontSize}px;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,.35)">${escapeHtml(pinLabel)}</div>`,
+      html: `<div style="min-width:${minWidth}px;height:${height}px;padding:0 ${padX}px;border-radius:${Math.round(height / 2)}px;background:${escapeHtml(color)};color:${textColor};border:${border};display:grid;place-items:center;font-weight:800;font-size:${fontSize}px;white-space:nowrap;box-shadow:${shadow};text-shadow:${textShadow};letter-spacing:-.01em;">${escapeHtml(pinLabel)}</div>`,
       iconSize: [width, height],
       iconAnchor: [width / 2, height / 2],
     });
   }
-  const size = Math.max(5, Math.round((pinLabel != null ? 15 : 13) * scale));
+  const size = Math.max(9, Math.round((pinLabel != null ? 17 : 14) * scale));
   return L.divIcon({
     className: '',
-    html: `<div style="width:${size}px;height:${size}px;border-radius:50%;background:${escapeHtml(color)};box-shadow:0 1px 3px rgba(0,0,0,.35)"></div>`,
+    html: `<div style="width:${size}px;height:${size}px;border-radius:50%;background:${escapeHtml(color)};border:${border};box-shadow:${shadow};"></div>`,
     iconSize: [size, size],
     iconAnchor: [size / 2, size / 2],
   });
@@ -214,7 +226,7 @@ export function RouteMap({ stops, warehouse, vehicleRoutes, vehicleOptions, onMo
         ...r.points.map((p): L.LatLngExpression => [p.lat, p.lng]),
       ];
       if (latlngs.length < 2) continue;
-      L.polyline(latlngs, { color: r.color, weight: 2.5, opacity: 0.75, dashArray: '6 5' }).addTo(layer);
+      L.polyline(latlngs, { color: r.color, weight: 3.5, opacity: 0.85, dashArray: '6 5' }).addTo(layer);
     }
 
     for (const s of stops) {

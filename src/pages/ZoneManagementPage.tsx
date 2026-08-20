@@ -12,7 +12,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { pointZone, UNASSIGNED_COLOR, type Zone } from '../data/zones';
 import type { AppActions, AppState } from '../state/store';
 
-const ZONE_PALETTE = ['#78e3ac', '#8fb2ef', '#f2b0d8', '#f6bd16', '#daaa53', '#9270ca', '#6dc8ec', '#ff9d4d'];
+const ZONE_PALETTE = ['#3b82f6', '#ec4899', '#10b981', '#f59e0b', '#8b5cf6', '#06b6d4', '#f97316', '#14b8a6'];
 const DRAG_MIME = 'application/x-uflow-zone-reorder';
 
 function newZoneId(): string {

@@ -42,7 +42,7 @@ export function filterOutBatchedOrderNos(orderNos: string[], batchRoutes: BatchR
 
 /** Per-vehicle distinguishing colour (route lines, name swatch) — separate
  * from zone colour, since one vehicle's stops can span several zones. */
-const VEHICLE_PALETTE = ['#5b8ff9', '#61ddaa', '#f6bd16', '#e8684a', '#6dc8ec', '#9270ca', '#ff9d4d', '#269a99', '#ff99c3', '#daaa53'];
+const VEHICLE_PALETTE = ['#2563eb', '#e11d48', '#059669', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#4f46e5', '#ea580c', '#0d9488'];
 
 /** Short route-code label for a resolved zone (e.g. a vehicle's loadPrefix,
  * "A"/"TO"/"CH") — what the old text-rule system's ZoneMatch.route used to
