@@ -2480,11 +2480,7 @@ export interface RouteCalendarDay {
   batchCount: number;
   hasData: boolean;
   totalText: string;
-  cashText: string;
-  transferText: string;
-  /** Prepaid (non-COD, already settled via Unii before delivery) total —
-   * distinct from the COD "โอน" figure above, which is COD money the driver
-   * collects by transfer at the door. */
+  codText: string;
   prepaidText: string;
   /** Distinct vehicles with a confirmed batch for this day (0 if none assigned yet). */
   vehicleCount: number;
@@ -2522,14 +2518,7 @@ export function computeRouteCalendar(state: AppState, year: number, month: numbe
     const dayOrders = ordersByDay.get(key) ?? [];
     const dayBatches = batchesByDay.get(key) ?? [];
     let totalSales = 0;
-    let cashExpected = 0;
-    let transferTotal = 0;
-    // Prepaid = anything NOT flagged COD. This app's only payment-type
-    // signal is the sheet's "การจ่ายเงิน" column (see isCodPayment) — it
-    // already reads as a binary "collect at the door" vs "already settled"
-    // split, so no separate sheet field is needed to know this figure; a
-    // dedicated prepaid/paid-status column would only be worth adding if a
-    // future paymentType value stops mapping cleanly to one side or the other.
+    let codTotal = 0;
     let prepaidTotal = 0;
     const statusCounts = new Map<string, number>();
     for (const o of dayOrders) {
@@ -2537,9 +2526,7 @@ export function computeRouteCalendar(state: AppState, year: number, month: numbe
       const statusLabel = o.status || 'ไม่ระบุสถานะ';
       statusCounts.set(statusLabel, (statusCounts.get(statusLabel) ?? 0) + 1);
       if (isCodPayment(o.paymentType)) {
-        const method = state.routeCodMethod[o.orderNo] ?? 'cash';
-        if (method === 'transfer') transferTotal += o.totalAmount;
-        else cashExpected += o.totalAmount;
+        codTotal += o.totalAmount;
       } else {
         prepaidTotal += o.totalAmount;
       }
@@ -2548,7 +2535,7 @@ export function computeRouteCalendar(state: AppState, year: number, month: numbe
     const statusBreakdown = Array.from(statusCounts.entries())
       .map(([status, count]) => ({ status, count }))
       .sort((a, b) => b.count - a.count);
-    return { dayOrders, dayBatches, totalSales, cashExpected, transferTotal, prepaidTotal, vehicleCount, statusBreakdown };
+    return { dayOrders, dayBatches, totalSales, codTotal, prepaidTotal, vehicleCount, statusBreakdown };
   };
 
   const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -2559,7 +2546,7 @@ export function computeRouteCalendar(state: AppState, year: number, month: numbe
   for (let i = 0; i < totalCells; i++) {
     const d = new Date(year, month, 1 - firstWeekday + i);
     const key = dayKey(d);
-    const { dayOrders, dayBatches, totalSales, cashExpected, transferTotal, prepaidTotal, vehicleCount, statusBreakdown } = daySummary(key);
+    const { dayOrders, dayBatches, totalSales, codTotal, prepaidTotal, vehicleCount, statusBreakdown } = daySummary(key);
     allDays.push({
       dayKey: key,
       dayNum: d.getDate(),
@@ -2569,8 +2556,7 @@ export function computeRouteCalendar(state: AppState, year: number, month: numbe
       batchCount: dayBatches.length,
       hasData: dayOrders.length > 0 || dayBatches.length > 0,
       totalText: fmt(totalSales),
-      cashText: fmt(cashExpected),
-      transferText: fmt(transferTotal),
+      codText: fmt(codTotal),
       prepaidText: fmt(prepaidTotal),
       vehicleCount,
       statusSummaryText: statusBreakdown
@@ -2586,7 +2572,7 @@ export function computeRouteCalendar(state: AppState, year: number, month: numbe
   /** Full popup detail for one day, computed on demand (only when a day is
    * actually clicked) rather than for all ~35 cells up front. */
   const dayDetail = (key: string) => {
-    const { dayOrders, dayBatches, totalSales, cashExpected, transferTotal, prepaidTotal, vehicleCount, statusBreakdown } = daySummary(key);
+    const { dayOrders, dayBatches, totalSales, codTotal, prepaidTotal, vehicleCount, statusBreakdown } = daySummary(key);
     const unassignedCount = dayOrders.filter((o) => !assignedOrderNos.has(o.orderNo)).length;
     const d = dayKeyToDate(key);
     return {
@@ -2595,9 +2581,8 @@ export function computeRouteCalendar(state: AppState, year: number, month: numbe
       orderCount: dayOrders.length,
       unassignedCount,
       totalText: fmt(totalSales),
-      cashText: fmt(cashExpected),
-      transferText: fmt(transferTotal),
-      hasCod: cashExpected > 0 || transferTotal > 0,
+      codText: fmt(codTotal),
+      hasCod: codTotal > 0,
       prepaidText: fmt(prepaidTotal),
       hasPrepaid: prepaidTotal > 0,
       vehicleCount,

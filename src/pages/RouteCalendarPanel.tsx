@@ -83,8 +83,7 @@ export function RouteCalendarPanel({ state, actions }: { state: AppState; action
                       <>
                         <span style={{ fontSize: 10.5, color: 'var(--color-neutral-400)' }}>{d.orderCount} ออเดอร์ · {d.batchCount} batch</span>
                         <span style={{ fontSize: 10.5, color: 'var(--color-neutral-300)', fontVariantNumeric: 'tabular-nums' }}>{d.totalText}</span>
-                        <span style={{ fontSize: 9.5, color: 'var(--color-neutral-500)' }}>สด {d.cashText} · โอน {d.transferText}</span>
-                        <span style={{ fontSize: 9.5, color: 'var(--color-neutral-500)' }}>prepaid {d.prepaidText} · รถ {d.vehicleCount} คัน</span>
+                        <span style={{ fontSize: 9.5, color: 'var(--color-neutral-400)' }}>Prepaid {d.prepaidText} · COD {d.codText}</span>
                         {d.statusSummaryText && (
                           <span style={{ fontSize: 9.5, color: 'var(--color-neutral-500)', whiteSpace: 'normal', lineHeight: 1.3 }}>{d.statusSummaryText}</span>
                         )}
@@ -110,22 +109,16 @@ export function RouteCalendarPanel({ state, actions }: { state: AppState; action
                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                   <span style={{ color: 'var(--color-neutral-400)' }}>ยอดขายรวม</span><b style={{ fontVariantNumeric: 'tabular-nums' }}>{detail.totalText}</b>
                 </div>
-                {detail.hasCod && (
-                  <>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
-                      <span style={{ color: 'var(--color-neutral-500)' }}><i className="ph ph-money" style={{ marginRight: 4 }} />เงินสด (COD)</span>
-                      <span style={{ fontVariantNumeric: 'tabular-nums' }}>{detail.cashText}</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
-                      <span style={{ color: 'var(--color-neutral-500)' }}><i className="ph ph-bank" style={{ marginRight: 4 }} />โอน (COD)</span>
-                      <span style={{ fontVariantNumeric: 'tabular-nums' }}>{detail.transferText}</span>
-                    </div>
-                  </>
-                )}
                 {detail.hasPrepaid && (
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
-                    <span style={{ color: 'var(--color-neutral-500)' }} title="จ่ายล่วงหน้าผ่านระบบ Unii ก่อนหน้านี้แล้ว — ไม่ใช่เงินที่คนขับต้องเก็บ"><i className="ph ph-credit-card" style={{ marginRight: 4 }} />โอนจ่าย prepaid (ไม่ใช่ COD)</span>
+                    <span style={{ color: 'var(--color-neutral-400)' }}><i className="ph ph-credit-card" style={{ marginRight: 4 }} />Prepaid</span>
                     <span style={{ fontVariantNumeric: 'tabular-nums' }}>{detail.prepaidText}</span>
+                  </div>
+                )}
+                {detail.hasCod && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                    <span style={{ color: 'var(--color-neutral-400)' }}><i className="ph ph-money" style={{ marginRight: 4 }} />COD</span>
+                    <span style={{ fontVariantNumeric: 'tabular-nums' }}>{detail.codText}</span>
                   </div>
                 )}
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
