@@ -12,6 +12,48 @@ interface DragPayload {
 
 const DRAG_MIME = 'application/x-uflow-stop';
 
+function PhoneCallButton({ phone }: { phone: string }) {
+  const [copied, setCopied] = useState(false);
+  if (!phone || phone === '—' || phone === '-') {
+    return <span style={{ color: 'var(--color-neutral-600)', fontSize: 11.5 }}>—</span>;
+  }
+  return (
+    <a
+      href={`tel:${phone}`}
+      title={`เบอร์โทร: ${phone}\nคลิกเพื่อโทรออก หรือคัดลอกเบอร์`}
+      className="btn btn-ghost"
+      style={{
+        padding: '2px 8px',
+        fontSize: 11,
+        fontWeight: 600,
+        height: 'auto',
+        minHeight: 24,
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+        color: copied ? 'var(--st-ok-fg)' : 'var(--color-accent-400)',
+        background: copied ? 'var(--st-ok-bg)' : 'rgba(56, 189, 248, 0.08)',
+        border: `1px solid ${copied ? 'var(--st-ok-fg)' : 'rgba(56, 189, 248, 0.25)'}`,
+        borderRadius: 6,
+        whiteSpace: 'nowrap',
+        textDecoration: 'none',
+        cursor: 'pointer',
+      }}
+      onClick={(e) => {
+        navigator.clipboard?.writeText(phone);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+        if (!navigator.userAgent.match(/Android|iPhone|iPad|iPod/i)) {
+          e.preventDefault();
+        }
+      }}
+    >
+      <i className={copied ? 'ph ph-check' : 'ph ph-phone-call'} style={{ fontSize: 12 }} />
+      <span>{copied ? 'คัดลอกแล้ว' : 'โทร'}</span>
+    </a>
+  );
+}
+
 export function PlannerPage({ state, actions }: { state: AppState; actions: AppActions }) {
   const v = computePlanner(state, actions);
   const [dragOverVehicleId, setDragOverVehicleId] = useState<string | null>(null);
@@ -510,7 +552,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                     </th>
                     <th style={{ minWidth: 160 }}>ลูกค้า / ที่อยู่</th>
                     <th style={{ width: 110 }}>อำเภอ, จังหวัด</th>
-                    <th style={{ width: 95 }}>เบอร์โทร</th>
+                    <th style={{ width: 62, textAlign: 'center' }}>โทร</th>
                     <th style={{ width: 80 }}>ผู้จัด</th>
                     <th style={{ width: 82 }}>วันที่จะจัดส่ง</th>
                     <th style={{ width: 130 }}>หมายเหตุ</th>
@@ -596,7 +638,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                         </div>
                       </td>
                       <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', lineHeight: 1.45 }} title={o.districtProvince}>{o.districtProvince}</td>
-                      <td style={{ fontSize: 12, color: 'var(--color-neutral-400)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{o.phone}<CopyButton value={o.phone} label="เบอร์โทร" /></td>
+                      <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}><PhoneCallButton phone={o.phone} /></td>
                       <td style={{ fontSize: 11.5, color: o.packedBy === 'ยังไม่จัด' ? 'var(--color-neutral-600)' : 'var(--color-neutral-300)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 80 }} title={o.packedBy}>{o.packedBy}</td>
                       <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', whiteSpace: 'nowrap' }}>{o.plannedDeliveryDateText}</td>
                       <td style={{ fontSize: 11.5, color: o.hasNote ? 'var(--color-neutral-200)' : 'var(--color-neutral-600)', maxWidth: 130, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={o.hasNote ? o.note : undefined}>
