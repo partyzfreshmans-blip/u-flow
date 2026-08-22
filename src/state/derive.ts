@@ -128,14 +128,25 @@ function byNearestFirst(a: number | null, b: number | null): number {
  * coordinate/cache the zone matcher already reads, since that's more
  * accurate than whatever the sheet's own column carries; falls back to that
  * sheet column when no geocode is cached yet, then "-" if that's blank too. */
+function cleanDistrictProvinceText(text: string): string {
+  if (!text) return '';
+  return text
+    .split(/[,·/]/)
+    .map((part) => part.replace(/^(อำเภอ|อ\.|จังหวัด|จ\.)\s*/g, '').trim())
+    .filter(Boolean)
+    .join(', ');
+}
+
 function districtProvinceLabel(order: { lat: number | null; lng: number | null; districtProvince: string }, geocodeCache: GeocodeCache): string {
   if (order.lat != null && order.lng != null) {
     const entry = geocodeCache[coordKey(order.lat, order.lng)];
     if (entry && (entry.district.trim() || entry.province.trim())) {
-      return [entry.district.trim(), entry.province.trim()].filter(Boolean).join(', ');
+      const d = entry.district.replace(/^(อำเภอ|อ\.)\s*/g, '').trim();
+      const p = entry.province.replace(/^(จังหวัด|จ\.)\s*/g, '').trim();
+      return [d, p].filter(Boolean).join(', ');
     }
   }
-  return order.districtProvince.trim() || '-';
+  return cleanDistrictProvinceText(order.districtProvince.trim()) || '-';
 }
 
 /** Orders whose delivery date has already passed without reaching a done

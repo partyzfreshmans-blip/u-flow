@@ -25,7 +25,9 @@ export function joinRouteOrders(apiImportOrders: ApiImportOrder[], staffInfos: S
   const staffByUid = new Map(staffInfos.map((s) => [s.orderUid, s]));
   return apiImportOrders.map((o): RouteOrder => {
     const staff: StaffOrderInfo | undefined = staffByUid.get(o.orderUid);
-    const districtProvince = [o.district, o.province].filter(Boolean).join(', ');
+    const cleanDist = (o.district ?? '').replace(/^(อำเภอ|อ\.)\s*/g, '').trim();
+    const cleanProv = (o.province ?? '').replace(/^(จังหวัด|จ\.)\s*/g, '').trim();
+    const districtProvince = [cleanDist, cleanProv].filter(Boolean).join(', ');
     const mapLink = o.lat != null && o.lng != null ? `https://www.google.com/maps/search/?api=1&query=${o.lat},${o.lng}` : '';
     return {
       orderedAtText: o.orderedAt,
