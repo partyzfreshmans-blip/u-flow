@@ -1222,12 +1222,9 @@ export function computePlanner(state: AppState, actions: AppActions) {
     for (const o of candidates) {
       if (assignedTo.has(o.orderNo)) continue;
       if (effectiveDeliveryDayKey(o) === null) continue; // must have delivery date
-      const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
-      if (zone.zoneId === null || zone.route === '—') continue;
-      const target =
-        state.vehicles.find((v) => v.zoneNote.trim() !== '' && zone.zoneName.includes(v.zoneNote.trim())) ??
-        state.vehicles.find((v) => v.zoneNote.trim() !== '' && v.zoneNote.includes(zone.zoneName)) ??
-        state.vehicles.find((v) => v.loadPrefix.toUpperCase() === zone.route.toUpperCase());
+      const zone = pointZone(state.zones, o.lat, o.lng);
+      if (!zone.zoneId || !zone.vehicleId) continue;
+      const target = state.vehicles.find((v) => v.id === zone.vehicleId);
       if (!target || isVehicleLocked(target.id)) continue;
       defaultAutoAssigned.set(o.orderNo, target.id);
       assignedTo.set(o.orderNo, target.id);
@@ -1544,11 +1541,9 @@ export function computePlanner(state: AppState, actions: AppActions) {
           if (stuckDetachment != null) return `ตกหล่นจาก ${stuckDetachment.fromBatchId} · ${stuckDetachment.fromVehicleName} — รอจัดคิวใหม่`;
           const key = effectiveDeliveryDayKey(o);
           if (key !== null && key < today) return `ค้างส่งจากวันก่อนหน้า (${o.plannedDeliveryDate || key}) — รอจัดคิวใหม่`;
-          if (zone.zoneId === null || zone.route === '—') return 'อยู่นอกโซนจัดส่ง — ตรวจสอบพิกัดหรือที่อยู่';
-          const targetVeh =
-            state.vehicles.find((v) => v.zoneNote.trim() !== '' && zone.zoneName.includes(v.zoneNote.trim())) ??
-            state.vehicles.find((v) => v.zoneNote.trim() !== '' && v.zoneNote.includes(zone.zoneName)) ??
-            state.vehicles.find((v) => v.loadPrefix.toUpperCase() === zone.route.toUpperCase());
+          if (!zone.zoneId) return 'อยู่นอกโซนจัดส่ง — ตรวจสอบพิกัดหรือที่อยู่';
+          if (!zone.vehicleId) return `โซน ${zone.zoneName} ยังไม่ได้ผูกรถ — โปรดตั้งค่ารถในหน้าจัดการโซน`;
+          const targetVeh = state.vehicles.find((v) => v.id === zone.vehicleId);
           if (!targetVeh) return `ไม่มีรถที่รับผิดชอบโซน ${zone.zoneName} — โปรดตั้งค่ารถหรือจัดด้วยตนเอง`;
           if (isVehicleLocked(targetVeh.id)) return `รถประจำโซน (${targetVeh.name}) ล็อก Batch แล้ว — ปลดล็อกเพื่อเพิ่มออเดอร์`;
           if (booking) return `จองคิวโดย ${booking.driverUsername} — รอหัวหน้าคลังอนุมัติ`;
@@ -1559,18 +1554,16 @@ export function computePlanner(state: AppState, actions: AppActions) {
           if (stuckDetachment != null) return 'ตกหล่น';
           const key = effectiveDeliveryDayKey(o);
           if (key !== null && key < today) return 'ค้างส่ง';
-          if (zone.zoneId === null || zone.route === '—') return 'นอกโซน';
-          const targetVeh =
-            state.vehicles.find((v) => v.zoneNote.trim() !== '' && zone.zoneName.includes(v.zoneNote.trim())) ??
-            state.vehicles.find((v) => v.zoneNote.trim() !== '' && v.zoneNote.includes(zone.zoneName)) ??
-            state.vehicles.find((v) => v.loadPrefix.toUpperCase() === zone.route.toUpperCase());
+          if (!zone.zoneId) return 'นอกโซน';
+          if (!zone.vehicleId) return 'ยังไม่ผูกรถ';
+          const targetVeh = state.vehicles.find((v) => v.id === zone.vehicleId);
           if (!targetVeh) return 'ไม่มีรถ';
           if (isVehicleLocked(targetVeh.id)) return 'รถถูกล็อก';
           if (booking) return 'จองคิว';
           return 'ยังไม่จัด';
         })(),
         unassignedAlertLevel: (() => {
-          if (noDeliveryDate || zone.zoneId === null || zone.route === '—') return 'bad' as const;
+          if (noDeliveryDate || !zone.zoneId) return 'bad' as const;
           const key = effectiveDeliveryDayKey(o);
           if ((key !== null && key < today) || stuckDetachment != null) return 'bad' as const;
           return 'warn' as const;
@@ -1877,6 +1870,7 @@ export function computePlanner(state: AppState, actions: AppActions) {
       plan[target.id] = [...(plan[target.id] ?? []), o.orderNo];
       assignedCount++;
       touchedVehicleIds.add(target.id);
+    }
     actions.setRoutePlan(plan);
     if (assignedCount > 0) actions.logActivity('จัดอัตโนมัติตามโซน (วางแผนจัดรูท)', `จัดลงรถอัตโนมัติ ${assignedCount} ออเดอร์`);
     for (const id of touchedVehicleIds) {

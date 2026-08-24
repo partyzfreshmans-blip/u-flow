@@ -67,6 +67,7 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
   // Driver "จองคิว" — inline reject-with-reason UI for one row at a time,
   // rather than a separate modal (rejecting is rare enough not to need one).
   const [rejectingOrderNo, setRejectingOrderNo] = useState<string | null>(null);
+  const [rejectNote, setRejectNote] = useState('');
   // "ออเดอร์ค้าง/เลยกำหนด/นอกโซน" banner & filter
   const [attentionFilter, setAttentionFilter] = useState<'none' | 'no-date' | 'overdue' | 'out-of-zone'>('none');
   const [mapExpanded, setMapExpanded] = useState(false);
