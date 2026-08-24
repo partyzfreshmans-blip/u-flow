@@ -67,11 +67,8 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
   // Driver "จองคิว" — inline reject-with-reason UI for one row at a time,
   // rather than a separate modal (rejecting is rare enough not to need one).
   const [rejectingOrderNo, setRejectingOrderNo] = useState<string | null>(null);
-  const [rejectNote, setRejectNote] = useState('');
-  // "ออเดอร์ค้าง/เลยกำหนด" banner — clicking a count clears plannerDate (so
-  // every date's unassigned pool becomes visible, not just today's) and
-  // narrows the table below to just that flagged subset via this filter.
-  const [attentionFilter, setAttentionFilter] = useState<'none' | 'no-date' | 'overdue'>('none');
+  // "ออเดอร์ค้าง/เลยกำหนด/นอกโซน" banner & filter
+  const [attentionFilter, setAttentionFilter] = useState<'none' | 'no-date' | 'overdue' | 'out-of-zone'>('none');
   const [mapExpanded, setMapExpanded] = useState(false);
   const [mapSplitRatio, setMapSplitRatio] = useState<'normal' | 'large'>('large');
   const toggleVehicleOnMap = (vehicleId: string) =>
@@ -112,7 +109,14 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
   const mapStopsFiltered = v.mapStops.filter((s) => (s.vehicleId ? !hiddenVehicleIds.has(s.vehicleId) : showUnassignedOnMap));
   const vehicleRoutesFiltered = v.vehicleRoutes.filter((r) => !hiddenVehicleIds.has(r.vehicleId));
   const unassignedFiltered =
-    attentionFilter === 'none' ? v.unassigned : v.unassigned.filter((o) => (attentionFilter === 'no-date' ? o.noDeliveryDate : o.isOverdue));
+    attentionFilter === 'none'
+      ? v.unassigned
+      : v.unassigned.filter((o) => {
+          if (attentionFilter === 'no-date') return o.noDeliveryDate;
+          if (attentionFilter === 'overdue') return o.isOverdue || o.stuckDetached;
+          if (attentionFilter === 'out-of-zone') return !o.hasZone || o.unassignedTag === 'นอกโซน';
+          return true;
+        });
 
   return (
     <div>
@@ -221,7 +225,14 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
       {attentionFilter !== 'none' && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '9px 15px', marginBottom: 14, borderRadius: 10, background: 'var(--st-info-bg)', color: 'var(--st-info-fg)', fontSize: 12.5 }}>
           <i className="ph ph-funnel" style={{ flex: 'none' }} />
-          <span>กำลังกรองเฉพาะ{attentionFilter === 'no-date' ? 'ออเดอร์ที่ยังไม่กำหนดวันจัดส่ง' : 'ออเดอร์ที่เลยกำหนดส่งแล้วแต่ยังไม่สำเร็จ'}</span>
+          <span>
+            กำลังกรองเฉพาะ
+            {attentionFilter === 'no-date'
+              ? 'ออเดอร์ที่ยังไม่กำหนดวันจัดส่ง'
+              : attentionFilter === 'overdue'
+              ? 'ออเดอร์ที่เลยกำหนดส่ง / ตกหล่นจากวันก่อนหน้า'
+              : 'ออเดอร์ที่อยู่นอกโซนจัดส่ง'}
+          </span>
           <button className="btn btn-ghost" style={{ fontSize: 12, marginLeft: 'auto' }} onClick={() => setAttentionFilter('none')}><i className="ph ph-x" />ล้างตัวกรอง</button>
         </div>
       )}
@@ -636,6 +647,26 @@ export function PlannerPage({ state, actions }: { state: AppState; actions: AppA
                           {o.locationSource === 'override' && <i className="ph ph-map-pin-fill" style={{ color: 'var(--st-ok-fg)', marginRight: 3 }} />}
                           {o.address}
                         </div>
+                        {o.unassignedReason && (
+                          <div
+                            style={{
+                              marginTop: 5,
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 5,
+                              fontSize: 11,
+                              padding: '2px 8px',
+                              borderRadius: 6,
+                              background: o.unassignedAlertLevel === 'bad' ? 'var(--st-bad-bg)' : o.unassignedAlertLevel === 'warn' ? 'var(--st-warn-bg)' : 'var(--st-info-bg)',
+                              color: o.unassignedAlertLevel === 'bad' ? 'var(--st-bad-fg)' : o.unassignedAlertLevel === 'warn' ? 'var(--st-warn-fg)' : 'var(--st-info-fg)',
+                              fontWeight: 600,
+                              lineHeight: 1.4,
+                            }}
+                          >
+                            <i className={o.unassignedAlertLevel === 'bad' ? 'ph ph-warning-octagon' : o.unassignedAlertLevel === 'warn' ? 'ph ph-warning' : 'ph ph-info'} />
+                            <span>{o.unassignedReason}</span>
+                          </div>
+                        )}
                       </td>
                       <td style={{ fontSize: 11.5, color: 'var(--color-neutral-400)', lineHeight: 1.45 }} title={o.districtProvince}>{o.districtProvince}</td>
                       <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}><PhoneCallButton phone={o.phone} /></td>

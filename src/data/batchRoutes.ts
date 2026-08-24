@@ -10,6 +10,8 @@ export interface BatchRoute {
   id: string;
   vehicleId: string;
   vehicleName: string;
+  driverName?: string;
+  zoneNote?: string;
   /** ISO YYYY-MM-DD — the planner day this batch was assigned for. */
   deliveryDate: string;
   /** Locked delivery sequence — the source of truth for this batch's

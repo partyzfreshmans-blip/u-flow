@@ -980,7 +980,22 @@ export function useAppStore() {
    * "คนส่ง"-column write (clearOrStampCourier/stampCourierOrders) that used
    * to run alongside this is gone; this one call now does both. */
   function persistBatchRoutes(list: BatchRoute[]) {
-    dispatch({ type: 'patch', patch: { batchRoutes: list } });
+    const stampByOrderNo = new Map<string, string>();
+    for (const b of list) {
+      if (b.cancelled) continue;
+      const driver = b.driverName || '';
+      const zone = b.zoneNote || '';
+      const date = b.deliveryDate || '';
+      const stamp = [driver || '(ไม่ระบุคนขับ)', b.vehicleName || '(ไม่ระบุรถ)', zone || '(ทุกโซน)', date || '(ไม่ระบุวัน)'].join('-');
+      for (const orderNo of b.orderNos) {
+        stampByOrderNo.set(orderNo, stamp);
+      }
+    }
+    const updatedRouteOrders = state.routeOrders.map((o) => {
+      const stamp = stampByOrderNo.get(o.orderNo);
+      return stamp ? { ...o, courierStamp: stamp } : o;
+    });
+    dispatch({ type: 'patch', patch: { batchRoutes: list, routeOrders: updatedRouteOrders } });
     saveBatchRoutes(list);
     const session = loadSession();
     if (!session) return;

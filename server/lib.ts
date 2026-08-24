@@ -930,6 +930,21 @@ export async function handleListBatchRoutes(token: string | null): Promise<ApiRe
  * deliberately stricter than trusting the client, since this endpoint is the
  * one place a compromised or buggy driver session could otherwise rewrite
  * someone else's route. */
+/** Format: [ชื่อคนขับ]-[ชื่อรถ]-[โซน]-[วันจัดส่ง] */
+export function formatCourierRouteCode(driver: string, vehicle: string, zone: string, date: string): string {
+  const d = (driver || '').trim() || '(ไม่ระบุคนขับ)';
+  const v = (vehicle || '').trim() || '(ไม่ระบุรถ)';
+  const z = (zone || '').trim() || '(ทุกโซน)';
+  const dt = (date || '').trim() || '(ไม่ระบุวัน)';
+  return `${d}-${v}-${z}-${dt}`;
+}
+
+function assertWritableColumn(col: number, headerName: string): void {
+  if (STAFF_READONLY_HEADERS.has(headerName)) {
+    throw new Error(`คอลัมน์ "${headerName}" (คอลัมน์ ${columnLetter(col)}) ถูกล็อกเป็น read-only ห้ามเขียนทับ`);
+  }
+}
+
 export async function handleUpsertBatchRoutes(token: string | null, body: unknown): Promise<ApiResult> {
   const payload = verifySessionToken(token);
   if (!payload) return { status: 401, body: { error: 'ต้องเข้าสู่ระบบก่อน' } };
@@ -940,7 +955,7 @@ export async function handleUpsertBatchRoutes(token: string | null, body: unknow
   const { batchRoutes } = (body ?? {}) as Record<string, unknown>;
   if (!Array.isArray(batchRoutes)) return { status: 400, body: { error: 'ต้องระบุ batchRoutes เป็น array' } };
 
-  const incoming: Omit<BatchRouteRecord, 'rowIndex'>[] = [];
+  const incoming: (Omit<BatchRouteRecord, 'rowIndex'> & { driverName?: string; zoneNote?: string })[] = [];
   for (const raw of batchRoutes) {
     const b = (raw ?? {}) as Record<string, unknown>;
     if (typeof b.id !== 'string' || !b.id.trim()) return { status: 400, body: { error: 'batchRoutes ทุกรายการต้องมี id' } };
@@ -948,6 +963,8 @@ export async function handleUpsertBatchRoutes(token: string | null, body: unknow
       id: b.id.trim(),
       vehicleId: typeof b.vehicleId === 'string' ? b.vehicleId : '',
       vehicleName: typeof b.vehicleName === 'string' ? b.vehicleName : '',
+      driverName: typeof b.driverName === 'string' ? b.driverName : undefined,
+      zoneNote: typeof b.zoneNote === 'string' ? b.zoneNote : undefined,
       deliveryDate: typeof b.deliveryDate === 'string' ? b.deliveryDate : '',
       orderNos: Array.isArray(b.orderNos) ? b.orderNos.filter((n): n is string => typeof n === 'string') : [],
       createdAt: typeof b.createdAt === 'string' ? b.createdAt : '',
@@ -1018,6 +1035,90 @@ export async function handleUpsertBatchRoutes(token: string | null, body: unknow
         insertDataOption: 'INSERT_ROWS',
         requestBody: { values: appends },
       });
+    }
+
+    // Transactionally reconcile affected orders in "คำสั่งซื้อ VS" (Tab: routeOrders)
+    // with Route, BATCH ROUTE, courier stamp (ชื่อ-รถ-โซน-วัน), and วันที่ Assign
+    if (isRouteOrdersTabConfigured()) {
+      try {
+        const title = await resolveSheetTitle(sheets, ROUTE_ORDERS_GID);
+        const res = await sheets.spreadsheets.values.get({ spreadsheetId: MAIN_SHEET_ID, range: `${title}!A:Z` });
+        const rows = res.data.values ?? [];
+        if (rows.length > 0) {
+          const header = rows[0] ?? [];
+          const headerAt = (name: string) => header.findIndex((h) => String(h ?? '').trim() === name);
+          const uidCol = headerAt(STAFF_ORDER_UID_HEADER);
+          const routeCol = headerAt(STAFF_ROUTE_HEADER);
+          const batchRouteCol = headerAt(STAFF_BATCH_ROUTE_HEADER);
+          const courierCol = headerAt(STAFF_COURIER_HEADER);
+          const assignDateCol = headerAt(STAFF_ASSIGN_DATE_HEADER);
+
+          if (uidCol !== -1 && routeCol !== -1 && batchRouteCol !== -1 && courierCol !== -1 && assignDateCol !== -1) {
+            assertWritableColumn(routeCol, STAFF_ROUTE_HEADER);
+            assertWritableColumn(batchRouteCol, STAFF_BATCH_ROUTE_HEADER);
+            assertWritableColumn(courierCol, STAFF_COURIER_HEADER);
+            assertWritableColumn(assignDateCol, STAFF_ASSIGN_DATE_HEADER);
+
+            const users = await readUsers(sheets);
+            const driverByVehicle = new Map<string, string>();
+            for (const u of users) {
+              if (u.active && u.role === 'driver' && u.driverVehicleId) {
+                driverByVehicle.set(u.driverVehicleId, u.username.trim());
+              }
+            }
+
+            const rowsByUid = new Map<string, number>();
+            for (let i = 1; i < rows.length; i++) {
+              const uid = String(rows[i]?.[uidCol] ?? '').trim();
+              if (uid && !rowsByUid.has(uid)) rowsByUid.set(uid, i + 1);
+            }
+
+            const cellWrites: { range: string; values: string[][] }[] = [];
+            const assignStamp = nowSheetDateTime();
+
+            for (const b of incoming) {
+              const driverName = b.driverName || driverByVehicle.get(b.vehicleId) || '';
+              const zoneText = b.zoneNote || '';
+              let dateText = b.deliveryDate;
+              try {
+                if (b.deliveryDate && b.deliveryDate.includes('-')) {
+                  dateText = isoToSheetDate(b.deliveryDate);
+                }
+              } catch {
+                dateText = b.deliveryDate;
+              }
+              const courierCode = formatCourierRouteCode(driverName, b.vehicleName, zoneText, dateText);
+
+              for (const orderNo of b.orderNos) {
+                const targetRow = rowsByUid.get(orderNo);
+                if (targetRow != null) {
+                  if (b.cancelled) {
+                    cellWrites.push({ range: `${title}!${columnLetter(routeCol)}${targetRow}`, values: [['']] });
+                    cellWrites.push({ range: `${title}!${columnLetter(batchRouteCol)}${targetRow}`, values: [['']] });
+                    cellWrites.push({ range: `${title}!${columnLetter(courierCol)}${targetRow}`, values: [['']] });
+                    cellWrites.push({ range: `${title}!${columnLetter(assignDateCol)}${targetRow}`, values: [['']] });
+                  } else {
+                    cellWrites.push({ range: `${title}!${columnLetter(routeCol)}${targetRow}`, values: [[b.vehicleName]] });
+                    cellWrites.push({ range: `${title}!${columnLetter(batchRouteCol)}${targetRow}`, values: [[b.id]] });
+                    cellWrites.push({ range: `${title}!${columnLetter(courierCol)}${targetRow}`, values: [[courierCode]] });
+                    cellWrites.push({ range: `${title}!${columnLetter(assignDateCol)}${targetRow}`, values: [[assignStamp]] });
+                  }
+                }
+              }
+            }
+
+            if (cellWrites.length > 0) {
+              await sheets.spreadsheets.values.batchUpdate({
+                spreadsheetId: MAIN_SHEET_ID,
+                requestBody: { valueInputOption: 'RAW', data: cellWrites },
+              });
+              staffOrderInfoRowsCache.invalidate();
+            }
+          }
+        }
+      } catch (orderUpdateErr) {
+        console.error('[batch-routes/upsert] error reconciling route-orders sheet:', orderUpdateErr);
+      }
     }
 
     return { status: 200, body: { ok: true } };
@@ -3032,9 +3133,10 @@ export async function handleUpdateRouteOrder(token: string | null, body: unknown
     if (typeof wantsTaxInvoice === 'boolean') writes.set(taxInvoiceCol, wantsTaxInvoice ? 'ใช่' : 'ไม่ใช่');
     if (typeof archived === 'boolean') writes.set(archivedCol, archived ? 'ใช่' : '');
     if (wantsCourierStamp) {
+      const courierCode = formatCourierRouteCode(courierUsername, courierVehicleName as string, '', sheetDate || '');
       writes.set(routeCol, courierVehicleName as string);
       writes.set(batchRouteCol, courierBatchId as string);
-      writes.set(courierCol, courierUsername);
+      writes.set(courierCol, courierCode);
       writes.set(assignDateCol, nowSheetDateTime());
     }
     if (clearCourierStamp === true) {
@@ -3367,9 +3469,10 @@ export async function handleBulkUpdateRouteOrders(token: string | null, body: un
         } else if (bulkAction === 'archive') {
           writes.set(archivedCol, archivedValue ? 'ใช่' : '');
         } else if (bulkAction === 'assign') {
+          const courierCode = formatCourierRouteCode(courierUsername, courierVehicleName, '', assignStamp.split(' ')[0] || '');
           writes.set(routeCol, courierVehicleName);
           writes.set(batchRouteCol, courierBatchId);
-          writes.set(courierCol, courierUsername);
+          writes.set(courierCol, courierCode);
           writes.set(assignDateCol, assignStamp);
         }
 

@@ -1181,40 +1181,6 @@ export function computePlanner(state: AppState, actions: AppActions) {
     actions.logActivity('แก้ไข Batch Route', `${b.id} · ${desc}`);
   };
 
-  /** A vehicle's true current stop list for the selected date: the active
-   * batch's own frozen orderNos when one exists (authoritative even if
-   * routePlan has since gone stale), otherwise routePlan's live draft with
-   * anything already promoted into some other batch filtered back out — see
-   * filterOutBatchedOrderNos. This is the one place "what does this vehicle
-   * show right now" gets decided; every read/write site below goes through
-   * it so a batch's stops can never leak into a different date again. */
-  const currentOrderNos = (vehicleId: string): string[] => {
-    const b = activeBatchByVehicle.get(vehicleId);
-    if (b && b.locked && !state.batchRouteUnlocked[b.id]) {
-      // If the batch has real orders, return them; if it is an empty batch (0 orders) but routePlan has draft orders, prefer routePlan
-      if (b.orderNos.length > 0) return b.orderNos;
-      if (state.routePlan[vehicleId] && state.routePlan[vehicleId].length > 0) {
-        return filterOutBatchedOrderNos(state.routePlan[vehicleId], state.batchRoutes);
-      }
-      return [];
-    }
-    if (b && state.batchRouteUnlocked[b.id]) {
-      if (state.routePlan[vehicleId] && state.routePlan[vehicleId].length > 0) {
-        return state.routePlan[vehicleId];
-      }
-      return b.orderNos;
-    }
-    return filterOutBatchedOrderNos(state.routePlan[vehicleId] ?? [], state.batchRoutes);
-  };
-  /** Writes a single vehicle's new order list to whichever store currently
-   * owns it: routePlan for a vehicle with no active batch on this date (the
-   * ordinary pre-assign draft), or nothing at all when a batch already owns
-   * it — syncBatchAfterEdit (called separately by every caller) is what
-   * updates the batch itself in that case, and writing routePlan too would
-   * just recreate the stale-leftover-entry leak this exists to prevent. */
-  const applyVehicleOrderNos = (vehicleId: string, next: string[]) => {
-    actions.setRoutePlan({ ...state.routePlan, [vehicleId]: next });
-  };
 
   // Customer-corrected coordinates always win over the raw CS_Lat/CS_Long
   // from Unii (see src/data/customerLocation.ts) — resolved once here so map
@@ -1247,6 +1213,53 @@ export function computePlanner(state: AppState, actions: AppActions) {
     if (b.cancelled) continue;
     for (const no of b.orderNos) if (!assignedTo.has(no)) assignedTo.set(no, b.vehicleId);
   }
+
+  // Default auto-assignment by zone:
+  // Automatically drafts unassigned candidate orders into matching vehicles by zone
+  // Strictly preserves intake order without auto-sorting (Invariant 3)
+  const defaultAutoAssigned = new Map<string, string>(); // orderNo -> vehicleId
+  if (state.plannerDate && canEdit) {
+    for (const o of candidates) {
+      if (assignedTo.has(o.orderNo)) continue;
+      if (effectiveDeliveryDayKey(o) === null) continue; // must have delivery date
+      const zone = resolveZone(state.zoneRules, o, state.geocodeCache);
+      if (zone.zoneId === null || zone.route === '—') continue;
+      const target =
+        state.vehicles.find((v) => v.zoneNote.trim() !== '' && zone.zoneName.includes(v.zoneNote.trim())) ??
+        state.vehicles.find((v) => v.zoneNote.trim() !== '' && v.zoneNote.includes(zone.zoneName)) ??
+        state.vehicles.find((v) => v.loadPrefix.toUpperCase() === zone.route.toUpperCase());
+      if (!target || isVehicleLocked(target.id)) continue;
+      defaultAutoAssigned.set(o.orderNo, target.id);
+      assignedTo.set(o.orderNo, target.id);
+    }
+  }
+
+  /** A vehicle's true current stop list for the selected date: the active
+   * batch's own frozen orderNos when one exists (authoritative even if
+   * routePlan has since gone stale), otherwise routePlan's live draft with
+   * anything already promoted into some other batch filtered back out plus
+   * any default auto-assigned candidate orders for this date. */
+  const currentOrderNos = (vehicleId: string): string[] => {
+    const b = activeBatchByVehicle.get(vehicleId);
+    if (b) return b.orderNos;
+    const explicit = filterOutBatchedOrderNos(state.routePlan[vehicleId] ?? [], state.batchRoutes);
+    const autoForVeh: string[] = [];
+    for (const [orderNo, targetVehId] of defaultAutoAssigned) {
+      if (targetVehId === vehicleId && !explicit.includes(orderNo)) {
+        autoForVeh.push(orderNo);
+      }
+    }
+    return [...explicit, ...autoForVeh];
+  };
+
+  /** Writes a single vehicle's new order list to whichever store currently
+   * owns it: routePlan for a vehicle with no active batch on this date (the
+   * ordinary pre-assign draft), or nothing at all when a batch already owns
+   * it — syncBatchAfterEdit (called separately by every caller) is what
+   * updates the batch itself in that case. */
+  const applyVehicleOrderNos = (vehicleId: string, next: string[]) => {
+    if (!activeBatchByVehicle.get(vehicleId)) actions.setRoutePlan({ ...state.routePlan, [vehicleId]: next });
+  };
 
   // "ออเดอร์ค้าง/เลยกำหนด" banner — deliberately scoped to the same
   // not-yet-assigned pool as the unassigned table below (not every
@@ -1525,6 +1538,42 @@ export function computePlanner(state: AppState, actions: AppActions) {
         isOverdue: (() => {
           const key = effectiveDeliveryDayKey(o);
           return key !== null && key < today;
+        })(),
+        unassignedReason: (() => {
+          if (noDeliveryDate) return 'ยังไม่ระบุวันจัดส่ง — กำหนดวันจัดส่งก่อนจัดลงรถ';
+          if (stuckDetachment != null) return `ตกหล่นจาก ${stuckDetachment.fromBatchId} · ${stuckDetachment.fromVehicleName} — รอจัดคิวใหม่`;
+          const key = effectiveDeliveryDayKey(o);
+          if (key !== null && key < today) return `ค้างส่งจากวันก่อนหน้า (${o.plannedDeliveryDate || key}) — รอจัดคิวใหม่`;
+          if (zone.zoneId === null || zone.route === '—') return 'อยู่นอกโซนจัดส่ง — ตรวจสอบพิกัดหรือที่อยู่';
+          const targetVeh =
+            state.vehicles.find((v) => v.zoneNote.trim() !== '' && zone.zoneName.includes(v.zoneNote.trim())) ??
+            state.vehicles.find((v) => v.zoneNote.trim() !== '' && v.zoneNote.includes(zone.zoneName)) ??
+            state.vehicles.find((v) => v.loadPrefix.toUpperCase() === zone.route.toUpperCase());
+          if (!targetVeh) return `ไม่มีรถที่รับผิดชอบโซน ${zone.zoneName} — โปรดตั้งค่ารถหรือจัดด้วยตนเอง`;
+          if (isVehicleLocked(targetVeh.id)) return `รถประจำโซน (${targetVeh.name}) ล็อก Batch แล้ว — ปลดล็อกเพื่อเพิ่มออเดอร์`;
+          if (booking) return `จองคิวโดย ${booking.driverUsername} — รอหัวหน้าคลังอนุมัติ`;
+          return 'รอจัดลงรถ';
+        })(),
+        unassignedTag: (() => {
+          if (noDeliveryDate) return 'ไม่มีวันส่ง';
+          if (stuckDetachment != null) return 'ตกหล่น';
+          const key = effectiveDeliveryDayKey(o);
+          if (key !== null && key < today) return 'ค้างส่ง';
+          if (zone.zoneId === null || zone.route === '—') return 'นอกโซน';
+          const targetVeh =
+            state.vehicles.find((v) => v.zoneNote.trim() !== '' && zone.zoneName.includes(v.zoneNote.trim())) ??
+            state.vehicles.find((v) => v.zoneNote.trim() !== '' && v.zoneNote.includes(zone.zoneName)) ??
+            state.vehicles.find((v) => v.loadPrefix.toUpperCase() === zone.route.toUpperCase());
+          if (!targetVeh) return 'ไม่มีรถ';
+          if (isVehicleLocked(targetVeh.id)) return 'รถถูกล็อก';
+          if (booking) return 'จองคิว';
+          return 'ยังไม่จัด';
+        })(),
+        unassignedAlertLevel: (() => {
+          if (noDeliveryDate || zone.zoneId === null || zone.route === '—') return 'bad' as const;
+          const key = effectiveDeliveryDayKey(o);
+          if ((key !== null && key < today) || stuckDetachment != null) return 'bad' as const;
+          return 'warn' as const;
         })(),
       };
     })
@@ -1828,9 +1877,6 @@ export function computePlanner(state: AppState, actions: AppActions) {
       plan[target.id] = [...(plan[target.id] ?? []), o.orderNo];
       assignedCount++;
       touchedVehicleIds.add(target.id);
-    }
-    // INVARIANT #3: ห้ามมี auto-sequencing ของลำดับจุดส่งภายในรูท — คนขับ/หัวหน้าจัดลำดับเอง
-    // auto-assign ทำได้แค่ "จัดเข้ารถไหน" ห้ามใส่ sort กลับเข้ามาเด็ดขาด
     actions.setRoutePlan(plan);
     if (assignedCount > 0) actions.logActivity('จัดอัตโนมัติตามโซน (วางแผนจัดรูท)', `จัดลงรถอัตโนมัติ ${assignedCount} ออเดอร์`);
     for (const id of touchedVehicleIds) {
@@ -1855,10 +1901,15 @@ export function computePlanner(state: AppState, actions: AppActions) {
       const vehicleOrderNos = rawDraft.length > 0 ? rawDraft : currentOrderNos(vehicleId);
       if (vehicleOrderNos.length === 0) continue;
 
+      const driver = state.users.find((u) => u.active && u.role === 'driver' && u.driverVehicleId === veh.id);
+      const driverName = driver?.username || '';
+
       const existingBatch = activeBatchByVehicle.get(vehicleId);
       if (existingBatch && (existingBatch.orderNos.length === 0 || state.batchRouteUnlocked[existingBatch.id])) {
         const updated: BatchRoute = {
           ...existingBatch,
+          driverName,
+          zoneNote: veh.zoneNote,
           orderNos: [...vehicleOrderNos],
           updatedAt: now,
           updatedBy: username,
@@ -1872,6 +1923,8 @@ export function computePlanner(state: AppState, actions: AppActions) {
           id,
           vehicleId,
           vehicleName: veh.name,
+          driverName,
+          zoneNote: veh.zoneNote,
           deliveryDate: state.plannerDate,
           orderNos: [...vehicleOrderNos],
           createdAt: now,
