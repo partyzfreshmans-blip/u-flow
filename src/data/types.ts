@@ -154,11 +154,8 @@ export interface ApiImportOrder {
   distanceFromWhKm: number | null;
   whLat: number | null;
   whLng: number | null;
-  /** The complete order object exactly as Unii's API returned it, including
-   * every field not named above. The single guarantee this design is built
-   * around: nothing Unii sends is ever silently dropped, whether or not the
-   * app has a typed field for it yet. */
-  raw: Record<string, unknown>;
+  /** Optional raw order dictionary if provided. */
+  raw?: Record<string, unknown>;
 }
 
 // ---------- "คำสั่งซื้อ VS" tab: ONLY what staff enter through this app's own

@@ -15,5 +15,8 @@ export function sendResult(res: ApiResponse, result: ApiResult | FileResult): vo
     res.status(result.status).end(result.buffer);
     return;
   }
+  if (result.status === 200 && !res.getHeader('Cache-Control')) {
+    res.setHeader('Cache-Control', 'public, max-age=20, stale-while-revalidate=40');
+  }
   res.status(result.status).json(result.body);
 }

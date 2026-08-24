@@ -4,7 +4,8 @@ import { fetchCsMasterCustomers } from '../data/sources/csMaster';
 import { updateCsMasterLatLng } from '../data/sources/csMasterWrite';
 import { avgPricePerPiece, fetchPromotions, formatPackUnitsTerm, formatTiersTerm } from '../data/sources/promotionsSheet';
 import { upsertPromotion } from '../data/sources/promotionsWrite';
-import { fetchRouteOrders } from '../data/sources/routeOrders';
+import { fetchRouteOrders, joinRouteOrders } from '../data/sources/routeOrders';
+import { fetchStaffOrderInfo } from '../data/sources/staffOrderInfo';
 import { fetchAllOrderLineItems, fetchOrderLineItems, fetchOrderLineItemsForOrders } from '../data/sources/skuDetail';
 import { linkLineItemPromo as apiLinkLineItemPromo } from '../data/sources/skuDetailWrite';
 import { fetchSkusFromSheet } from '../data/sources/skuSheet';
@@ -1154,62 +1155,61 @@ export function useAppStore() {
   // to hit the manual "Sync" button. A `stale: true` result means the
   // backend's live read failed and it served its last-known-good cache
   // instead — not an error, just a small warning banner.
+  // Orders (API Import + คำสั่งซื้อ VS combined into routeOrders & apiOrders)
+  // Unified single fetch with visibility-aware polling to minimize bandwidth.
   useEffect(() => {
     if (!state.session) return;
     let cancelled = false;
     const load = () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       const session = loadSession();
       if (!session) return;
-      fetchApiImportOrders(session)
-        .then(({ orders, stale, error }) => {
-          if (!cancelled) {
-            dispatch({ type: 'patch', patch: { apiOrders: orders, apiOrdersLoading: false, apiOrdersError: null, apiOrdersStale: stale } });
-            noteNewOrders(orders);
-            if (stale && error) recordSyncFailure('ออเดอร์ใหม่ (API Import)', error);
-            else recordSyncSuccess();
-          }
+      Promise.all([fetchApiImportOrders(session), fetchStaffOrderInfo(session)])
+        .then(([apiImportResult, staffInfos]) => {
+          if (cancelled) return;
+          const { orders, stale, error } = apiImportResult;
+          const routeOrders = joinRouteOrders(orders, staffInfos);
+          dispatch({
+            type: 'patch',
+            patch: {
+              apiOrders: orders,
+              apiOrdersLoading: false,
+              apiOrdersError: null,
+              apiOrdersStale: stale,
+              routeOrders,
+              routeOrdersLoading: false,
+              routeOrdersError: null,
+            },
+          });
+          noteNewOrders(orders);
+          if (stale && error) recordSyncFailure('ออเดอร์ใหม่ (API Import)', error);
+          else recordSyncSuccess();
         })
         .catch((err: unknown) => {
-          if (!cancelled) {
-            const message = err instanceof Error ? err.message : 'โหลดออเดอร์ใหม่ไม่สำเร็จ';
-            dispatch({ type: 'patch', patch: { apiOrdersLoading: false, apiOrdersError: message } });
-            recordSyncFailure('ออเดอร์ใหม่ (API Import)', message);
-          }
+          if (cancelled) return;
+          const message = err instanceof Error ? err.message : 'โหลดข้อมูลออเดอร์ไม่สำเร็จ';
+          dispatch({
+            type: 'patch',
+            patch: {
+              apiOrdersLoading: false,
+              apiOrdersError: message,
+              routeOrdersLoading: false,
+              routeOrdersError: message,
+            },
+          });
+          recordSyncFailure('ออเดอร์', message);
         });
     };
     load();
-    const interval = setInterval(load, 45000);
+    const interval = setInterval(load, 90000);
+    const onVisibilityChange = () => {
+      if (!document.hidden) load();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
       cancelled = true;
       clearInterval(interval);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.session?.username]);
-
-  // Route orders: the runtime join of API Import (read through this app's
-  // authenticated backend, see apiImportOrders.ts) + คำสั่งซื้อ VS (a public
-  // CSV export) — see src/data/sources/routeOrders.ts. Gated on
-  // state.session so it fires right after login, same as every other data
-  // source here.
-  useEffect(() => {
-    if (!state.session) return;
-    let cancelled = false;
-    fetchRouteOrders(loadSession())
-      .then((routeOrders) => {
-        if (!cancelled) {
-          dispatch({ type: 'patch', patch: { routeOrders, routeOrdersLoading: false, routeOrdersError: null } });
-          recordSyncSuccess();
-        }
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          const message = err instanceof Error ? err.message : 'โหลดข้อมูลเส้นทาง/ประวัติการจัดส่งไม่สำเร็จ';
-          dispatch({ type: 'patch', patch: { routeOrdersLoading: false, routeOrdersError: message } });
-          recordSyncFailure('ออเดอร์/คำสั่งซื้อ', message);
-        }
-      });
-    return () => {
-      cancelled = true;
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.session?.username]);
@@ -1433,16 +1433,12 @@ export function useAppStore() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Driver stop bookings ("จองคิว") — there's no push/websocket infra here,
-  // so "real-time" locking is really "refetch the shared Bookings tab often
-  // enough that a lock another driver just placed shows up within one tick."
-  // Polls whenever someone's logged in (both the driver's own booking picker
-  // and the Planner's booking badges/confirm-reject read off the same
-  // state.bookings), same interval-based pattern as the driver sync queue above.
+  // Driver stop bookings ("จองคิว") — visibility-aware 30s polling
   useEffect(() => {
     if (!state.session) return;
     let cancelled = false;
     const load = () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       const session = loadSession();
       if (!session) return;
       apiFetchBookings(session)
@@ -1454,23 +1450,25 @@ export function useAppStore() {
         });
     };
     load();
-    const interval = setInterval(load, 15000);
+    const interval = setInterval(load, 30000);
+    const onVisibilityChange = () => {
+      if (!document.hidden) load();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
       cancelled = true;
       clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.session?.username]);
 
-  // Batch Routes — same polling reasoning as bookings above: this is what
-  // lets a driver's own phone (a different device than whichever admin ran
-  // "ยืนยันรูท (Assign)") see that vehicle's assigned dates at all, since the
-  // localStorage cache alone would otherwise only ever hold whatever was
-  // last assigned FROM this exact browser.
+  // Batch Routes — visibility-aware 30s polling
   useEffect(() => {
     if (!state.session) return;
     let cancelled = false;
     const load = () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       const session = loadSession();
       if (!session) return;
       apiFetchBatchRoutes(session)
@@ -1484,10 +1482,15 @@ export function useAppStore() {
         });
     };
     load();
-    const interval = setInterval(load, 15000);
+    const interval = setInterval(load, 30000);
+    const onVisibilityChange = () => {
+      if (!document.hidden) load();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
       cancelled = true;
       clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.session?.username]);

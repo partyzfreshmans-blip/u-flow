@@ -1389,7 +1389,6 @@ function rowsToApiImportOrders(rows: unknown[][]): ApiImportOrderShape[] {
       distanceFromWhKm: apiImportToLatLng(raw['far_from_wh']),
       whLat: apiImportToLatLng(raw['wh_lat']),
       whLng: apiImportToLatLng(raw['wh_long']),
-      raw,
     });
   }
   return out;
@@ -1422,7 +1421,7 @@ interface ApiImportOrderShape {
   distanceFromWhKm: number | null;
   whLat: number | null;
   whLng: number | null;
-  raw: Record<string, unknown>;
+  raw?: Record<string, unknown>;
 }
 
 const apiImportOrdersCache = makeSheetCache<ApiImportOrderShape[]>();

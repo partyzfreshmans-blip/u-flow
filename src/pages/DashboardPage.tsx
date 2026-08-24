@@ -95,7 +95,7 @@ function DashboardTable({ rows, canViewRawDebug }: { rows: DashboardRow[]; canVi
                         wordBreak: 'break-all',
                       }}
                     >
-                      {JSON.stringify(o.raw, null, 2)}
+                      {JSON.stringify(o.raw ?? o, null, 2)}
                     </pre>
                   </td>
                 </tr>
